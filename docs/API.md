@@ -125,9 +125,17 @@ Start a swap as taker against a maker.
   "observer": {
     "btc": ["Taproot output 0.0041 BTC (2 script leaves, internal key unspendable)", "…"],
     "zec": ["Ironwood action (amount, sender, receiver encrypted)", "…"]
-  }
+  },
+  "watchtower": { "url": "http://…", "status": "pending|armed|refused", "package_id": "hex|null",
+                  "note": "Human-readable sentence", "next_try_ms": 0 }   // null without --watchtower
 }
 ```
+
+`watchtower` is our package at a [watchtower](WATCHTOWER.md) (`ferryd --watchtower URL`). It is
+`pending` until tx_cancel is co-signed and the upload succeeds (failed uploads retry every 10 s),
+then `armed`, with a `watchtower_armed` timeline entry. It is `refused` when the tower rejected the
+package, or when B runs without `--watchtower-own`; `note` says why, and the timeline has a
+`watchtower_refused` entry.
 
 `observer` lists what a public chain observer can see for this swap, one line per transaction.
 It is what the UI's "what each chain sees" panel renders. A line may start with a short transaction

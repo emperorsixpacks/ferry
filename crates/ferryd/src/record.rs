@@ -125,6 +125,9 @@ pub struct SwapRecord {
     /// What a chain observer sees, keyed by transaction kind.
     pub observer_btc: Vec<(String, String)>,
     pub observer_zec: Vec<(String, String)>,
+    /// Our package at the watchtower (--watchtower), if one is configured.
+    #[serde(default)]
+    pub watchtower: Option<crate::tower::TowerState>,
 }
 
 impl SwapRecord {
@@ -167,6 +170,7 @@ impl SwapRecord {
             zec_joint,
             observer_btc: vec![],
             observer_zec: vec![],
+            watchtower: None,
         }
     }
 

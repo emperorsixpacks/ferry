@@ -315,6 +315,7 @@ impl World {
             out.push(ChainEvent::ZecNoteSeen {
                 value: note.value,
                 confs: note.confirmations,
+                spent: note.spent_by.is_some(),
             });
         }
         if let Some(txid) = &self.sweep_txid[idx(role)] {

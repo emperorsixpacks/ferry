@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ArrowCounterClockwise, Check, CheckCircle, CircleNotch, Clock, Lock, Warning } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, Check, CheckCircle, CircleNotch, Clock, Lock, ShieldCheck, ShieldSlash, Warning } from "@phosphor-icons/react";
 import type { Status, SwapView } from "@/api";
 import { Link } from "@/router";
 import { btcText } from "@/swap/shared";
@@ -42,7 +42,10 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
           <h1 className="text-3xl font-bold tracking-tight text-slate-900">Swap</h1>
           <CopyText value={swap.id} truncate={false} className="mt-1" />
         </div>
-        <StatusBadge variant={st.tone}>{st.label}</StatusBadge>
+        <div className="flex flex-wrap items-center gap-2">
+          <TowerBadge swap={swap} />
+          <StatusBadge variant={st.tone}>{st.label}</StatusBadge>
+        </div>
       </div>
 
       {live ? (
@@ -59,7 +62,9 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
               ? "Your wallet couldn't send the ZEC from shielded notes only, so no ZEC moved. The other side takes its bitcoin back after the deadline."
               : phase === "unwinding"
                 ? "The swap didn't finish in time, so it was called off. The ways back were signed before anything was locked."
-                : "Both ways back were signed before anything was locked. Keep this daemon running until the swap is done."}
+                : swap.watchtower?.status === "armed"
+                  ? "Both ways back were signed before anything was locked. A watchtower holds them too, so the deadlines are met even if this daemon goes offline."
+                  : "Both ways back were signed before anything was locked. Keep this daemon running until the swap is done."}
           </p>
         </Banner>
       ) : (
@@ -160,6 +165,23 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
 
       <ChainsSee swap={swap} />
     </div>
+  );
+}
+
+// Whether a watchtower meets our deadlines if this daemon goes offline (ferryd --watchtower)
+function TowerBadge({ swap }: { swap: SwapView }) {
+  const t = swap.watchtower;
+  if (!t || t.status === "pending") return null;
+  return t.status === "armed" ? (
+    <StatusBadge variant="outline" className="border-brand-200 bg-brand-50/40 text-brand-700" title={t.note}>
+      <ShieldCheck size={11} weight="fill" />
+      Watchtower armed
+    </StatusBadge>
+  ) : (
+    <StatusBadge variant="outline" className="border-slate-300 text-slate-500" title={t.note}>
+      <ShieldSlash size={11} weight="fill" />
+      No watchtower
+    </StatusBadge>
   );
 }
 

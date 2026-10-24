@@ -1,0 +1,29 @@
+[package]
+name = "ferry-watchtower"
+description = "Ferry watchtower: broadcasts a party's presigned cancel/refund/punish on time while the party is offline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ferry-watchtower"
+path = "src/main.rs"
+
+[dependencies]
+ferry-btc = { path = "../ferry-btc", features = ["rpc"] }
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4.5", features = ["derive"] }
+hex.workspace = true
+rand.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "signal", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"

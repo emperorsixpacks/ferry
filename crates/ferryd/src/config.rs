@@ -195,6 +195,19 @@ pub struct Cli {
     /// Chain polling and peer exchange interval.
     #[arg(long, default_value_t = 1_000)]
     pub poll_ms: u64,
+
+    /// Watchtower (ferry-watchtower) to hand our signed deadline transactions to once tx_cancel
+    /// is co-signed, so the swap finishes even if this daemon goes offline (docs/WATCHTOWER.md).
+    #[arg(long)]
+    pub watchtower: Option<String>,
+    /// Bearer token file for --watchtower.
+    #[arg(long, requires = "watchtower")]
+    pub watchtower_token_file: Option<std::path::PathBuf>,
+    /// B only: confirm the watchtower is your own (or one you trust not to work with your
+    /// counterparty). B's completed refund reveals B's key share to Z, so without this flag B
+    /// refuses to arm a tower. Z can use any tower.
+    #[arg(long, requires = "watchtower")]
+    pub watchtower_own: bool,
 }
 
 #[derive(Clone, Copy, Debug)]

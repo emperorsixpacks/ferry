@@ -1,6 +1,7 @@
 //! Negotiation and the role-independent driver interface.
 
 use ferry_btc::bitcoin::{Address, Amount, OutPoint, Transaction, TxOut, Txid};
+use ferry_btc::SwapTxs;
 use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 
@@ -43,8 +44,8 @@ pub enum ChainEvent {
     /// One of the swap's spends (see [`Swap::watch_txids`]) in the mempool (`confs = 0`) or
     /// a block. The cancel's count drives T2.
     BtcSpend { tx: Transaction, confs: u32 },
-    /// The ZEC lock note at the joint address.
-    ZecNoteSeen { value: u64, confs: u32 },
+    /// A note at the joint address. `spent`: a mined or live transaction spends it.
+    ZecNoteSeen { value: u64, confs: u32, spent: bool },
     /// Our sweep of the joint address.
     ZecSwept { confs: u32 },
 }
@@ -265,6 +266,33 @@ impl Swap {
             .into_iter()
             .map(|s| (s, txs.txid(s)))
             .collect()
+    }
+
+    /// What a watchtower needs, once tx_cancel is co-signed: the templates, the signed
+    /// tx_cancel, and B's completed tx_refund or Z's signed tx_punish (both pay only us).
+    pub fn watchtower_txs(&self) -> Result<Option<(SwapTxs, Transaction, Transaction)>, Error> {
+        let (Some(lock), Some(cancel)) = (self.lock_outpoint(), self.cancel_tx()) else {
+            return Ok(None);
+        };
+        let txs = self.session().txs(lock)?;
+        let last = match self {
+            Swap::B(b) => match b.completed_refund()? {
+                Some(refund) => refund,
+                None => return Ok(None),
+            },
+            Swap::Z(z) => {
+                let sig = z.session.me.btc_key().sign(&txs.sighash(Spend::Punish));
+                txs.complete_punish(&sig)
+            }
+        };
+        Ok(Some((txs, cancel.clone(), last)))
+    }
+
+    fn cancel_tx(&self) -> Option<&Transaction> {
+        match self {
+            Swap::B(b) => b.cancel_tx(),
+            Swap::Z(z) => z.cancel_tx(),
+        }
     }
 
     pub fn state_name(&self) -> String {

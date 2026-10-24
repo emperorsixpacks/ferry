@@ -101,6 +101,8 @@ pub struct SwapView {
     pub secrets: Secrets,
     pub timeline: Vec<TimelineEntry>,
     pub observer: Observer,
+    /// Our package at the watchtower; absent without --watchtower.
+    pub watchtower: Option<crate::tower::TowerState>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -191,6 +193,7 @@ pub fn swap_view(rec: &SwapRecord) -> SwapView {
             ),
             zec: ordered(&rec.observer_zec, &["lock", "sweep"]),
         },
+        watchtower: rec.watchtower.clone(),
     }
 }
 
