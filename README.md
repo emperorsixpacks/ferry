@@ -2,6 +2,10 @@
 
 **Shielded ZEC ⇄ BTC, LTC or USDC. No bridge. No custodian. Nothing unshielded.**
 
+> **For judges:** start with [what is real and what is a mock](docs/WHAT-IS-REAL.md), with the
+> evidence for each run. Then [why not NEAR Intents, Maya or THORChain for the ZEC side](docs/WHAT-IS-REAL.md#why-not-near-maya-or-thorchain-for-the-zec-side)
+> and the [known limits](docs/THREAT-MODEL.md#known-limits) of this design.
+
 Ferry is a trustless atomic swap between shielded Zcash and native Bitcoin. The ZEC moves from
 one Ironwood note to another and never touches a transparent address. The BTC sits in an ordinary
 Taproot output. Nobody holds both sides, and either party can walk away with its own coins.
@@ -185,16 +189,25 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ## Known gaps
 
-Plain-language versions of these, with what happens in every abort case, are in
-[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
+Each of these, with what Ferry does about it and what is still open, is in
+[docs/THREAT-MODEL.md, "Known limits"](docs/THREAT-MODEL.md#known-limits). What has actually run,
+and where, is in [docs/WHAT-IS-REAL.md](docs/WHAT-IS-REAL.md).
 
+- A partner must be online with the other coin. Today the only partners are ours.
+- The second side to lock holds a free option, and no chain can fine whoever walks away: the
+  shielded ZEC lock is invisible to the other chain.
+- Swaps take minutes (confirmations on both chains) and pay fees on both chains.
+- Liveness: B (the side holding BTC, LTC or tokens) must refund within its window, or delegate it
+  to its own [watchtower](docs/WATCHTOWER.md). The tower must stay up (and, on EVM, funded for gas).
+  An offline Z loses only the trade.
+- If B vanishes after Z locks, Z takes B's coin and the ZEC stays locked in the joint address:
+  neither side holds the whole key.
+- The cross-group DLEQ is Serai's `dleq` under its `experimental` feature, which Serai's 2023 audit
+  excluded; its README says "none are recommended". So mainnet is capped at 0.02 ZEC per swap.
+- Presigned Bitcoin transactions use fixed fees, so Bitcoin and Litecoin stay on test networks
+  until an anchor/CPFP design ships.
 - The joint viewing key is built from an arbitrary `ak`, so it is not quantum-recoverable under
   ZIP 2005 (the same constructor FROST setups use today). The address is single-use and short-lived.
-- The cross-group DLEQ is unaudited (Serai's `dleq`, experimental feature).
-- Presigned Bitcoin transactions use fixed fees; mainnet needs an anchor/CPFP plan.
-- Liveness: each party must be online until its deadline, as in every adaptor-signature swap, or
-  delegate its deadline actions to a [watchtower](docs/WATCHTOWER.md). The tower must stay up
-  (and, on EVM, funded for gas); B's must be its own.
 
 ## Credits
 
