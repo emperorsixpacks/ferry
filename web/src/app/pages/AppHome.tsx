@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, ArrowRight, ArrowsDownUp, CaretDown, GearSix, ShieldCheck } from "@phosphor-icons/react";
-import { counterBalance, pairChain, startSwap, type Role, type Status, type SwapView } from "@/api";
+import { useEffect, useRef, useState } from "react";
+import { ArrowDown, ArrowRight, ArrowsDownUp, GearSix, ShieldCheck } from "@phosphor-icons/react";
+import { counterBalance, pairChain, startSwap, type PairId, type Role, type RouteLegs, type RouteView, type Status, type SwapView } from "@/api";
 import { CHAIN_NAMES, amountIn, coin, zec } from "@/format";
 import { Link, navigate } from "@/router";
 import { btcText } from "@/swap/shared";
@@ -8,14 +8,17 @@ import { roughDuration, typicalSeconds } from "@/swap/timing";
 import { Layout } from "../components/Layout";
 import { PairLogo, TokenLogo } from "../components/Logos";
 import { PartnerList } from "../components/MakerList";
-import { TokenPicker, tokenSubtitle } from "../components/TokenPicker";
+import { RouteCard } from "../components/RouteCard";
+import { CoinPill, Fact, Panel, Section, amountSize, capital } from "../components/SwapParts";
+import { RoutePicker, TokenPicker, tokenSubtitle, type Token } from "../components/TokenPicker";
 import { Sheet } from "../components/ui/sheet";
 import { cn } from "../lib/utils";
 import { useLocal } from "../lib/daemon";
 import { capacity, counterFor, liveQuote, quoteOf, useMakers, type Makers, type Quote } from "../lib/makers";
-import { pairName } from "../lib/pairs";
+import { pairName, storeRoute, storedRoute } from "../lib/pairs";
 import { plainSummary } from "../lib/progress";
 import { secondsLeft, useQuotes, withFirm } from "../lib/quotes";
+import { canRoute, isRunning, legSwapIds, routeSummary, useRoutes } from "../lib/routes";
 
 // /app: one swap card, either way round. Selling ZEC: Sell (shielded ZEC) on top, Buy (the coin
 // picked from "Select a token") below. Buying ZEC: the arrow between them flips the card, so the
@@ -24,38 +27,59 @@ import { secondsLeft, useQuotes, withFirm } from "../lib/quotes";
 // amount locked), so the number typed is exactly what moves, with no rounding, and the coin side is
 // worked out the way the partner works it out. The rate comes from the best partner for the
 // direction, and the partner and details are behind the settings pill above the card.
+//
+// With a router on the server (private swaps), both sides can be a coin: the ZEC pill opens a picker
+// too, with shielded ZEC on top and the coins that can go through it below. Picking one turns the
+// card into a private swap (RouteCard), coin → shielded ZEC → coin; picking ZEC again turns it back.
+// Without a router none of this shows: the ZEC pill stays a plain label.
 
 // what the ZEC lock's network fee needs on top of the amount (ferry-zec's SEND_FEE_RESERVE)
 const ZEC_FEE_RESERVE = 50_000;
 // what a Bitcoin or Litecoin lock's own fee needs on top of the amount (ferryd's B keeps as much)
 const LOCK_FEE_RESERVE = 10_000;
 
+type Route = { from: PairId; to: PairId };
+
+// The private swap on the card, if any: the viewer's pick, while the server can run it.
+function useRouteChoice(legs: RouteLegs | null): [Route | null, (r: Route | null) => void] {
+  const [choice, setChoice] = useState<Route | null>(storedRoute);
+  const set = (r: Route | null) => {
+    setChoice(r);
+    storeRoute(r);
+  };
+  return [choice && canRoute(legs, choice.from, choice.to) ? choice : null, set];
+}
+
 export function AppHome() {
   const d = useLocal();
-  const live = d.list.find((s) => !s.outcome);
+  const routes = useRoutes();
+  const [route, setRoute] = useRouteChoice(routes.legs);
+  // a private swap's two swaps are the private swap's: its banner, not theirs
+  const legs = legSwapIds(routes.list);
+  const live = d.list.find((s) => !s.outcome && !s.route && !legs.has(s.id));
+  const moving = routes.list.find(isRunning);
+  const holding = routes.list.find((v) => v.state === "holding");
+  const blocked = moving ? "Finish your private swap first." : live ? "Finish the swap in progress first." : null;
   return (
     <Layout>
       <div className="mx-auto w-full max-w-[480px]">
-        {live ? <LiveBanner swap={live} status={d.status} /> : null}
-        <SwapCard status={d.status} busySwap={live} />
+        {moving ? <RouteBanner route={moving} /> : live ? <LiveBanner swap={live} status={d.status} /> : holding ? <RouteBanner route={holding} /> : null}
+        {route ? <RouteCard from={route.from} to={route.to} onChange={setRoute} blocked={blocked} /> : <SwapCard status={d.status} blocked={blocked} onRoute={routes.legs ? setRoute : null} />}
       </div>
     </Layout>
   );
 }
 
-function LiveBanner({ swap, status }: { swap: SwapView; status: Status | null }) {
+function Banner({ to, title, line, pulse }: { to: string; title: string; line: string; pulse: boolean }) {
   return (
-    <Link
-      to={`/app/swap/${swap.id}`}
-      className="mb-5 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm transition-colors hover:border-slate-300 hover:bg-white"
-    >
+    <Link to={to} className="mb-5 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm transition-colors hover:border-slate-300 hover:bg-white">
       <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-slate-400 opacity-60 motion-reduce:animate-none" />
-        <span className="relative inline-flex h-2 w-2 rounded-full bg-slate-900" />
+        {pulse ? <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-slate-400 opacity-60 motion-reduce:animate-none" /> : null}
+        <span className={cn("relative inline-flex h-2 w-2 rounded-full", pulse ? "bg-slate-900" : "bg-slate-400")} />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="font-medium text-slate-900">You have a swap in progress</span>
-        <span className="block truncate text-slate-500">{plainSummary(swap, status)}</span>
+        <span className="font-medium text-slate-900">{title}</span>
+        <span className="block truncate text-slate-500">{line}</span>
       </span>
       <span className="inline-flex shrink-0 items-center gap-1 font-medium text-slate-900">
         View <ArrowRight size={14} weight="bold" aria-hidden />
@@ -64,7 +88,20 @@ function LiveBanner({ swap, status }: { swap: SwapView; status: Status | null })
   );
 }
 
-function SwapCard({ status, busySwap }: { status: Status | null; busySwap?: SwapView }) {
+const LiveBanner = ({ swap, status }: { swap: SwapView; status: Status | null }) => <Banner to={`/app/swap/${swap.id}`} title="You have a swap in progress" line={plainSummary(swap, status)} pulse />;
+
+function RouteBanner({ route }: { route: RouteView }) {
+  // the pause counts down
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => tick((n) => n + 1), 15_000);
+    return () => clearInterval(id);
+  }, []);
+  const running = isRunning(route);
+  return <Banner to={`/app/route/${route.id}`} title={running ? "You have a private swap in progress" : "Your private swap is waiting for you"} line={routeSummary(route)} pulse={running} />;
+}
+
+function SwapCard({ status, blocked: elsewhere, onRoute }: { status: Status | null; blocked: string | null; onRoute: ((r: Route) => void) | null }) {
   const { role, dir, bt, daemon, pair, canFlip, chooseDirection } = useLocal();
   const buying = dir === "buy";
   const makers = useMakers();
@@ -74,6 +111,8 @@ function SwapCard({ status, busySwap }: { status: Status | null; busySwap?: Swap
   const [busy, setBusy] = useState(false);
   const [fail, setFail] = useState<string | null>(null);
   const [picker, setPicker] = useState(false);
+  // the ZEC pill's picker, with a router: another coin there makes a private swap
+  const [zecPicker, setZecPicker] = useState(false);
   const [settings, setSettings] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   // a partner picked for one coin or direction doesn't carry over to another
@@ -104,7 +143,7 @@ function SwapCard({ status, busySwap }: { status: Status | null; busySwap?: Swap
   const coinBal = status ? counterBalance(status) : null;
 
   const problem = problemOf({ amount, valid, zat, role, makers, quote, maker, usable, status, gross, evm });
-  const blocked = busySwap ? "Finish the swap in progress first." : null;
+  const blocked = elsewhere;
 
   // the most ZEC this party can swap: its ZEC (less the lock's fee) when selling, what its coin
   // buys (less the lock's fee) when buying, within what a partner takes
@@ -154,10 +193,13 @@ function SwapCard({ status, busySwap }: { status: Status | null; busySwap?: Swap
       label={buying ? "Buy" : "Sell"}
       onClick={() => input.current?.focus()}
       pill={
-        <span className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-slate-200 bg-white pr-3.5 pl-1.5 shadow-[0_1px_2px_rgba(24,24,27,0.06)]" title={buying ? "Arrives shielded" : "Your shielded ZEC"}>
-          <TokenLogo id="zec" size={28} />
-          <span className="text-[15px] font-semibold text-slate-900">ZEC</span>
-        </span>
+        <CoinPill
+          logo={<TokenLogo id="zec" size={28} />}
+          label="ZEC"
+          title={buying ? "Arrives shielded" : "Your shielded ZEC"}
+          onClick={onRoute ? () => setZecPicker(true) : undefined}
+          ariaLabel={`${buying ? "You get" : "You sell"} shielded ZEC. Swap another coin privately instead`}
+        />
       }
       foot={
         buying ? (
@@ -197,19 +239,7 @@ function SwapCard({ status, busySwap }: { status: Status | null; busySwap?: Swap
     <Panel
       key="coin"
       label={buying ? "Sell" : "Buy"}
-      pill={
-        <button
-          type="button"
-          onClick={() => setPicker(true)}
-          aria-haspopup="dialog"
-          aria-label={`${buying ? "You pay with" : "You get"} ${name.noun}. Choose another coin`}
-          className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-slate-200 bg-white pr-3 pl-1.5 shadow-[0_1px_2px_rgba(24,24,27,0.06)] transition-colors hover:border-slate-300 hover:bg-slate-50"
-        >
-          <PairLogo pair={pair} size={28} />
-          <span className="text-[15px] font-semibold text-slate-900">{name.label}</span>
-          <CaretDown size={14} weight="bold" className="text-slate-500" aria-hidden />
-        </button>
-      }
+      pill={<CoinPill logo={<PairLogo pair={pair} size={28} />} label={name.label} onClick={() => setPicker(true)} ariaLabel={`${buying ? "You pay with" : "You get"} ${name.noun}. Choose another coin`} />}
       foot={
         buying ? (
           <>
@@ -337,6 +367,18 @@ function SwapCard({ status, busySwap }: { status: Status | null; busySwap?: Swap
       </p>
 
       <TokenPicker open={picker} onClose={() => setPicker(false)} makers={makers} role={role} />
+      {onRoute ? (
+        <RoutePicker
+          open={zecPicker}
+          onClose={() => setZecPicker(false)}
+          side={buying ? "buy" : "sell"}
+          current="zec"
+          other={pair}
+          onPick={(id: Token) => {
+            if (id !== "zec") onRoute(buying ? { from: pair, to: id } : { from: id, to: pair });
+          }}
+        />
+      ) : null}
     </>
   );
 }
@@ -407,55 +449,4 @@ function plainError(raw: string, buying: boolean): string {
   if (/does not have enough/i.test(raw)) return buying ? `You don't have enough ${coin().ticker} for this amount and the network fee.` : "Your partner can't cover this amount right now. Try a smaller one.";
   if (/liquidity/i.test(raw)) return "Your partner can't cover this amount right now. Try a smaller one.";
   return raw.replace(/\bdaemon\b/gi, "Ferry node").replace(/\bmaker\b/gi, "partner");
-}
-
-function Panel({ label, pill, foot, onClick, children }: { label: string; pill: ReactNode; foot: ReactNode; onClick?: () => void; children: ReactNode }) {
-  return (
-    <div
-      onClick={(e) => {
-        if (onClick && !(e.target as HTMLElement).closest("button")) onClick();
-      }}
-      className={cn(
-        "rounded-3xl border border-slate-200/70 bg-slate-50 px-5 pt-4 pb-4 transition-colors",
-        onClick && "has-[input:focus]:border-slate-300 has-[input:focus]:bg-white",
-      )}
-    >
-      <p className="text-xs font-medium tracking-wider text-slate-500 uppercase">{label}</p>
-      <div className="mt-3 flex items-center gap-3">
-        <div className="min-w-0 flex-1">{children}</div>
-        {pill}
-      </div>
-      <div className="mt-3 flex min-h-6 items-center justify-between gap-3 text-[13px] text-slate-500">{foot}</div>
-    </div>
-  );
-}
-
-function Section({ title, note, last, children }: { title: string; note?: string; last?: boolean; children: ReactNode }) {
-  return (
-    <section className={cn("pt-1", last ? "pb-5" : "border-b border-slate-100 pb-3")}>
-      <h3 className="px-5 text-xs font-medium tracking-wider text-slate-500 uppercase">{title}</h3>
-      {note ? <p className="mt-1 px-5 text-[13px] text-slate-500">{note}</p> : null}
-      <div className="mt-2">{children}</div>
-    </section>
-  );
-}
-
-const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-
-// Big amounts step down as they get longer, so 0.0041035 fits beside the coin pill on a phone.
-function amountSize(text: string): string {
-  const n = text.length;
-  if (n <= 6) return "text-[36px] sm:text-[40px]";
-  if (n <= 9) return "text-[30px] sm:text-[38px]";
-  if (n <= 12) return "text-[25px] sm:text-[32px]";
-  return "text-[21px] sm:text-[27px]";
-}
-
-function Fact({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex gap-4">
-      <dt className="w-28 shrink-0 text-slate-500">{label}</dt>
-      <dd className="min-w-0 text-slate-900">{value}</dd>
-    </div>
-  );
 }

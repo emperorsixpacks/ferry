@@ -4,6 +4,7 @@
 // - Proxies /daemon/z and /daemon/b to the user's two ferryd control APIs (Z sells shielded ZEC,
 //   B buys it), and any per-pair ones, adding each daemon's bearer token server-side (the browser
 //   never sees a token), like the Vite dev proxy does.
+// - Proxies /router to the user's ferry-route (private swaps), if FERRY_ROUTER_URL is set, the same way.
 // - Guards the public demo: the UI is on the open internet with real (testnet) wallets behind it,
 //   so only the calls the UI needs get through, and swap starts are limited.
 //
@@ -50,6 +51,16 @@
 //   DEMO_QUOTES_PER_MIN [30] firm-quote requests (POST /api/quotes) per client IP per minute
 //   DEMO_QUOTES_PER_MIN_TOTAL [600] firm-quote requests per minute in all (makers hear far less:
 //                           quotes are cached per maker and bucket)
+//   FERRY_ROUTER_URL [unset] the user's ferry-route (private swaps: coin A -> shielded ZEC -> coin C),
+//                           with FERRY_ROUTER_TOKEN / FERRY_ROUTER_TOKEN_FILE; proxied at /router/...
+//                           (routes.mjs). GET /api/pairs says which routes it runs ("routes"), so a
+//                           page without one shows no private swaps. A route start takes the swap
+//                           guards: the caps, both rate limits (a route counts as two swap starts),
+//                           the maker allowlist (partners named by name or index, mapped to their
+//                           URLs here, leg 2's fallbacks added here), every daemon idle and one live
+//                           route at a time. No direct swap starts while a route is moving, so nothing
+//                           spends the ZEC it holds between its two swaps. The views lose the
+//                           partners' URLs on the way out
 //
 // The daemons see no browser Origin header: this server strips it after its own PUBLIC_ORIGIN
 // check, so ferryd's --ui-origin allowlist doesn't need to know the public domain.
@@ -60,6 +71,7 @@ import { fileURLToPath } from "node:url";
 import { makerDirectory, parseMakers } from "./makers.mjs";
 import { quoteDesk, rateLimit } from "./quotes.mjs";
 import { extraDaemons, mainSide, pairsBody, samePair } from "./pairs.mjs";
+import { buildRoute, publicRoute, routerLink } from "./routes.mjs";
 
 const env = process.env;
 const PORT = Number(env.PORT ?? 5300);
@@ -115,6 +127,10 @@ const DAEMONS = {
 // the daemons a visitor starts swaps on: Z's (selling ZEC) and B's (buying it), for every pair
 // "auto" stays a taker here: a start naming a maker of the daemon's own role is refused by ferryd
 const TAKERS = new Set([...(MAIN_SELL !== false ? ["z"] : []), ...(MAIN_BUY !== false ? ["b"] : []), ...EXTRA.map((d) => d.key)]);
+
+// the user's router (private swaps), if any
+const ROUTER_TOKEN = tokenSource("ROUTER");
+const ROUTER = env.FERRY_ROUTER_URL ? routerLink({ url: env.FERRY_ROUTER_URL, token: ROUTER_TOKEN }) : null;
 
 // one request to a daemon from this server, for the guard's own checks
 function daemonJson(key, path) {
@@ -177,23 +193,62 @@ function clientIp(req) {
 
 const recentAll = []; // timestamps of every swap start in the last hour
 
-// the global cap, checked before the per-IP limit so a refused start costs nobody a slot
-function globalWait() {
+// the global cap, checked before the per-IP limit so a refused start costs nobody a slot; `n` slots
+// (a route is two swap starts)
+function globalWait(n = 1) {
   const now = Date.now();
   while (recentAll.length && now - recentAll[0] >= 3_600_000) recentAll.shift();
-  return recentAll.length >= SWAPS_PER_HOUR ? Math.ceil((recentAll[0] + 3_600_000 - now) / 1000) : 0;
+  if (recentAll.length + n <= SWAPS_PER_HOUR) return 0;
+  if (!recentAll.length) return 3600;
+  return Math.max(1,Math.ceil((recentAll[Math.min(recentAll.length - 1, recentAll.length + n - 1 - SWAPS_PER_HOUR)] + 3_600_000 - now) / 1000));
 }
 
-function takeRate(ip) {
+function takeRate(ip, n = 1) {
   const now = Date.now();
   const recent = (rates.get(ip) ?? []).filter((t) => now - t < 3_600_000);
-  if (recent.length >= RATE_PER_HOUR) {
+  if (recent.length + n > RATE_PER_HOUR) {
     rates.set(ip, recent);
-    return Math.ceil((recent[0] + 3_600_000 - now) / 1000);
+    return recent.length ? Math.max(1, Math.ceil((recent[Math.min(recent.length - 1, recent.length + n - 1 - RATE_PER_HOUR)] + 3_600_000 - now) / 1000)) : 3600;
   }
-  recent.push(now);
+  for (let i = 0; i < n; i++) recent.push(now);
   rates.set(ip, recent);
   return 0;
+}
+
+// Take `n` swap starts for this request (both limits), or answer 429 and return false. A start the
+// daemon or router then refuses gives them back (req.ferryRefused).
+function takeStarts(req, res, n) {
+  const busy = globalWait(n);
+  if (busy) {
+    json(res, 429, { error: `The demo has hit its limit of ${SWAPS_PER_HOUR} swaps an hour. Try again in ${Math.ceil(busy / 60)} minutes.` }, { "retry-after": String(busy) });
+    return false;
+  }
+  const wait = takeRate(clientIp(req), n);
+  if (wait) {
+    json(res, 429, { error: `Too many swaps from your address. Try again in ${Math.ceil(wait / 60)} minutes.` }, { "retry-after": String(wait) });
+    return false;
+  }
+  const at = Date.now();
+  for (let i = 0; i < n; i++) recentAll.push(at);
+  req.ferryRefused = () => {
+    for (let i = 0; i < n; i++) {
+      const j = recentAll.indexOf(at);
+      if (j >= 0) recentAll.splice(j, 1);
+      const mine = rates.get(clientIp(req));
+      if (mine?.length) mine.pop();
+    }
+  };
+  return true;
+}
+
+// whether any daemon this server fronts has a swap that isn't over; null if one can't be asked
+async function anySwapLive(keys = Object.keys(DAEMONS)) {
+  try {
+    const lists = await Promise.all(keys.map((k) => daemonJson(k, "/api/swaps")));
+    return lists.some((l) => l.status === 200 && Array.isArray(l.body) && l.body.some((s) => !s.outcome));
+  } catch {
+    return null;
+  }
 }
 
 setInterval(() => {
@@ -293,26 +348,13 @@ async function guard(key, path, req, res) {
       json(res, 409, { error: "A swap is already in progress on the demo. Try again when it finishes." });
       return false;
     }
-    const busy = globalWait();
-    if (busy) {
-      json(res, 429, { error: `The demo has hit its limit of ${SWAPS_PER_HOUR} swaps an hour. Try again in ${Math.ceil(busy / 60)} minutes.` }, { "retry-after": String(busy) });
+    // a route between its two swaps holds ZEC on one of these daemons: nothing else may spend it
+    if (ROUTER && (await ROUTER.busy())) {
+      json(res, 409, { error: "A private swap is in progress on the demo. Try again when it finishes." });
       return false;
     }
-    const wait = takeRate(clientIp(req));
-    if (wait) {
-      json(res, 429, { error: `Too many swaps from your address. Try again in ${Math.ceil(wait / 60)} minutes.` }, { "retry-after": String(wait) });
-      return false;
-    }
-    const at = Date.now();
-    recentAll.push(at);
+    if (!takeStarts(req, res, 1)) return false;
     if (quote) QUOTES.take(quote);
-    // a start the daemon refuses gives both slots back
-    req.ferryRefused = () => {
-      const i = recentAll.indexOf(at);
-      if (i >= 0) recentAll.splice(i, 1);
-      const mine = rates.get(clientIp(req));
-      if (mine?.length) mine.pop();
-    };
     // the signed quote is forwarded as the maker sent it (its integers exact)
     if (quote) return `{"maker":${JSON.stringify(maker.url)},"zec_zat":${zat},"quote":${quote.json}}`;
     return JSON.stringify({ maker: maker.url, zec_zat: zat });
@@ -347,13 +389,13 @@ function clampOffer(status) {
   return status;
 }
 
-function rewriteJson(up, res) {
+function rewriteJson(up, res, fn = clampOffer) {
   let body = "";
   up.setEncoding("utf8");
   up.on("data", (c) => (body += c));
   up.on("end", () => {
     try {
-      body = JSON.stringify(clampOffer(JSON.parse(body)));
+      body = JSON.stringify(fn(JSON.parse(body)));
     } catch {
       /* not JSON: pass through */
     }
@@ -361,7 +403,8 @@ function rewriteJson(up, res) {
   });
 }
 
-function rewriteEvents(up, res) {
+// `name` events' data through `fn`: the daemons' status (clampOffer), the router's routes
+function rewriteEvents(up, res, name = "status", fn = clampOffer) {
   let buf = "";
   let event = "";
   up.setEncoding("utf8");
@@ -373,9 +416,9 @@ function rewriteEvents(up, res) {
       buf = buf.slice(i + 1);
       if (line.startsWith("event:")) event = line.slice(6).trim();
       else if (line === "") event = "";
-      else if (event === "status" && line.startsWith("data:")) {
+      else if (event === name && line.startsWith("data:")) {
         try {
-          line = "data: " + JSON.stringify(clampOffer(JSON.parse(line.slice(5))));
+          line = "data: " + JSON.stringify(fn(JSON.parse(line.slice(5))));
         } catch {
           /* pass through */
         }
@@ -467,6 +510,133 @@ async function proxy(key, path, search, req, res) {
     else res.destroy();
   });
   // a browser that leaves must not keep a stream open to the daemon
+  res.on("close", () => upstream.destroy());
+  upstream.end(body ?? undefined);
+}
+
+// ------------------------------------------------------------------------------------------------
+// router: /router/... to the user's ferry-route (private swaps), guarded like the daemons
+
+const ROUTE_ID = "r[0-9a-f]{1,32}";
+const ROUTER_READ = [/^\/api\/routes$/, new RegExp(`^/api/routes/${ROUTE_ID}$`), /^\/api\/events$/];
+
+// Decide whether a /router request may go through: null (forward), a body to forward instead, or
+// false after the response has been sent.
+async function routerGuard(path, req, res) {
+  const method = req.method;
+  if (method === "GET" || method === "HEAD") {
+    if (ROUTER_READ.some((r) => r.test(path))) return null;
+    deny(res, "Not available on the public demo");
+    return false;
+  }
+  if (method !== "POST") {
+    deny(res, "Not available on the public demo");
+    return false;
+  }
+  if (PUBLIC_ORIGIN && req.headers.origin && req.headers.origin !== PUBLIC_ORIGIN) {
+    deny(res, "This origin may not use the Ferry demo");
+    return false;
+  }
+  // nothing else moves while a route starts or retries its second swap: no other route, no swap
+  const idle = async () => {
+    const [moving, live] = await Promise.all([ROUTER.busy(), anySwapLive()]);
+    if (moving === null || live === null) {
+      json(res, 502, { error: "Can't reach the private swap service or a daemon. Try again in a moment." });
+      return false;
+    }
+    if (moving) {
+      json(res, 409, { error: "A private swap is already in progress on the demo. Try again when it finishes." });
+      return false;
+    }
+    if (live) {
+      json(res, 409, { error: "A swap is already in progress on the demo. Try again when it finishes." });
+      return false;
+    }
+    return true;
+  };
+
+  if (path === "/api/routes") {
+    let body;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      json(res, 400, { error: 'Send a JSON body like {"from": "btc", "to": "usdc-base", "zec_zat": 10000000, ...}' });
+      return false;
+    }
+    const built = buildRoute(body, { list: await MAKERS.list(), resolve: MAKERS.resolve, legs: await ROUTER.legs(), maxZat: DEMO_MAX_ZAT, minZat: DEMO_MIN_ZAT });
+    if (built.error) {
+      json(res, built.status, { error: built.error });
+      return false;
+    }
+    if (!(await idle())) return false;
+    // two swaps: two starts against both limits
+    if (!takeStarts(req, res, 2)) return false;
+    return JSON.stringify(built.body);
+  }
+
+  const m = path.match(new RegExp(`^/api/routes/(${ROUTE_ID})/(continue|stop)$`));
+  if (m && m[2] === "stop") return "";
+  if (m) {
+    // "Finish now": out of holding, a new second swap (one start, everything idle); during the
+    // pause, the same second swap sooner. Always on the route's own terms: no body gets through.
+    let route;
+    try {
+      route = await ROUTER.call("GET", `/api/routes/${m[1]}`);
+    } catch {
+      json(res, 502, { error: "Can't reach the private swap service. Try again in a moment." });
+      return false;
+    }
+    if (route.status === 200 && route.body?.state === "holding") {
+      if (!(await idle())) return false;
+      if (!takeStarts(req, res, 1)) return false;
+    }
+    return "{}";
+  }
+
+  deny(res, "Not available on the public demo");
+  return false;
+}
+
+async function routerProxy(path, search, req, res) {
+  const decision = await routerGuard(path, req, res);
+  if (decision === false) return;
+  if (path === "/api/events" && !openStream(req, res)) return;
+
+  const headers = {};
+  for (const k of FORWARD) if (typeof req.headers[k] === "string") headers[k] = req.headers[k];
+  const token = ROUTER_TOKEN();
+  if (token) headers.authorization = `Bearer ${token}`;
+  let body = null;
+  if (typeof decision === "string") {
+    body = decision;
+    headers["content-type"] = "application/json";
+    headers["content-length"] = Buffer.byteLength(body);
+  }
+
+  const upstream = http.request(new URL(path + search, ROUTER.url), { method: req.method, headers }, (up) => {
+    const out = { ...SECURITY };
+    for (const [k, v] of Object.entries(up.headers)) if (!HOP.has(k) && !k.startsWith("access-control-")) out[k] = v;
+    out["cache-control"] = "no-store";
+    const type = String(up.headers["content-type"] ?? "");
+    const sse = type.startsWith("text/event-stream");
+    const views = type.startsWith("application/json");
+    if (sse) out["x-accel-buffering"] = "no";
+    if (views) delete out["content-length"];
+    if ((up.statusCode ?? 502) >= 300) req.ferryRefused?.();
+    res.writeHead(up.statusCode ?? 502, out);
+    // the partners' URLs stay here, as in GET /api/makers
+    if (sse) rewriteEvents(up, res, "route", publicRoute);
+    else if (views) rewriteJson(up, res, publicRoute);
+    else up.pipe(res);
+    up.on("close", () => {
+      if (!res.writableEnded) res.destroy();
+    });
+  });
+  upstream.on("error", () => {
+    req.ferryRefused?.();
+    if (!res.headersSent) json(res, 502, { error: "Can't reach the private swap service. Is ferry-route running?" });
+    else res.destroy();
+  });
   res.on("close", () => upstream.destroy());
   upstream.end(body ?? undefined);
 }
@@ -572,8 +742,21 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
+  // exactly /router or /router/...: never /routerx
+  if (url.pathname === "/router" || url.pathname.startsWith("/router/")) {
+    if (!ROUTER) return json(res, 404, { error: "No private swaps on this server" });
+    routerProxy(url.pathname.slice("/router".length) || "/", url.search, req, res).catch((e) => {
+      console.error("ferry-ui router:", e?.message ?? "failed");
+      if (!res.headersSent) json(res, 500, { error: "Internal error" });
+    });
+    return;
+  }
   if (url.pathname === "/healthz") return json(res, 200, { ok: true });
-  if (url.pathname === "/api/pairs") return json(res, 200, PAIRS_BODY);
+  if (url.pathname === "/api/pairs") {
+    // routes: what the router can run (null without one, or while it can't be reached)
+    (ROUTER ? ROUTER.legs() : Promise.resolve(null)).then((routes) => json(res, 200, { ...PAIRS_BODY, routes }));
+    return;
+  }
   if (url.pathname === "/api/quotes") {
     serveQuotes(req, res).catch((e) => {
       console.error("ferry-ui quotes:", e?.message ?? "failed");
@@ -594,6 +777,7 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`ferry-ui on http://${HOST}:${PORT}  dist ${DIST}`);
   console.log(`  Z ${DAEMONS.z.url.origin}${MAIN_SELL === false ? " (no sell starts)" : ""}  B ${DAEMONS.b.url.origin}${MAIN_BUY === false ? " (no buy starts)" : ""}${EXTRA.map((d) => `  ${d.key.toUpperCase()} ${d.url}`).join("")}  makers ${MAKERS.makers.map((m) => `${m.name} (${m.pair})`).join(", ") || "none"}`);
+  if (ROUTER) console.log(`  router ${ROUTER.url} (private swaps)`);
   console.log(`  demo: max ${zec(DEMO_MAX_ZAT)} ZEC, ${RATE_PER_HOUR} swaps/IP/hour, ${SWAPS_PER_HOUR} swaps/hour in all, ${SSE_PER_IP} streams/IP, ${SSE_TOTAL} streams in all, faults ${FAULTS ? "on" : "off"}${PUBLIC_ORIGIN ? `, origin ${PUBLIC_ORIGIN}` : ""}`);
 });
 

@@ -1,10 +1,12 @@
 import { defineConfig, type Connect, type Plugin, type ProxyOptions } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { makerDirectory, parseMakers } from "./server/makers.mjs";
 import { quoteDesk } from "./server/quotes.mjs";
 import { extraDaemons, mainSide, pairsBody } from "./server/pairs.mjs";
+import { buildRoute, routerLink } from "./server/routes.mjs";
 
 // The UI talks to the user's ferryd daemons: Z sells ZEC, B buys it. In dev and preview the main
 // two are proxied under /daemon/z and /daemon/b: the proxy adds each daemon's API token
@@ -50,6 +52,39 @@ function daemon(key: string, target: string, token: string | undefined): ProxyOp
 
 const proxy = Object.fromEntries(Object.entries(TARGETS).map(([key, url]) => [`^/daemon/${key}(/|$)`, daemon(key, url, TOKENS[key])]));
 
+// The user's router for private swaps (ferry-route), when FERRY_ROUTER_URL is set: proxied under
+// /router with FERRY_ROUTER_TOKEN (or the file FERRY_ROUTER_TOKEN_FILE names), as the daemons are.
+// Route starts are rebuilt below, as swap starts are; server/routes.mjs.
+const ROUTER_URL = process.env.FERRY_ROUTER_URL;
+const routerToken = (): string | undefined => {
+  if (process.env.FERRY_ROUTER_TOKEN) return process.env.FERRY_ROUTER_TOKEN;
+  try {
+    return process.env.FERRY_ROUTER_TOKEN_FILE ? readFileSync(process.env.FERRY_ROUTER_TOKEN_FILE, "utf8").trim() : undefined;
+  } catch {
+    return undefined;
+  }
+};
+const ROUTER = ROUTER_URL ? routerLink({ url: ROUTER_URL, token: routerToken }) : null;
+if (ROUTER_URL) {
+  proxy["^/router(/|$)"] = {
+    target: ROUTER_URL,
+    changeOrigin: true,
+    rewrite: (p: string) => p.replace(/^\/router/, ""),
+    configure: (p) => {
+      // read per request: the token file may change when the router restarts
+      p.on("proxyReq", (req) => {
+        const t = routerToken();
+        if (t) req.setHeader("authorization", `Bearer ${t}`);
+      });
+      p.on("proxyRes", (proxyRes, _req, res) => {
+        proxyRes.on("close", () => {
+          if (!res.writableEnded) res.destroy();
+        });
+      });
+    },
+  };
+}
+
 // The maker directory, as server/prod.mjs serves it: FERRY_MAKERS (or the one maker at
 // FERRY_MAKER_URL), GET /api/makers, and swap starts that name a maker are rewritten to its
 // allowlisted URL here, so the browser never sends one. The maker URL is handed to the daemon,
@@ -66,7 +101,32 @@ function makers(): Plugin {
   };
   const handle: Connect.NextHandleFunction = (req, res, next) => {
     const url = req.url?.split("?")[0];
-    if (url === "/api/pairs" && req.method === "GET") return send(res, 200, PAIRS_BODY);
+    if (url === "/api/pairs" && req.method === "GET") {
+      (ROUTER ? ROUTER.legs() : Promise.resolve(null)).then((routes) => send(res, 200, { ...PAIRS_BODY, routes }));
+      return;
+    }
+    // a private swap names its partners; they become allowlisted URLs here (routes.mjs)
+    if (url === "/router/api/routes" && req.method === "POST" && ROUTER) {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", async () => {
+        let body: unknown;
+        try {
+          body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+        } catch {
+          return send(res, 400, { error: 'Send a JSON body like {"from": "btc", "to": "usdc-base", ...}' });
+        }
+        const built = buildRoute(body, { list: await dir.list(), resolve: dir.resolve, legs: await ROUTER.legs() });
+        if (built.error !== undefined) return send(res, built.status, { error: built.error });
+        try {
+          const up = await ROUTER.call("POST", "/api/routes", built.body);
+          send(res, up.status, up.body ?? { error: "No answer from the router" });
+        } catch {
+          send(res, 502, { error: "Can't reach the private swap service. Is ferry-route running?" });
+        }
+      });
+      return;
+    }
     if (url === "/api/makers" && req.method === "GET") {
       dir.list().then(
         (list) => send(res, 200, { makers: list }),
