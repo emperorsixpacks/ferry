@@ -211,10 +211,12 @@ cmd_migrate_wallets() {
     [ "$force" = --force ] || die "the local infra/testnet.sh daemons are running (${running# }). Stop them first: kill the pids in $LOCAL_TESTNET/{z,b}.pid, keeping the signet node up, or pass --force"
     log "WARNING: the local daemons are still running (${running# }); both copies will act on the same wallets"
   fi
-  local tmp
-  tmp=$(mktemp)
-  chmod 600 "$tmp"
-  trap 'rm -f "$tmp"' EXIT
+  # The descriptors (private keys) pass through this file. Global, not local: the EXIT trap runs
+  # after this function has returned, where a local would be unset (set -u) and the file kept.
+  MIGRATE_TMP=$(mktemp)
+  chmod 600 "$MIGRATE_TMP"
+  trap 'rm -f "$MIGRATE_TMP"' EXIT
+  local tmp=$MIGRATE_TMP
 
   log "stopping the daemons on $HOST"
   rcompose stop ferryd-z ferryd-b web
