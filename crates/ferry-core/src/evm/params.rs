@@ -214,6 +214,14 @@ const TESTNET: EvmPolicy = EvmPolicy {
 };
 
 impl EvmPolicy {
+    /// One of the main networks Ferry has a policy for: real value at stake.
+    pub fn is_mainnet(chain_id: u64) -> bool {
+        matches!(
+            chain_id,
+            ETHEREUM_CHAIN_ID | BASE_CHAIN_ID | OPTIMISM_CHAIN_ID | ARBITRUM_CHAIN_ID
+        )
+    }
+
     /// The minimums for `chain_id` (reasons in docs/EVM.md, "Timing rules"):
     /// - Ethereum: no sequencer, 12 s blocks. 15 min margins, 64 lock confirmations (about two
     ///   epochs, when a block is normally finalized), a claim window of at least 2 h.
@@ -387,7 +395,9 @@ mod tests {
             ARBITRUM_SEPOLIA_CHAIN_ID,
         ] {
             assert_eq!(table(testnet), (120, 2, 3, 1_200), "chain {testnet}");
+            assert!(!EvmPolicy::is_mainnet(testnet), "chain {testnet}");
         }
+        assert!(!EvmPolicy::is_mainnet(ANVIL_CHAIN_ID) && !EvmPolicy::is_mainnet(59_144));
         // Lock confirmations cover at least Base's minute at each chain's block time.
         let secs = |chain, block_ms: u64| u64::from(table(chain).1) * block_ms / 1_000;
         assert!(secs(ARBITRUM_CHAIN_ID, 250) >= secs(BASE_CHAIN_ID, 2_000));
@@ -402,6 +412,7 @@ mod tests {
             OPTIMISM_CHAIN_ID,
             ARBITRUM_CHAIN_ID,
         ] {
+            assert!(EvmPolicy::is_mainnet(main), "chain {main}");
             let (m, l, z, w) = table(main);
             let (tm, tl, tz, tw) = table(SEPOLIA_CHAIN_ID);
             assert!(m > tm && l > tl && z > tz && w > tw, "chain {main}");

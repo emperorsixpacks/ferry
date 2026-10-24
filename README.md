@@ -156,8 +156,8 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
   swap's own templates. On EVM it calls FerryLock's refund (B) or punish (Z) on anvil, inside the
   same windows, from its own gas account; Z's package is keyless and B's holds B's key share, so
   B arms only its own tower.
-- Makers: ferryd can quote the median of Kraken/CoinGecko plus a spread and pauses when the feed is
-  stale; the app lists the operator's allowlisted makers with rate, age, range and liquidity.
+- Makers: ferryd can quote the median of Kraken/CoinGecko plus a spread (at least 1% on mainnet)
+  and pauses when the feed is stale or the two sources are more than 2% apart; the app lists the operator's allowlisted makers with rate, age, range and liquidity.
 - Firm quotes, intent-style: you state the swap, partners answer with signed firm prices for 45 s,
   the best is taken, and an atomic swap settles it, so nobody holds funds in between. Only a rounded-up
   size bucket leaves your server, and only to its own partners

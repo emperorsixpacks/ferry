@@ -40,8 +40,14 @@ A maker quotes the fixed `--maker-offer RATE[:MIN:MAX]` rate, or follows the mar
 ferryd asks each source (no API keys, 5 s timeout per call), takes the median of the ones that
 answered with a fresh positive price, and sets rate = median × (1 + N/10000), in the quote's smallest
 unit per ZEC. If no source has answered for 5 minutes the offer pauses (`making: false`,
-`paused: true`) rather than quote a stale price. A proposal at the previous rate is still accepted for
-2 minutes after a change (a taker's quote in flight). `/peer/offer` (and `offer` in `/api/status`)
+`paused: true`) rather than quote a stale price. It also pauses while the sources that answered are
+more than 2% apart (`--maker-price-max-gap-bps`, default 200), until a refresh finds them close
+again: with two sources the median is their midpoint, so within 2% it is at most 1% from either one.
+On mainnet (Zcash's or the counter-chain's) a maker that follows a feed keeps at least 1% for
+itself: a Z maker needs `--maker-spread-bps=100` or more, a B maker `-100` or less, or ferryd refuses
+to start. That pays for the free option the side that locks second holds (about 0.5% of the amount
+over a 2-hour claim window) and for the price sources' error. A proposal at the previous rate is
+still accepted for 2 minutes after a change (a taker's quote in flight). `/peer/offer` (and `offer` in `/api/status`)
 then carry:
 
 ```json

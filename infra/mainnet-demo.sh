@@ -67,8 +67,10 @@ B_NAME="${B_NAME:-bram}"
 SWAP_ZAT="${SWAP_ZAT:-1000000}"
 MIN_ZAT="${MIN_ZAT:-500000}"
 MAX_ZAT="${MAX_ZAT:-$CAP_ZAT}"
-# B (the maker, the owner's own) buys ZEC this far under the market (basis points).
-SPREAD_BPS="${SPREAD_BPS:-50}"
+# B (the maker, the owner's own) buys ZEC this far under the market (basis points): at least 100,
+# ferryd's floor for a mainnet maker that follows a feed (crates/ferryd/src/config.rs,
+# MAINNET_MIN_SPREAD_BPS). B is a fixed-rate maker here, so this script holds it to that floor.
+SPREAD_BPS="${SPREAD_BPS:-100}"
 # RATE (USDC base units per ZEC) is set from the market at `up` unless given.
 RATE="${RATE:-}"
 
@@ -362,17 +364,20 @@ PY
 }
 
 # market_rate <market json>: USDC base units per ZEC, SPREAD_BPS under the market; dies when the
-# sources disagree by more than 3% or none answers.
+# sources disagree by more than 2% (ferryd's MAX_SOURCE_GAP_BPS, the same rule a node's makers
+# pause on), when none answers, or when SPREAD_BPS is under the 100 bps mainnet floor.
 market_rate() {
   python3 - "$1" "$SPREAD_BPS" <<'PY'
 import json, sys
 m = json.loads(sys.argv[1])
 spread = int(sys.argv[2])
+if spread < 100:
+    sys.exit("SPREAD_BPS=%d: a mainnet maker keeps at least 100 bps (1%%) of the market" % spread)
 a, k, usdc = m.get("zec"), m.get("kraken_zec"), m.get("usdc") or 1.0
 if a is None and k is None:
     sys.exit("no ZEC price from 1Click or Kraken")
-if a is not None and k is not None and abs(a - k) / k > 0.03:
-    sys.exit("the ZEC price from 1Click ($%.2f) and Kraken ($%.2f) differ by more than 3%%" % (a, k))
+if a is not None and k is not None and max(a, k) / min(a, k) - 1 > 0.02:
+    sys.exit("the ZEC price from 1Click ($%.2f) and Kraken ($%.2f) differ by more than 2%%" % (a, k))
 p = a if a is not None else k
 if not 1 <= p <= 100000:
     sys.exit("a ZEC price of $%s looks wrong" % p)

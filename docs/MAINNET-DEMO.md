@@ -77,8 +77,8 @@ http://127.0.0.1:7470/app (the NEAR sell shows on Activity).
   (NU6.3) is active on mainnet (height 3,428,143; the tip was 3,524,450 on 2026-10-20).
 - **Checks before anything moves.** Chain id 8453; USDC's `symbol()`, `decimals()` and `name()`
   read on chain; FerryLock's code equal to this build's (`deploy`, and ferryd at startup); B's rate
-  from 1Click's ZEC price, which must agree with Kraken's within 3% (B buys `SPREAD_BPS`, 50, under
-  it); every 1Click quote's ed25519 signature; the real quote's recipient, refund address and
+  from 1Click's ZEC price, which must agree with Kraken's within 2% (B buys `SPREAD_BPS`, 100, under
+  it: the 1% floor ferryd keeps for every mainnet maker); every 1Click quote's ed25519 signature; the real quote's recipient, refund address and
   minimum before the Ferry swap starts. The UI server listens on 127.0.0.1 only and takes at most 0.02 ZEC per swap.
 - **`sell`** shows both parts before anything starts: the Ferry leg (rate, USDC), 1Click's signed
   dry quote (USDC in, asset out and its minimum, the withdrawal fee, NEAR's cost in dollars, time),
@@ -119,7 +119,7 @@ Costs of one 0.01 ZEC sell (prices of 2026-10-20: ZEC about $1,220, ETH about $2
 | Z's claim (94k gas measured) | 0.0000006 ETH | $0.002 |
 | Zcash fees: Z's lock and B's sweep (ZIP-317, 2 actions each) | 0.0002 ZEC | $0.24 |
 | NEAR Intents: 1Click's fee (0.25% without a JWT), its route, the SOL withdrawal fee (about 0.00009 SOL, $0.01) | 0.3-1.2% of 12.2 USDC | $0.04-0.14 |
-| Maker spread (50 bps; B is you, so it comes back) | 0.06 USDC | $0 net |
+| Maker spread (100 bps; B is you, so it comes back) | 0.12 USDC | $0 net |
 
 So about **$0.30-0.45** out of pocket per sell, plus $0.03 once for the deployment. Real 1Click
 dry quotes on 2026-10-20 (USDC on Base → SOL, FLEX_INPUT, 1% slippage, every signature checked;

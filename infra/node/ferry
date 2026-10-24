@@ -691,8 +691,12 @@ write_env() {
       # proposal: claims until 2 h 15 min, B refunds from 4 h 15 min and has 24 h to (until
       # 28 h 15 min), Z punishes from 30 h 15 min (ferry-core's shipped_base_mainnet_terms test)
       printf 'EVM_T1_SECS=15300\nEVM_REFUND_SECS=93600\nEVM_DELTA_SECS=7200\nEVM_LOCK_CONFS=30\nZEC_CONFS=10\n'
-      # your own two wallets trade at the market (Kraken and CoinGecko), at most 0.02 ZEC a swap
-      printf 'PRICE_FEED=all\nUSDC_RATE=1000000000\nWETH_RATE=500000000000000000\n'
+      # your own two wallets trade at the market (Kraken and CoinGecko), at most 0.02 ZEC a swap,
+      # each keeping ferryd's mainnet maker spread: your Z asks 1% over the market, your B pays 1%
+      # under it (ferryd refuses less on mainnet), and pausing while the two feeds disagree by
+      # more than 2%
+      printf 'PRICE_FEED=all\nZ_SPREAD_BPS=100\nB_SPREAD_BPS=-100\n'
+      printf 'USDC_RATE=1000000000\nWETH_RATE=500000000000000000\n'
       printf 'USDC_MIN_ZAT=500000\nUSDC_MAX_ZAT=%s\nWETH_MIN_ZAT=500000\nWETH_MAX_ZAT=%s\n' "$MAX_ZAT" "$MAX_ZAT"
     else
       printf 'BASE_FERRYLOCK=%s\n' "$FERRYLOCK"

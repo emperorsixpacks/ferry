@@ -25,6 +25,11 @@ pub async fn run<L: ZecLeg + 'static>(cli: Cli, leg: L) -> anyhow::Result<()> {
     }
     let token_file = cli.data_dir.join("api-token");
     let daemon = daemon::EvmDaemon::new(cli, leg).await?;
+    // Only now is the chain known: a maker on a main network keeps its spread.
+    daemon
+        .cli
+        .check_maker_spread(ferry_core::evm::EvmPolicy::is_mainnet(daemon.chain_id))
+        .map_err(anyhow::Error::msg)?;
     tracing::info!(
         role = daemon.role.as_str(),
         name = %daemon.cli.name,

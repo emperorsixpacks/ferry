@@ -133,6 +133,8 @@ async fn run<L: ZecLeg + 'static>(cli: Cli, leg: L) -> anyhow::Result<()> {
     if cli.counter == evm::Counter::Evm {
         return evm::run(cli, leg).await;
     }
+    cli.check_maker_spread(cli.network == ferry_btc::bitcoin::Network::Bitcoin)
+        .map_err(anyhow::Error::msg)?;
     let (peer_addr, api_addr) = (cli.listen, cli.api_listen);
     if !api_addr.ip().is_loopback() && !cli.api_allow_remote {
         bail!(
