@@ -270,7 +270,9 @@ pub enum QuoteError {
     WrongRole(&'static str),
     #[error("not making offers")]
     NotMaking,
-    #[error("busy with another swap; ask again when it is done")]
+    #[error(
+        "busy: it runs as many swaps as it takes at once; ask again once one of them finishes"
+    )]
     Busy,
     #[error("this maker's swaps are {0}")]
     OutsideOffer(String),
@@ -326,7 +328,7 @@ pub struct MakerState {
     pub market: String,
     pub role: Role,
     pub making: bool,
-    /// A swap is in progress: the daemon runs one at a time, so no quote could be honoured.
+    /// No free slot (crate::capacity): no proposal could be taken now, so no quote is issued.
     pub busy: bool,
     pub rate: u64,
     pub min_zat: u64,
@@ -352,10 +354,11 @@ struct Book {
 
 /// A maker's quotes: issues them, and holds proposals that name one to its terms.
 ///
-/// ferryd runs one swap at a time, so quotes never compete for the same coins at once: each is only
-/// issued when the maker's balance covers its whole range, none while a swap is in progress, and at
-/// most [`MAX_OPEN`] ([`OPEN_PER_PEER`] per requesting address) are open at a time. If two open
-/// quotes are taken at the same moment, the second proposal is refused as busy.
+/// Each quote is only issued when the maker's free balance (what its swaps in progress don't hold,
+/// crate::capacity) covers its whole range, none while it has no free slot, and at most
+/// [`MAX_OPEN`] ([`OPEN_PER_PEER`] per requesting address) are open at a time. Open quotes can
+/// still compete for the same coins: if two are taken and the free balance covers only one, the
+/// second proposal is refused as busy.
 pub struct QuoteBook {
     key: QuoteKey,
     ttl: Duration,
@@ -657,13 +660,8 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     ) -> Result<SignedQuote, ApiError> {
         let book = self.quotes.as_ref().ok_or(QuoteError::NotMaking)?;
         let offer = self.offer_now().await;
-        let busy = self
-            .state
-            .lock()
-            .await
-            .swaps
-            .values()
-            .any(|r| !r.swap.is_final());
+        // No free slot: no quote it could honour now (crate::capacity).
+        let busy = offer.free_slots == Some(0);
         let m = MakerState {
             pair: offer.pair(),
             market: offer.market(),

@@ -101,6 +101,19 @@ pub trait ZecLeg: Send + Sync {
         0
     }
 
+    /// The values of our own `n` largest unspent Ironwood notes (zatoshi, largest first,
+    /// confirmed or not). A wallet picks whole notes for a lock until they cover it, so a lock
+    /// can take up to one note more than it needs; with several locks to fund, the daemon
+    /// counts that overshoot against what is spendable (`crate`'s caller: ferryd's capacity
+    /// check). Empty when the backend's balance is not made of notes (the mock): then only the
+    /// value counts.
+    fn largest_notes(
+        &self,
+        _n: usize,
+    ) -> impl Future<Output = Result<Vec<u64>, Self::Error>> + Send {
+        async { Ok(vec![]) }
+    }
+
     /// Whether a lock of ours to the joint address provably never landed and never will: no
     /// note worth at least `amount` there (from a mined or unexpired transaction), and no
     /// transaction we built that could still create one. Only answer true when that is

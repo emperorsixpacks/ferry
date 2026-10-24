@@ -717,16 +717,19 @@ impl<L: ferry_core::ZecLeg + 'static> crate::daemon::Daemon<L> {
         live_offer(&self.offer, self.price.as_deref(), funds, Instant::now())
     }
 
-    /// `GET /peer/offer`: liquidity from the last status refresh's balances.
+    /// `GET /peer/offer`: liquidity from the last status refresh's free balances (what our swaps
+    /// in progress don't hold), and how many more swaps we take now (crate::capacity).
     pub async fn offer_now(&self) -> Offer {
-        let balances = self
-            .state
-            .lock()
-            .await
-            .status
-            .as_ref()
-            .map(|s| s.balances.clone());
-        self.offer_with(balances.as_ref())
+        let (free, slots) = {
+            let st = self.state.lock().await;
+            let slots = crate::capacity::free_slots(self.max_swaps, self.count(&st));
+            (st.status.as_ref().map(|s| s.free.clone()), slots)
+        };
+        let mut offer = self.offer_with(free.as_ref());
+        if offer.making {
+            offer.free_slots = Some(slots);
+        }
+        offer
     }
 
     /// A proposal's BTC amount matches our rate: the fixed one, or the live one (or the one it
@@ -785,6 +788,7 @@ mod tests {
             rate_source: None,
             rate_updated_at: None,
             liquidity: None,
+            free_slots: None,
             paused: false,
             quote_key: None,
             features: vec![],

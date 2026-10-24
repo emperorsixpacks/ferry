@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { ArrowRight, ArrowsLeftRight, GearSix } from "@phosphor-icons/react";
-import { counterBalance, pairChain, startSwap, type Role, type RouteView, type Status, type SwapView } from "@/api";
+import { counterBalance, pairChain, startSwap, type PairId, type Role, type RouteView, type Status, type SwapView } from "@/api";
 import { CHAIN_NAMES, amountIn, coin, zec } from "@/format";
 import { Link, navigate } from "@/router";
 import { btcText } from "@/swap/shared";
@@ -18,7 +18,7 @@ import { CoinPicker, tokenSubtitle } from "../components/TokenPicker";
 import { Sheet } from "../components/ui/sheet";
 import { cn } from "../lib/utils";
 import { useLocal } from "../lib/daemon";
-import { capacity, counterFor, liveQuote, quoteOf, useMakers, type Makers, type Quote } from "../lib/makers";
+import { availability, busyFor, busyText, capacity, counterFor, isBusyText, liveQuote, quoteOf, useMakers, type Makers, type Quote } from "../lib/makers";
 import { comboSummary, isActive as nearActive, nearSummary, useNear } from "../lib/near";
 import { pairName } from "../lib/pairs";
 import { following, nearAssetOf, usePathCtx, useSelection, type CardProps, type Side } from "../lib/paths";
@@ -48,6 +48,8 @@ import { useActivityRows } from "./Activity";
 const ZEC_FEE_RESERVE = 50_000;
 // what a Bitcoin or Litecoin lock's own fee needs on top of the amount (ferryd's B keeps as much)
 const LOCK_FEE_RESERVE = 10_000;
+// when a swap started (its first timeline entry), for newest first
+const startedAt = (s: SwapView) => Date.parse(s.timeline[0]?.at ?? "") || 0;
 
 export function AppHome() {
   const d = useLocal();
@@ -61,12 +63,18 @@ export function AppHome() {
   const legs = legSwapIds(routes.list);
   for (const j of near.jobs) for (const id of [j.ferry.swap_id, ...j.ferry.earlier]) if (id) legs.add(id);
   for (const c of near.combos) for (const id of c.route.swaps) legs.add(id);
-  const live = d.list.find((s) => !s.outcome && !s.route && !legs.has(s.id));
+  // swaps run side by side (each node takes as many at once as its funds and --max-swaps allow), so
+  // a swap in progress never holds the card back; newest first
+  const lives = d.list.filter((s) => !s.outcome && s.state !== "Aborted" && !s.route && !legs.has(s.id)).sort((a, b) => startedAt(b) - startedAt(a));
+  const live = lives[0];
   const moving = routes.list.find((v) => isRunning(v) && !comboRoutes.has(v.id));
   const holding = routes.list.find((v) => v.state === "holding" && !comboRoutes.has(v.id));
   const nearLive = near.jobs.find(nearActive);
   const comboLive = near.combos.find(nearActive);
-  const blocked = moving || comboLive?.state === "route" ? "Finish your private swap first." : live ? "Finish the swap in progress first." : null;
+  // private swaps run one at a time, and while one moves, the ZEC it bought waits on the node that
+  // sells it: no direct sell there until it's done (server/prod.mjs says the same)
+  const routing = !!moving || comboLive?.state === "route";
+  const sellingOn = [moving?.to, comboLive?.state === "route" ? comboLive.to : null].filter(Boolean);
 
   const { pick, path } = sel;
   const column = useRef<HTMLDivElement>(null);
@@ -74,6 +82,13 @@ export function AppHome() {
   const panelHeight = useAlignedHeight(column, panel);
   let card = null;
   if (pick && path) {
+    const twoSwaps = path.kind === "route" || path.kind === "route-near" || path.kind === "near-route" || path.kind === "near-near";
+    const blocked =
+      twoSwaps && routing
+        ? "Finish your private swap first."
+        : path.kind === "sell" && path.pair && sellingOn.includes(path.pair)
+          ? `A private swap is selling ZEC for ${pairName(path.pair as PairId).label} right now. Try again when it finishes.`
+          : null;
     const props: CardProps = { pick, path, ctx, onPick: sel.pickSide, onFlip: sel.flip, blocked, optOut: sel.optOut };
     if (!path.available) card = <OffCard {...props} />;
     else if (path.kind === "near-only") card = <NearOnlyCard key={`${pick.sell}>${pick.buy}`} {...props} />;
@@ -93,6 +108,8 @@ export function AppHome() {
           <div className="lg:hidden">
             {moving ? (
               <RouteBanner route={moving} />
+            ) : lives.length > 1 ? (
+              <Banner to="/app/activity" title={`You have ${lives.length} swaps in progress`} line={`Newest: ${plainSummary(lives[0], d.status)}`} pulse />
             ) : live ? (
               <LiveBanner swap={live} status={d.status} />
             ) : comboLive ? (
@@ -141,10 +158,12 @@ function useAlignedHeight(column: RefObject<HTMLElement>, panel: RefObject<HTMLE
 }
 
 // "Recent activity": the latest few of the person's swaps, every kind, each row opening its
-// progress page; the rest on /app/activity. Beside the card, at the card's height (its list scrolls).
+// progress page; the rest on /app/activity. Swaps still in progress come first (several can run at
+// once, and an older one that is still moving must not drop below finished ones), each kind newest
+// first. Beside the card, at the card's height (its list scrolls).
 function RecentActivity({ sectionRef, height }: { sectionRef: RefObject<HTMLElement>; height: number | null }) {
   const rows = useActivityRows();
-  const shown = rows.slice(0, 7);
+  const shown = [...rows.filter((r) => r.live), ...rows.filter((r) => !r.live)].slice(0, 7);
   return (
     <section
       ref={sectionRef}
@@ -260,8 +279,13 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
   const zecBal = status?.balances.zec_shielded_zat ?? null;
   const coinBal = status ? counterBalance(status) : null;
 
-  const problem = problemOf({ amount, valid, zat, role, makers, quote, maker, usable, status, gross, evm });
+  // a swap's own time here (server/paths.mjs): also how long a busy partner usually needs for room again
+  const about = typicalText(status, pair);
+  const problem = problemOf({ amount, valid, zat, role, makers, quote, maker, usable, status, gross, evm, about });
   const blocked = elsewhere;
+  // the partner picked in settings went busy or offline: say so, as the quote moves to another
+  const picked = partner ? (makers.list?.find((m) => m.name === partner) ?? null) : null;
+  const pickedOut = picked && !picked.available && maker && maker.name !== picked.name ? picked : null;
 
   // the most ZEC this party can swap: its ZEC (less the lock's fee) when selling, what its coin
   // buys (less the lock's fee) when buying, within what a partner takes
@@ -291,13 +315,15 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
     } catch (e) {
       const msg = (e as Error).message;
       if (/firm (quote|price)/i.test(msg)) quotes.refresh();
-      setFail(plainError(msg, buying));
+      setFail(plainError(msg, buying, about));
     } finally {
       setBusy(false);
     }
   };
 
   const message = problem ?? blocked ?? fail;
+  // nothing wrong with the swap itself: it just has to wait (said calmly, not as an error)
+  const calm = message === blocked || isBusyText(message);
   const maxButton = (
     <button type="button" onClick={setMax} disabled={most == null} className="rounded-full px-2 py-0.5 text-xs font-semibold text-slate-900 transition-colors hover:bg-slate-200/70 disabled:text-slate-400">
       Max
@@ -443,9 +469,16 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
           ) : makers.list === undefined ? (
             <p>Finding the best rate…</p>
           ) : null}
+          {/* is the partner taking swaps now, and how many more */}
+          {quote && maker ? <p data-availability>{availability(maker, about)}</p> : null}
           {skipped && quote && maker ? (
             <p>
               {skipped.name} can fill up to {zec(capacity(quoteOf(skipped)!))} ZEC right now, so {maker.name} takes this one.
+            </p>
+          ) : null}
+          {pickedOut && quote && maker ? (
+            <p>
+              {pickedOut.name} is {pickedOut.busy ? "busy right now" : !pickedOut.online ? "offline" : "not taking swaps"}, so {maker.name} takes this one.
             </p>
           ) : null}
           <PathLine path={path} time={typicalText(status, pair) ?? undefined} />
@@ -458,7 +491,7 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
         >
           {busy ? "Starting…" : path.button}
         </button>
-        <p id="swap-message" role={message ? "alert" : undefined} className={cn("mt-3 text-center text-sm", !message ? "sr-only" : message === blocked ? "text-slate-600" : "text-rose-600")}>
+        <p id="swap-message" role={message ? "alert" : undefined} className={cn("mt-3 text-center text-sm", !message ? "sr-only" : calm ? "text-slate-600" : "text-rose-600")}>
           {message ?? ""}
         </p>
       </form>
@@ -483,6 +516,7 @@ function problemOf({
   status,
   gross,
   evm,
+  about,
 }: {
   amount: string;
   valid: boolean;
@@ -495,11 +529,16 @@ function problemOf({
   status: Status | null;
   gross: number;
   evm: boolean;
+  about: string | null;
 }): string | null {
   const t = coin().ticker;
   const buying = role === "B";
   if (amount.trim() === "") return buying ? "Enter how much ZEC you want." : "Enter how much ZEC to sell.";
   if (!valid) return "Enter an amount, like 1.00.";
+  // this node runs as many swaps as it takes at once (ferryd --max-swaps), or every partner for this
+  // way does: there is room again once a swap finishes
+  if (status?.capacity && status.capacity.free_slots === 0) return busyText(about);
+  if (makers.list && !usable.length && makers.list.some((m) => busyFor(m, role))) return busyText(about);
   if (makers.list && !usable.length) return `No partner is ${buying ? "selling" : "buying"} ZEC for ${t} right now. Try again in a minute.`;
   if (!buying && status) {
     const bal = status.balances.zec_shielded_zat;
@@ -521,9 +560,11 @@ function problemOf({
 
 // The daemon's and proxy's errors, for people: the details stay in the developer view. A refusal
 // from the partner ("The maker refused: ...") is about their funds, anything else about ours.
-function plainError(raw: string, buying: boolean): string {
+function plainError(raw: string, buying: boolean, about: string | null): string {
   const refused = /maker refused/i.test(raw);
-  if (/already in progress/i.test(raw)) return "Finish the swap in progress first.";
+  // the node or its partner runs as many swaps as it takes at once (ferryd's 409 "busy"; an older
+  // ferryd's "already in progress" is the same thing: it ran one at a time)
+  if (/^busy\b|every partner is busy|already in progress/i.test(raw) || /maker refused: busy/i.test(raw)) return busyText(about);
   // a send out of the node and a swap start never run together
   if (/withdraw/i.test(raw)) return "Your node is sending coins out. Try again in a moment.";
   // your own wallet's address, refused by your node or by the partner

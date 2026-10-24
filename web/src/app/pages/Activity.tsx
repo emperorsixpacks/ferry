@@ -105,7 +105,8 @@ export function useActivityRows(): ActivityRow[] {
 
   // swaps and private swaps together, newest first
   return [
-    ...items.map((it) => ({ at: Date.parse(it.swap.timeline[0]?.at ?? "") || 0, key: `${it.pair}:${it.swap.id}`, live: !it.swap.outcome, row: <Row item={it} onOpen={() => open(it)} /> })),
+    // an aborted negotiation has no outcome, but it is over
+    ...items.map((it) => ({ at: Date.parse(it.swap.timeline[0]?.at ?? "") || 0, key: `${it.pair}:${it.swap.id}`, live: !it.swap.outcome && it.swap.state !== "Aborted", row: <Row item={it} onOpen={() => open(it)} /> })),
     ...routes.list.filter((v) => !comboRoutes.has(v.id)).map((v) => ({ at: v.created_at * 1000, key: v.id, live: !ended(v.state), row: <RouteRow route={v} /> })),
     ...near.jobs.map((j) => ({ at: j.created_at * 1000, key: j.id, live: !ended(j.state), row: <NearRow job={j} /> })),
     ...near.combos.map((j) => ({ at: j.created_at * 1000, key: j.id, live: !ended(j.state), row: <ComboRow job={j} /> })),

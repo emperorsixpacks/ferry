@@ -67,6 +67,34 @@ export const swappable = (m: Maker) => m.pair === `ZEC/${coin().ticker}` && (coi
 // and holds the other side.
 export const selectable = (m: Maker, role: "Z" | "B") => m.available && swappable(m) && (m.role == null || m.role !== role);
 
+// What the app says when a node, or every partner, runs as many swaps as it takes at once (ferryd's
+// 409 "busy"). A partner has room again when one of its swaps finishes, so the only time worth
+// giving is a swap's own, `about` (typicalText: the table in server/paths.mjs that the card shows);
+// without it, no time at all. The UI server says the timeless one.
+export function busyText(about: string | null | undefined): string {
+  return about ? `Every partner is busy right now. A swap takes ${about}, so one usually has room again within that.` : BUSY_TEXT;
+}
+export const BUSY_TEXT = "Every partner is busy right now. Try again once one of their swaps finishes.";
+export const isBusyText = (s: string | null | undefined) => !!s && s.startsWith("Every partner is busy right now.");
+
+// A partner that swaps this way but is full right now (it takes more once a swap of its finishes).
+export const busyFor = (m: Maker, role: "Z" | "B") => !!m.busy && swappable(m) && (m.role == null || m.role !== role);
+
+// "can take 3 more swaps", "can take 1 more swap"; null when the partner doesn't say (an older ferryd)
+export const slotsText = (m: Maker) => (m.free_slots == null ? null : `can take ${m.free_slots} more ${m.free_slots === 1 ? "swap" : "swaps"}`);
+
+// One small line on whether a partner takes swaps now: "Partner online · can take 3 more swaps",
+// "Partner busy · usually free again within about 20–40 min" (`about`: typicalText, a swap's own
+// time; without it no time is given), "Partner offline". null: no partner to speak of.
+export function availability(m: Maker | null | undefined, about?: string | null): string | null {
+  if (!m) return null;
+  if (!m.online) return "Partner offline";
+  if (m.busy) return about ? `Partner busy · usually free again within ${about}` : "Partner busy · free again when a swap finishes";
+  if (m.paused || !m.available) return "Partner paused";
+  const slots = slotsText(m);
+  return slots ? `Partner online · ${slots}` : "Partner online";
+}
+
 // The daemon's own offer, for a server without a maker directory only: a taker's status.offer is
 // ferryd's default maker offer, a placeholder, so with a directory the rate comes from a maker.
 export const ownQuote = (s: Status): Quote => ({

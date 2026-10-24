@@ -5,12 +5,13 @@
 // so the route holds the ZEC and "Finish now" completes it, Activity with one row per private swap,
 // and no route UI on a server without a router. Then the production server (server/prod.mjs, needs
 // `pnpm build` first): GET /api/pairs, a route started by partner names, URLs never forwarded or
-// shown, the read-only allowlist, one live route, and a direct swap refused while a route runs.
+// shown, the read-only allowlist, one live route, and, while a route is between its swaps, a direct
+// sell refused on the pair it sells ZEC on (its ZEC waits there) but not on another pair.
 // Screenshots go to screenshots/app/route/ (SHOOT_OUT=dir to put them elsewhere; SHOOT_THEME=dark to
 // take them in dark mode).
 //
 // Ports (override with SHOOT_PORT_BASE): mock Z base+31, B base+32, router base+33, Vite base+71,
-// prod base+72.
+// prod base+72; SHOOT_VITE_PORT and SHOOT_PROD_PORT set those two on their own.
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { chromium } from "playwright";
@@ -20,8 +21,8 @@ const BASE_PORT = Number(process.env.SHOOT_PORT_BASE ?? 7800);
 const Z = BASE_PORT + 31;
 const B = BASE_PORT + 32;
 const ROUTER = BASE_PORT + 33;
-const VITE = BASE_PORT + 71;
-const PROD = BASE_PORT + 72;
+const VITE = Number(process.env.SHOOT_VITE_PORT ?? BASE_PORT + 71);
+const PROD = Number(process.env.SHOOT_PROD_PORT ?? BASE_PORT + 72);
 const OUT = (process.env.SHOOT_OUT ?? new URL("../screenshots/app/route/", import.meta.url).pathname).replace(/\/?$/, "/");
 mkdirSync(OUT, { recursive: true });
 
@@ -43,7 +44,8 @@ const env = {
 const procs = [
   spawn(process.execPath, ["mock/server.mjs"], { env, stdio: "ignore" }),
   spawn("pnpm", ["exec", "vite", "--port", String(VITE), "--strictPort"], { env: { ...env, PORT: String(VITE) }, stdio: "ignore" }),
-  spawn(process.execPath, ["server/prod.mjs"], { env: { ...env, PORT: String(PROD), HOST: "127.0.0.1", DEMO_MAX_ZAT: "200000000", DEMO_RATE_PER_HOUR: "3" }, stdio: "inherit" }),
+  // the mock Z party also stands in for the node's USDC-on-Base daemon, which sells the route's ZEC
+  spawn(process.execPath, ["server/prod.mjs"], { env: { ...env, PORT: String(PROD), HOST: "127.0.0.1", DEMO_MAX_ZAT: "200000000", DEMO_RATE_PER_HOUR: "3", FERRY_USDC_BASE_URL: `http://127.0.0.1:${Z}`, FERRY_USDC_BASE_TOKEN: "" }, stdio: "inherit" }),
 ];
 const cleanup = () => procs.forEach((p) => p.kill("SIGTERM"));
 process.on("exit", cleanup);
@@ -326,10 +328,15 @@ r = await post(PRD, "/router/api/routes", { ...body, to: "ltc", maker2: ["Avocet
 check(r.status === 409, `prod: one live route at a time (${r.status})`);
 r = await post(PRD, `/router/api/routes/${created.id}/continue`, { maker2: ["http://evil"], min_out: 1 });
 check(r.status === 409, "prod: continue is forwarded with no body of the browser's (the router refuses it during swap 1)");
-// between its two swaps no swap runs on any daemon, but the route's ZEC waits on one: nothing may spend it
+// between its two swaps the route's ZEC waits on the daemon that sells it for USDC: no direct sell
+// there, but other swaps run as usual
 await until(created.id, (x) => x.state === "pausing", "the prod route's pause");
+r = await post(PRD, "/daemon/usdc-base/api/swaps", { maker: "Egret", zec_zat: 20_000_000 });
+const conflict = await r.json();
+check(r.status === 409 && conflict.error === "A private swap is selling ZEC on this pair right now. Try again when it finishes.", `prod: no direct sell on the pair the route sells on (${r.status} ${conflict.error})`);
 r = await post(PRD, "/daemon/z/api/swaps", { maker: "Kestrel", zec_zat: 20_000_000 });
-check(r.status === 409 && /private swap/.test((await r.json()).error), `prod: no direct swap while a route is between its swaps (${r.status})`);
+const beside = await r.json();
+check(r.status === 201, `prod: a sell on another pair starts while the route runs (${r.status} ${beside.error ?? ""})`);
 // SSE: the stream's routes carry no URL either
 const ctl = new AbortController();
 const es = await fetch(PRD + "/router/api/events", { signal: ctl.signal });

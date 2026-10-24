@@ -202,6 +202,42 @@ impl SwapRecord {
         self.swap.role()
     }
 
+    /// This swap's place in the cap (crate::capacity): whether the counterparty has locked yet.
+    pub fn load(&self) -> crate::capacity::Load {
+        let state = self.state();
+        let partner_locked = match self.role() {
+            // B's coins are on chain once we have seen the lock confirm (or a spend of it).
+            Role::Z => !matches!(
+                state.as_str(),
+                "Negotiated" | "CancelSigsSent" | "CancelSigned" | "Aborted"
+            ),
+            // Z's ZEC lock note, seen with the joint viewing key.
+            Role::B => {
+                self.zec_lock_txid.is_some()
+                    || matches!(
+                        state.as_str(),
+                        "ZecSeen" | "RedeemSigSent" | "BtcRedeemed" | "ZecSwept"
+                    )
+            }
+        };
+        crate::capacity::Load {
+            finished: self.swap.is_final(),
+            partner_locked,
+            created_ms: self.created_ms,
+        }
+    }
+
+    /// B: the coins of our lock transaction, once funded.
+    pub fn lock_inputs(&self) -> Vec<ferry_btc::bitcoin::OutPoint> {
+        match &self.swap {
+            Swap::B(b) => b
+                .lock_tx()
+                .map(|tx| tx.input.iter().map(|i| i.previous_output).collect())
+                .unwrap_or_default(),
+            Swap::Z(_) => vec![],
+        }
+    }
+
     /// State name without variant data (`ZecSeen { confs: 1 }` → `ZecSeen`).
     pub fn state(&self) -> String {
         state_label(&self.swap.state_name())

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 
-use ferry_btc::bitcoin::{Address, Amount, Network, Transaction, Txid};
+use ferry_btc::bitcoin::{Address, Amount, Network, OutPoint, Transaction, Txid};
 use ferry_btc::rpc::{BitcoinRpc, RpcError};
 use ferry_btc::Chain;
 use ferry_core::{
@@ -77,14 +77,21 @@ pub struct Daemon<L> {
     proposals: std::sync::Mutex<VecDeque<Instant>>,
     /// Our firm quotes, when making offers (crate::quote).
     pub quotes: Option<crate::quote::QuoteBook>,
-    /// The `POST /api/swaps` or `POST /api/withdraw` in progress, if any (crate::route).
+    /// The swaps being started or taken and the withdrawal being sent: one funds check at a
+    /// time (crate::route::Starts).
     starts: crate::route::Starts,
     /// "Send to my wallet" (crate::withdraw).
     pub withdrawals: crate::withdraw::Withdrawals,
+    /// `--max-swaps`, or the network's default (crate::capacity).
+    pub max_swaps: u32,
 }
 
 /// At most this many proposals per minute reach the maker's negotiation code.
 const PROPOSALS_PER_MINUTE: usize = 6;
+/// How long a taker waits for the maker's Accept. The maker answers once its tick lets go of
+/// its swaps, which with several swaps (a ZEC lock being proved, a slow node) can take longer
+/// than the 10 s every other peer call gets.
+const PROPOSE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Past this many refused envelopes a swap answers 429: a peer can't grow the record forever.
 const MAX_REJECTED: u32 = 16;
 /// The protocol needs a handful of taker messages per swap.
@@ -227,7 +234,12 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         let (events, _) = broadcast::channel(256);
         let quotes = crate::quote::maker_book(&cli)?;
         let withdrawals = crate::withdraw::Withdrawals::open(&cli.data_dir, events.clone())?;
-        Ok(Arc::new(Daemon {
+        let max_swaps = crate::capacity::max_swaps(
+            cli.max_swaps,
+            cli.network == Network::Bitcoin || cli.zec_network == "main",
+        );
+        let daemon = Arc::new(Daemon {
+            max_swaps,
             withdrawals,
             role: cli.role.into(),
             offer: Offer {
@@ -249,7 +261,23 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             policy,
             proposals: std::sync::Mutex::new(VecDeque::new()),
             starts: crate::route::Starts::default(),
-        }))
+        });
+        // The node forgets which coins it locked when it restarts: the locks we funded but that
+        // aren't out yet keep theirs, and those of swaps aborted before going out give theirs
+        // back (in case that was missed).
+        {
+            let st = daemon.state.lock().await;
+            match daemon.relock_inflight(&st).await {
+                Ok(None) => {}
+                Ok(Some(why)) => tracing::warn!("{why}"),
+                Err(e) => tracing::warn!("locking the coins of unbroadcast locks: {e}"),
+            }
+            for rec in st.swaps.values().filter(|r| r.state() == "Aborted") {
+                daemon.release_lock_coins(rec).await;
+            }
+        }
+        tracing::info!(max_swaps, "runs up to {max_swaps} swaps at once");
+        Ok(daemon)
     }
 
     fn network(&self) -> Network {
@@ -284,11 +312,17 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             zec_shielded_zat: zec.shielded_balance,
             btc_sat: self.rpc.balance().await?.to_sat(),
         };
-        let offer = self.offer_with(Some(&balances));
+        let (free, capacity) = self.free_balances(&balances).await?;
+        let mut offer = self.offer_with(Some(&free));
+        if offer.making {
+            offer.free_slots = Some(capacity.free_slots);
+        }
         Ok(StatusView {
             role: self.role,
             name: self.cli.name.clone(),
             balances,
+            free,
+            capacity,
             chains: view::Chains {
                 btc: view::BtcChain {
                     coin: self.cli.chain,
@@ -355,19 +389,24 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             return Err(ApiError::bad("maker URL is required"));
         }
         route.check(self.role)?;
-        // One start at a time, one swap per route label, and none while a swap runs. Held until
-        // this request ends, however it ends.
-        let _start = {
+        // One swap per route label; then this start's turn (crate::route::Starts): starts queue,
+        // each one's funds check and its record belong together. Held until this request ends,
+        // however it ends.
+        let start = {
             let st = self.state.lock().await;
             self.starts.begin(
                 route.route.as_deref(),
                 st.swaps.values().map(|r| crate::route::Held {
                     id: &r.id,
                     route: r.route.as_deref(),
-                    finished: r.swap.is_final(),
                 }),
             )?
         };
+        let _turn = start.turn().await;
+        {
+            let st = self.state.lock().await;
+            crate::capacity::admit(self.max_swaps, self.count(&st))?;
+        }
         if let Some(to) = &route.sweep_to {
             crate::withdraw::check_zec_destination(&self.leg, to)
                 .await
@@ -455,7 +494,10 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         params
             .check_policy(&self.policy)
             .map_err(|e| ApiError::bad(format!("The maker's terms are not acceptable: {e}")))?;
-        self.check_funds(&params).await?;
+        {
+            let st = self.state.lock().await;
+            self.check_funds(&st, &params).await?;
+        }
         let address = self
             .rpc
             .new_address(self.network())
@@ -478,6 +520,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         let resp = self
             .http
             .post(format!("{maker}/peer/swaps"))
+            .timeout(PROPOSE_TIMEOUT)
             .json(&ProposeRequest {
                 envelope: propose,
                 taker_url: self.cli.public_url(),
@@ -487,12 +530,19 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             .await
             .map_err(|e| ApiError::upstream(format!("maker unreachable: {e}")))?;
         if !resp.status().is_success() {
+            let status = resp.status().as_u16();
             let code = if resp.status().is_client_error() {
                 400
             } else {
                 502
             };
             let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            if let Some(why) = crate::capacity::peer_busy(status, &body) {
+                return Err(ApiError::busy(format!(
+                    "the maker can't take another swap right now ({why}); try again once one of \
+                     its swaps finishes"
+                )));
+            }
             let msg = body["error"]
                 .as_str()
                 .unwrap_or("proposal refused")
@@ -626,8 +676,14 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             }
             _ => {
                 // Held until the withdrawal is out: no lock is funded from the wallet meanwhile.
+                // The coins of our funded locks that aren't out yet are locked in the wallet
+                // (again, after a node restart), so it can't pick them.
                 let st = self.state.lock().await;
-                let (holds, blocked) = self.btc_holds(&st).await?;
+                let blocked = self
+                    .relock_inflight(&st)
+                    .await
+                    .map_err(|e| ApiError(503, e.to_string()))?;
+                let holds = self.btc_holds(&st);
                 w::send_btc(
                     &self.withdrawals,
                     &self.rpc,
@@ -659,45 +715,127 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             .collect()
     }
 
-    /// What our live B swaps hold of our BTC: their lock (and its fee) until it is funded. A lock
-    /// that is funded but not yet known to the node still spends wallet coins the wallet thinks
-    /// are free, so no withdrawal goes out then (the reason is the second value).
-    async fn btc_holds(
+    /// What our live B swaps hold of our BTC: their lock (and its fee) until it is funded. Once
+    /// funded, the lock's coins are locked in the wallet until it goes out (see
+    /// [`Self::relock_inflight`]), so [`BitcoinRpc::spendable_balance`] already leaves them out.
+    fn btc_holds(&self, st: &State) -> Vec<crate::withdraw::Hold> {
+        st.swaps
+            .values()
+            .filter(|r| r.role() == Role::B && !r.swap.is_final())
+            .filter(|r| r.swap.lock_outpoint().is_none())
+            .map(|r| crate::withdraw::Hold {
+                units: u128::from(r.swap.session().params.btc_amount)
+                    + u128::from(LOCK_FEE_RESERVE_SAT),
+                why: format!("swap {}'s lock", crate::withdraw::short_id(&r.id)),
+            })
+            .collect()
+    }
+
+    /// The swaps' place in the cap (crate::capacity).
+    pub(crate) fn count(&self, st: &State) -> crate::capacity::Count {
+        crate::capacity::count(
+            st.swaps.values().map(SwapRecord::load),
+            now_ms(),
+            self.cli.negotiation_timeout_secs.saturating_mul(1000),
+        )
+    }
+
+    /// What new swaps may use, and the capacity view: our spendable shielded ZEC less what live
+    /// Z swaps hold and the notes their locks may take, and our wallet's spendable coins
+    /// (without the locked coins of funded locks) less what live B swaps hold. `balances`: the
+    /// wallets as they stand.
+    async fn free_balances(
         &self,
-        st: &State,
-    ) -> Result<(Vec<crate::withdraw::Hold>, Option<String>), ApiError> {
-        let mut holds = vec![];
-        for r in st.swaps.values() {
-            if r.role() != Role::B || r.swap.is_final() {
+        balances: &view::Balances,
+    ) -> anyhow::Result<(view::Balances, crate::capacity::CapacityView)> {
+        let (needs, btc_held, count) = {
+            let st = self.state.lock().await;
+            let needs: Vec<u64> = self
+                .zec_holds(&st)
+                .iter()
+                .map(|h| u64::try_from(h.units).unwrap_or(u64::MAX))
+                .collect();
+            let held = crate::withdraw::held(&self.btc_holds(&st));
+            (needs, held, self.count(&st))
+        };
+        let zec = if needs.is_empty() {
+            balances.zec_shielded_zat
+        } else {
+            let largest = self.leg.largest_notes(needs.len()).await?;
+            crate::capacity::zec_room(balances.zec_shielded_zat, &largest, &needs, 0)
+        };
+        let btc = match self.role {
+            Role::B => self.rpc.spendable_balance().await?.to_sat(),
+            Role::Z => balances.btc_sat,
+        };
+        let free = view::Balances {
+            zec_shielded_zat: zec,
+            btc_sat: u64::try_from(u128::from(btc).saturating_sub(btc_held)).unwrap_or(0),
+        };
+        Ok((
+            free,
+            crate::capacity::CapacityView::of(self.max_swaps, count),
+        ))
+    }
+
+    /// B: the coins of every lock we funded that the node hasn't seen go out stay locked in the
+    /// wallet, so nothing else it funds can pick them. The wallet locks them when funding, but
+    /// forgets on a restart; this locks them again. A lock that is out has spent its coins.
+    /// Returns why a withdrawal must wait, if some of them can't be locked.
+    async fn relock_inflight(&self, st: &State) -> Result<Option<String>, RpcError> {
+        let mut coins = vec![];
+        for r in st.swaps.values().filter(|r| !r.swap.is_final()) {
+            let inputs = r.lock_inputs();
+            let Some(lock) = r.swap.lock_outpoint().filter(|_| !inputs.is_empty()) else {
                 continue;
-            }
-            let id = crate::withdraw::short_id(&r.id);
-            match r.swap.lock_outpoint() {
-                None => holds.push(crate::withdraw::Hold {
-                    units: u128::from(r.swap.session().params.btc_amount)
-                        + u128::from(LOCK_FEE_RESERVE_SAT),
-                    why: format!("swap {id}'s lock"),
-                }),
-                Some(lock) => {
-                    let known = self
-                        .rpc
-                        .confirmations(&lock.txid)
-                        .await
-                        .map_err(|e| ApiError(503, e.to_string()))?;
-                    if known.is_none() {
-                        return Ok((
-                            holds,
-                            Some(format!(
-                                "Swap {id}'s {} lock is funded but not broadcast yet; withdraw \
-                                 once it is out (a minute or so)",
-                                self.cli.chain.ticker()
-                            )),
-                        ));
-                    }
-                }
+            };
+            if self.rpc.confirmations(&lock.txid).await?.is_none() {
+                coins.extend(inputs);
             }
         }
-        Ok((holds, None))
+        if coins.is_empty() {
+            return Ok(None);
+        }
+        let failed = self.rpc.lock_coins(&coins).await?;
+        if failed.is_empty() {
+            return Ok(None);
+        }
+        for (coin, e) in &failed {
+            tracing::warn!(%coin, "can't lock a coin of an unbroadcast swap lock: {e}");
+        }
+        Ok(Some(format!(
+            "A swap's {} lock is funded but not out yet, and the wallet can't keep its coins \
+             aside; withdraw once it is out (a minute or so)",
+            self.cli.chain.ticker()
+        )))
+    }
+
+    /// B: a lock that will never go out (the swap was aborted, or its funding was refused)
+    /// gives its coins back to the wallet. Best effort: one left locked stays idle only until
+    /// the node restarts.
+    async fn release_coins(&self, id: &str, lock: Option<Txid>, coins: Vec<OutPoint>) {
+        if coins.is_empty() {
+            return;
+        }
+        if let Some(txid) = lock {
+            // Out after all: its coins are spent, nothing to give back.
+            if !matches!(self.rpc.confirmations(&txid).await, Ok(None)) {
+                return;
+            }
+        }
+        match self.rpc.unlock_coins(&coins).await {
+            Ok(()) => tracing::info!(%id, "released the coins of a lock that never went out"),
+            Err(e) => tracing::warn!(%id, "releasing the coins of an unused lock: {e}"),
+        }
+    }
+
+    async fn release_lock_coins(&self, rec: &SwapRecord) {
+        self.release_coins(
+            &rec.id,
+            rec.swap.lock_outpoint().map(|o| o.txid),
+            rec.lock_inputs(),
+        )
+        .await;
     }
 
     /// Follow the withdrawals still open (skipped while one is being sent).
@@ -709,47 +847,101 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         crate::withdraw::follow_btc(&self.withdrawals, &self.rpc).await;
     }
 
-    /// Whether our wallet can fund our side of `params`.
-    async fn check_funds(&self, params: &ferry_core::SwapParams) -> Result<(), ApiError> {
+    /// Whether our wallet can fund our side of `params` next to every live swap's reservation
+    /// (crate::capacity). Called in this swap's turn with the state held, so what it counts is
+    /// what the record will hold. Short of funds that live swaps hold: busy (they come back as
+    /// those swaps lock or end). Short with nothing held: not enough, plainly.
+    async fn check_funds(
+        &self,
+        st: &State,
+        params: &ferry_core::SwapParams,
+    ) -> Result<(), ApiError> {
+        let unavailable = |e: String| ApiError(503, e);
+        let live = st
+            .swaps
+            .values()
+            .any(|r| r.role() == self.role && !r.swap.is_final());
         match self.role {
             Role::Z => {
                 let have = self
                     .leg
                     .status()
                     .await
-                    .map_err(|e| ApiError(503, e.to_string()))?
+                    .map_err(|e| unavailable(e.to_string()))?
                     .shielded_balance;
                 // The same bar the wallet sets for the lock itself (amount plus fees), so Z
                 // declines here rather than refusing the lock after B has locked BTC.
                 let need = params.zec_amount + self.leg.send_fee_reserve();
-                if have < need {
-                    return Err(ApiError::bad(format!(
-                        "Z does not have enough shielded ZEC: {have} zat spendable in Ironwood, \
-                         {need} zat needed (the amount plus fees)"
+                // Every lock not sent yet, this one last: our notes must fund them all at once,
+                // whichever notes the wallet picks for each.
+                let mut needs: Vec<u64> = self
+                    .zec_holds(st)
+                    .iter()
+                    .map(|h| u64::try_from(h.units).unwrap_or(u64::MAX))
+                    .collect();
+                needs.push(need);
+                let largest = self
+                    .leg
+                    .largest_notes(needs.len() - 1)
+                    .await
+                    .map_err(|e| unavailable(e.to_string()))?;
+                if crate::capacity::zec_locks_fit(have, &largest, &needs) {
+                    return Ok(());
+                }
+                if live {
+                    return Err(ApiError::busy(format!(
+                        "the shielded ZEC this swap needs is held by {} swap(s) in progress, or \
+                         sits in notes their locks may take (change waits for confirmations); \
+                         try again once they have locked and the change has confirmed",
+                        needs.len() - 1
                     )));
                 }
+                Err(ApiError::bad(format!(
+                    "Z does not have enough shielded ZEC: {have} zat spendable in Ironwood, \
+                     {need} zat needed (the amount plus fees)"
+                )))
             }
             Role::B => {
+                // Funded locks not out yet keep their coins locked, so the spendable balance
+                // leaves them out (the wallet forgets its locks on a restart: lock them again).
+                if let Ok(Some(why)) | Err(why) =
+                    self.relock_inflight(st).await.map_err(|e| e.to_string())
+                {
+                    tracing::warn!("{why}");
+                }
                 let have = self
                     .rpc
-                    .balance()
+                    .spendable_balance()
                     .await
-                    .map_err(|e| ApiError(503, e.to_string()))?
+                    .map_err(|e| unavailable(e.to_string()))?
                     .to_sat();
+                let holds = self.btc_holds(st);
                 // The lock pays its own (wallet-chosen) fee on top of the amount.
                 let need = params.btc_amount.saturating_add(LOCK_FEE_RESERVE_SAT);
-                if have < need {
-                    let t = self.cli.chain.ticker();
-                    return Err(ApiError::bad(format!(
-                        "B does not have enough {t}: {} needed (the amount plus about {} for the lock's fee), {} in the wallet",
-                        coin_str(need, t),
-                        coin_str(LOCK_FEE_RESERVE_SAT, t),
-                        coin_str(have, t)
+                let t = self.cli.chain.ticker();
+                if u128::from(need) <= crate::withdraw::free(u128::from(have), &holds) {
+                    return Ok(());
+                }
+                if live {
+                    return Err(ApiError::busy(format!(
+                        "the {t} this swap needs is held by swaps in progress ({} free, {} \
+                         needed); try again once one of them has locked",
+                        coin_str(
+                            u64::try_from(crate::withdraw::free(u128::from(have), &holds))
+                                .unwrap_or(0),
+                            t
+                        ),
+                        coin_str(need, t)
                     )));
                 }
+                Err(ApiError::bad(format!(
+                    "B does not have enough {t}: {} needed (the amount plus about {} for the lock's fee), {} in the wallet",
+                    coin_str(need, t),
+                    coin_str(LOCK_FEE_RESERVE_SAT, t),
+                    coin_str(have, t)
+                )))
             }
         }
-        Ok(())
     }
 
     fn new_record(
@@ -797,18 +989,28 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             return Err(ApiError::bad("expected a Propose message"));
         };
         let id = hex::encode(env.session_id);
+        let again = |st: &State| {
+            st.swaps.get(&id).map(|rec| {
+                rec.outbox
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| ApiError::conflict("swap id in use"))
+            })
+        };
+        // A Propose we already took gets the same Accept, whatever else is going on.
+        if let Some(reply) = again(&*self.state.lock().await) {
+            return reply;
+        }
+        // One funds check at a time (crate::route::Starts): while a start of ours or another
+        // Propose has the turn, the taker is told to try again in a moment.
+        let _turn = self.starts.try_turn().ok_or_else(|| {
+            ApiError::busy("this node is starting another swap right now; try again in a moment")
+        })?;
         let mut st = self.state.lock().await;
-        if let Some(rec) = st.swaps.get(&id) {
-            return rec
-                .outbox
-                .first()
-                .cloned()
-                .ok_or_else(|| ApiError::conflict("swap id in use"));
+        if let Some(reply) = again(&st) {
+            return reply;
         }
-        // A swap of ours (or one being started as taker) is still running: one at a time.
-        if st.swaps.values().any(|r| !r.swap.is_final()) || self.starts.busy() {
-            return Err(ApiError::conflict("A swap is already in progress"));
-        }
+        crate::capacity::admit(self.max_swaps, self.count(&st))?;
         if setup.role != self.role.peer() {
             return Err(ApiError::bad(format!(
                 "taker must have role {}",
@@ -845,7 +1047,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         params
             .check_policy(&self.policy)
             .map_err(|e| ApiError::bad(e.to_string()))?;
-        self.check_funds(params).await?;
+        self.check_funds(&st, params).await?;
         let address = self
             .rpc
             .new_address(self.network())
@@ -1069,8 +1271,18 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     async fn drive_pending(&self, rec: &mut SwapRecord) {
         let mut queue: VecDeque<Event> = self.run_pending(rec).await.into();
         while let Some(ev) = queue.pop_front() {
+            // A funded lock the swap refuses is never broadcast: its coins go back.
+            let funded = match &ev {
+                Event::LockFunded { tx, .. } => {
+                    Some(tx.input.iter().map(|i| i.previous_output).collect())
+                }
+                _ => None,
+            };
             if let Err(e) = self.apply(rec, ev) {
                 tracing::warn!(id = %rec.id, "follow-up event rejected: {e}");
+                if let Some(coins) = funded {
+                    self.release_coins(&rec.id, None, coins).await;
+                }
             }
             queue.extend(self.run_pending(rec).await);
         }
@@ -1713,6 +1925,23 @@ impl<L: ZecLeg + 'static> Daemon<L> {
 
     pub async fn tick(&self) {
         let mut st = self.state.lock().await;
+        // Swaps run one after the other in a tick, with the state held: no two of them fund,
+        // sign or send from the same wallet at once. Before a lock is funded, the coins of the
+        // locks funded earlier and not out yet are locked again if the node forgot them, so the
+        // wallet can't pick them twice.
+        let funding = st.swaps.values().any(|r| {
+            !r.swap.is_final()
+                && r.pending
+                    .iter()
+                    .any(|p| matches!(p, Pending::FundLock { .. }))
+        });
+        if funding {
+            match self.relock_inflight(&st).await {
+                Ok(None) => {}
+                Ok(Some(why)) => tracing::warn!("{why}"),
+                Err(e) => tracing::warn!("locking the coins of unbroadcast locks: {e}"),
+            }
+        }
         let ids: Vec<String> = st.swaps.keys().cloned().collect();
         for id in ids {
             let Some(rec) = st.swaps.get_mut(&id) else {
@@ -1852,6 +2081,10 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         }
         if let Err(e) = self.process(rec, Event::Timeout).await {
             tracing::warn!(id = %rec.id, "timeout: {e}");
+        }
+        // B's lock was funded but never went out: its coins go back to the wallet.
+        if rec.state() == "Aborted" {
+            self.release_lock_coins(rec).await;
         }
     }
 

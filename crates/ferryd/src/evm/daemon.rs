@@ -66,10 +66,28 @@ pub struct EvmDaemon<L> {
     logs: std::sync::Mutex<HashMap<String, LogCache>>,
     /// Our firm quotes, when making offers (crate::quote).
     pub quotes: Option<crate::quote::QuoteBook>,
-    /// The `POST /api/swaps` or `POST /api/withdraw` in progress, if any (crate::route).
+    /// The swaps being started or taken and the withdrawal being sent: one funds check at a
+    /// time (crate::route::Starts).
     starts: crate::route::Starts,
     /// "Send to my wallet" (crate::withdraw).
     pub withdrawals: crate::withdraw::Withdrawals,
+    /// `--max-swaps`, or the network's default (crate::capacity).
+    pub max_swaps: u32,
+}
+
+/// How long a taker waits for the maker's Accept (crate::daemon has the reason).
+const PROPOSE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A main network: real funds, so the smaller default cap (crate::capacity).
+fn mainnet_chain(chain_id: u64) -> bool {
+    use ferry_core::evm::{ARBITRUM_CHAIN_ID, BASE_CHAIN_ID, ETHEREUM_CHAIN_ID, OPTIMISM_CHAIN_ID};
+    [
+        ETHEREUM_CHAIN_ID,
+        BASE_CHAIN_ID,
+        OPTIMISM_CHAIN_ID,
+        ARBITRUM_CHAIN_ID,
+    ]
+    .contains(&chain_id)
 }
 
 /// Gas a live swap may still spend, per action, for the reserve a withdrawal leaves in place
@@ -247,6 +265,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             rate_source: None,
             rate_updated_at: None,
             liquidity: None,
+            free_slots: None,
             paused: false,
             quote_key: None,
         };
@@ -298,8 +317,17 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             logs: std::sync::Mutex::new(HashMap::new()),
             quotes,
             starts: crate::route::Starts::default(),
+            max_swaps: crate::capacity::max_swaps(
+                cli.max_swaps,
+                mainnet_chain(chain_id) || cli.zec_network == "main",
+            ),
             cli,
         };
+        tracing::info!(
+            max_swaps = daemon.max_swaps,
+            "runs up to {} swaps at once",
+            daemon.max_swaps
+        );
         if daemon.offer.making {
             // Our own maker terms must pass our own policy, and our largest swap must fit the
             // per-swap cap (u64 base units) at our rate.
@@ -376,10 +404,16 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             token_units: tokens.to_string(),
             eth_wei: eth.to_string(),
         };
-        let offer = self.offer_with(Some(&balances));
+        let (free, capacity) = self.free_balances(&balances).await?;
+        let mut offer = self.offer_with(Some(&free));
+        if offer.making {
+            offer.free_slots = Some(capacity.free_slots);
+        }
         Ok(EvmStatusView {
             role: self.role,
             name: self.cli.name.clone(),
+            free,
+            capacity,
             chains: view::Chains {
                 btc: view::CounterChain {
                     network: self.offer.network.clone(),
@@ -450,15 +484,19 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         offer
     }
 
+    /// `GET /peer/offer`: liquidity from the last status refresh's free balances, and how many
+    /// more swaps we take now (crate::capacity).
     pub async fn offer_now(&self) -> EvmOffer {
-        let balances = self
-            .state
-            .lock()
-            .await
-            .status
-            .as_ref()
-            .map(|s| s.balances.clone());
-        self.offer_with(balances.as_ref())
+        let (free, slots) = {
+            let st = self.state.lock().await;
+            let slots = crate::capacity::free_slots(self.max_swaps, self.count(&st));
+            (st.status.as_ref().map(|s| s.free.clone()), slots)
+        };
+        let mut offer = self.offer_with(free.as_ref());
+        if offer.making {
+            offer.free_slots = Some(slots);
+        }
+        offer
     }
 
     fn rate_matches(&self, zec_amount: u64, token_amount: u64) -> bool {
@@ -515,19 +553,24 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             return Err(ApiError(400, "maker URL is required".into()));
         }
         route.check(self.role)?;
-        // One start at a time, one swap per route label, and none while a swap runs. Held until
-        // this request ends, however it ends.
-        let _start = {
+        // One swap per route label; then this start's turn (crate::route::Starts): starts queue,
+        // each one's funds check and its record belong together. Held until this request ends,
+        // however it ends.
+        let start = {
             let st = self.state.lock().await;
             self.starts.begin(
                 route.route.as_deref(),
                 st.swaps.values().map(|r| crate::route::Held {
                     id: &r.id,
                     route: r.route.as_deref(),
-                    finished: r.swap.is_final(),
                 }),
             )?
         };
+        let _turn = start.turn().await;
+        {
+            let st = self.state.lock().await;
+            crate::capacity::admit(self.max_swaps, self.count(&st))?;
+        }
         if let Some(to) = &route.sweep_to {
             crate::withdraw::check_zec_destination(&self.leg, to)
                 .await
@@ -631,7 +674,10 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         params
             .check_policy(&self.policy, now)
             .map_err(|e| ApiError(400, format!("The maker's terms are not acceptable: {e}")))?;
-        self.check_funds(&params).await?;
+        {
+            let st = self.state.lock().await;
+            self.check_funds(&st, &params).await?;
+        }
         let mut sid = [0u8; 32];
         OsRng.fill_bytes(&mut sid);
         // Z's account in the setup is the claimer: FerryLock's claim (and punish) pay it, and
@@ -643,6 +689,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         let resp = self
             .http
             .post(format!("{maker}/peer/swaps"))
+            .timeout(PROPOSE_TIMEOUT)
             .json(&EvmProposeRequest {
                 envelope: propose,
                 taker_url: self.cli.public_url(),
@@ -652,12 +699,19 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             .await
             .map_err(|e| ApiError(502, format!("maker unreachable: {e}")))?;
         if !resp.status().is_success() {
+            let status = resp.status().as_u16();
             let code = if resp.status().is_client_error() {
                 400
             } else {
                 502
             };
             let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            if let Some(why) = crate::capacity::peer_busy(status, &body) {
+                return Err(ApiError::busy(format!(
+                    "the maker can't take another swap right now ({why}); try again once one of \
+                     its swaps finishes"
+                )));
+            }
             let msg = body["error"].as_str().unwrap_or("proposal refused");
             return Err(ApiError(code, format!("The maker refused: {msg}")));
         }
@@ -781,19 +835,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 }
                 let holds = {
                     let st = self.state.lock().await;
-                    st.swaps
-                        .values()
-                        .filter_map(|r| {
-                            w::zec_lock_hold(
-                                &r.id,
-                                r.role() == Role::Z,
-                                r.swap.is_final(),
-                                r.zec_lock_txid.is_some(),
-                                r.swap.session().params.zec_amount,
-                                self.leg.send_fee_reserve(),
-                            )
-                        })
-                        .collect()
+                    self.zec_holds(&st)
                 };
                 w::send_zec(&self.withdrawals, &self.leg, to, amount, holds).await
             }
@@ -1072,8 +1114,18 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         Ok(a)
     }
 
-    async fn check_funds(&self, params: &EvmParams) -> Result<(), ApiError> {
+    /// Whether our wallets can fund our side of `params` next to every live swap's reservation
+    /// (crate::capacity): the ZEC lock (and the notes locks may take), or the token lock, and
+    /// the gas of this swap's calls on top of what live swaps' calls still need. Called in this
+    /// swap's turn with the state held. Short of what live swaps hold: busy; short with nothing
+    /// held: not enough, plainly.
+    async fn check_funds(&self, st: &EvmState, params: &EvmParams) -> Result<(), ApiError> {
         let unavailable = |e: String| ApiError(503, e);
+        let live = st
+            .swaps
+            .values()
+            .any(|r| r.role() == self.role && !r.swap.is_final());
+        let (token_holds, gas_units) = self.evm_holds(st);
         match self.role {
             Role::Z => {
                 let have = self
@@ -1085,7 +1137,24 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 let need = params
                     .zec_amount
                     .saturating_add(self.leg.send_fee_reserve());
-                if have < need {
+                // Every lock not sent yet, this one last: our notes must fund them all at once.
+                let mut needs = self.zec_needs(st);
+                needs.push(need);
+                let largest = self
+                    .leg
+                    .largest_notes(needs.len() - 1)
+                    .await
+                    .map_err(|e| unavailable(e.to_string()))?;
+                if !crate::capacity::zec_locks_fit(have, &largest, &needs) {
+                    if live {
+                        return Err(ApiError::busy(format!(
+                            "the shielded ZEC this swap needs is held by {} swap(s) in progress, \
+                             or sits in notes their locks may take (change waits for \
+                             confirmations); try again once they have locked and the change \
+                             has confirmed",
+                            needs.len() - 1
+                        )));
+                    }
                     return Err(ApiError(
                         400,
                         format!(
@@ -1102,7 +1171,15 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                     .await
                     .map_err(|e| unavailable(e.to_string()))?;
                 // Compared in U256: a WETH balance can exceed u64.
-                if have < U256::from(params.token_amount) {
+                let held = U256::from(crate::withdraw::held(&token_holds));
+                if have < held.saturating_add(U256::from(params.token_amount)) {
+                    if live && have >= U256::from(params.token_amount) {
+                        return Err(ApiError::busy(format!(
+                            "the {} this swap needs is held by swaps in progress; try again once \
+                             one of them has locked",
+                            params.token_symbol
+                        )));
+                    }
                     return Err(ApiError(
                         400,
                         format!(
@@ -1114,7 +1191,8 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 }
             }
         }
-        // Z sends the claim, B the lock and refund: both need gas.
+        // Z sends the claim (and may punish), B the lock and refund: gas for this swap's calls on
+        // top of what the live swaps' calls still need, at twice today's max fee.
         let eth = self
             .client
             .eth_balance()
@@ -1123,7 +1201,123 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         if eth.is_zero() {
             return Err(ApiError(400, "Our EVM account has no ETH for gas".into()));
         }
+        let (max_fee, _) = self
+            .client
+            .fees()
+            .await
+            .map_err(|e| unavailable(e.to_string()))?;
+        let mine = match self.role {
+            Role::B => GAS_LOCK + GAS_REFUND,
+            Role::Z => GAS_CLAIM + GAS_PUNISH,
+        };
+        let cost = |units: u64| {
+            U256::from(units)
+                .saturating_mul(U256::from(max_fee))
+                .saturating_mul(U256::from(GAS_RESERVE_FACTOR))
+        };
+        let all = cost(gas_units.saturating_add(mine));
+        if eth < all {
+            let show =
+                |v: U256| crate::withdraw::show(u128::try_from(v).unwrap_or(u128::MAX), 18, "ETH");
+            if live && eth >= cost(mine) {
+                return Err(ApiError::busy(format!(
+                    "the ETH this swap's gas needs is held for the calls of swaps in progress \
+                     ({} needed in all, {} in the account); try again once one of them \
+                     finishes",
+                    show(all),
+                    show(eth)
+                )));
+            }
+            return Err(ApiError(
+                400,
+                format!(
+                    "Our EVM account has too little ETH for this swap's gas: {} needed at \
+                     today's fees, {} in the account",
+                    show(all),
+                    show(eth)
+                ),
+            ));
+        }
         Ok(())
+    }
+
+    /// What our live Z swaps hold of our shielded ZEC: each lock not sent yet, its amount plus
+    /// the fee reserve.
+    fn zec_holds(&self, st: &EvmState) -> Vec<crate::withdraw::Hold> {
+        st.swaps
+            .values()
+            .filter_map(|r| {
+                crate::withdraw::zec_lock_hold(
+                    &r.id,
+                    r.role() == Role::Z,
+                    r.swap.is_final(),
+                    r.zec_lock_txid.is_some(),
+                    r.swap.session().params.zec_amount,
+                    self.leg.send_fee_reserve(),
+                )
+            })
+            .collect()
+    }
+
+    fn zec_needs(&self, st: &EvmState) -> Vec<u64> {
+        self.zec_holds(st)
+            .iter()
+            .map(|h| u64::try_from(h.units).unwrap_or(u64::MAX))
+            .collect()
+    }
+
+    /// The swaps' place in the cap (crate::capacity).
+    pub(crate) fn count(&self, st: &EvmState) -> crate::capacity::Count {
+        crate::capacity::count(
+            st.swaps.values().map(EvmRecord::load),
+            now_ms(),
+            self.cli.negotiation_timeout_secs.saturating_mul(1000),
+        )
+    }
+
+    /// What new swaps may use (crate::capacity), and the capacity view: the balances less what
+    /// live swaps hold, and for ZEC the notes their locks may take. Gas is priced only while
+    /// live swaps hold some.
+    async fn free_balances(
+        &self,
+        balances: &view::Balances,
+    ) -> anyhow::Result<(view::Balances, crate::capacity::CapacityView)> {
+        let (needs, token_held, gas_units, count) = {
+            let st = self.state.lock().await;
+            let (tokens, gas) = self.evm_holds(&st);
+            (
+                self.zec_needs(&st),
+                crate::withdraw::held(&tokens),
+                gas,
+                self.count(&st),
+            )
+        };
+        let zec = if needs.is_empty() {
+            balances.zec_shielded_zat
+        } else {
+            let largest = self.leg.largest_notes(needs.len()).await?;
+            crate::capacity::zec_room(balances.zec_shielded_zat, &largest, &needs, 0)
+        };
+        let tokens: u128 = balances.token_units.parse().unwrap_or(u128::MAX);
+        let tokens = tokens.saturating_sub(token_held);
+        let mut eth: u128 = balances.eth_wei.parse().unwrap_or(0);
+        if gas_units > 0 {
+            let (max_fee, _) = self.client.fees().await?;
+            let reserve = u128::from(gas_units)
+                .saturating_mul(max_fee)
+                .saturating_mul(u128::from(GAS_RESERVE_FACTOR));
+            eth = eth.saturating_sub(reserve);
+        }
+        let free = view::Balances {
+            zec_shielded_zat: zec,
+            btc_sat: u64::try_from(tokens).unwrap_or(u64::MAX),
+            token_units: tokens.to_string(),
+            eth_wei: eth.to_string(),
+        };
+        Ok((
+            free,
+            crate::capacity::CapacityView::of(self.max_swaps, count),
+        ))
     }
 
     fn new_record(
@@ -1176,18 +1370,28 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             return Err(ApiError(400, "expected a Propose message".into()));
         };
         let id = hex::encode(env.session_id);
+        let again = |st: &EvmState| {
+            st.swaps.get(&id).map(|rec| {
+                rec.outbox
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| ApiError(409, "swap id in use".into()))
+            })
+        };
+        // A Propose we already took gets the same Accept, whatever else is going on.
+        if let Some(reply) = again(&*self.state.lock().await) {
+            return reply;
+        }
+        // One funds check at a time (crate::route::Starts): while a start of ours or another
+        // Propose has the turn, the taker is told to try again in a moment.
+        let _turn = self.starts.try_turn().ok_or_else(|| {
+            ApiError::busy("this node is starting another swap right now; try again in a moment")
+        })?;
         let mut st = self.state.lock().await;
-        if let Some(rec) = st.swaps.get(&id) {
-            return rec
-                .outbox
-                .first()
-                .cloned()
-                .ok_or_else(|| ApiError(409, "swap id in use".into()));
+        if let Some(reply) = again(&st) {
+            return reply;
         }
-        // A swap of ours (or one being started as taker) is still running: one at a time.
-        if st.swaps.values().any(|r| !r.swap.is_final()) || self.starts.busy() {
-            return Err(ApiError(409, "A swap is already in progress".into()));
-        }
+        crate::capacity::admit(self.max_swaps, self.count(&st))?;
         let bad = |m: &str| Err(ApiError(400, m.to_string()));
         if setup.role != self.role.peer() {
             return bad("taker has our role");
@@ -1232,7 +1436,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         params
             .check_policy(&self.policy, now)
             .map_err(|e| ApiError(400, e.to_string()))?;
-        self.check_funds(params).await?;
+        self.check_funds(&st, params).await?;
         let me = self.client.address().0 .0;
         let (swap, actions) =
             evm_accept(&mut OsRng, &env, me).map_err(|e| ApiError(400, e.to_string()))?;

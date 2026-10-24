@@ -70,8 +70,12 @@ Set up by `infra/deploy` ([DEPLOY.md](DEPLOY.md)). <!-- add the demo URL here on
   is not two strangers trading. The operator sees every swap.
 - **One partner per pair, ours, at a fixed demo rate,** not a market price (`PRICE_FEED=off` in
   `infra/deploy/.env.example`).
-- **Limits:** 0.5 ZEC per swap, 3 swap starts per IP address per hour, 12 per hour in all, one
-  live swap per pair (`web/server/prod.mjs`, `infra/deploy/docker-compose.yml`).
+- **Limits:** 0.5 ZEC per swap, 3 swap starts per IP address per hour, 12 per hour in all
+  (`web/server/prod.mjs`, `infra/deploy/docker-compose.yml`). Several swaps can run on a pair at
+  once: each daemon takes up to 4 (ferryd's test-network default) as far as its test coins go, and
+  answers "busy" past that. Two at once, and a third refused as busy, have run on regtest Bitcoin
+  with the stand-in Zcash chain (`crates/ferryd/tests/two_daemons.rs`), not yet on the demo's
+  public test networks or with real shielded notes.
 - **Closed to outside nodes:** the partner's peer port is private, so another person's Ferry can't
   swap with it yet ([DEPLOY.md](DEPLOY.md#9-firewall)).
 - **NEAR Intents: prices only.** The swap card can show real, read-only quotes from NEAR's 1Click
@@ -224,6 +228,8 @@ What is a mock or not done yet
 - NEAR Intents is mainnet-only and off on the demo (prices only). It has run against a mock of
   NEAR's API, never with real funds. Ferry never sends ZEC to NEAR Intents.
 - The Wallet page's Add funds and Send to my wallet work only on your own node.
+- Several swaps at once (up to 4 per node on test networks, 2 on mainnet): run on regtest Bitcoin
+  with the stand-in Zcash chain, not yet on a public test network or with real shielded notes.
 - Local development (pnpm dev), the screenshots and several demo scripts use mock daemons, made-up
   partners or a stand-in Zcash chain.
 

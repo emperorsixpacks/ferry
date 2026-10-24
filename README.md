@@ -187,6 +187,9 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
   the best is taken, and an atomic swap settles it, so nobody holds funds in between. Only a rounded-up
   size bucket leaves your server, and only to its own partners
   ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#firm-quotes)).
+- Several swaps at once: a node takes up to `--max-swaps` (4 on test networks, 2 on mainnet) as far
+  as its free funds go, each swap holding its lock and fees until spent, and a full node answers
+  "busy" ([docs/API.md](docs/API.md#several-swaps-at-once)).
 - **Real shielded ZEC, end to end.** `infra/e2e-real.sh` starts a fresh regtest Bitcoin + Zebra +
   Zaino stack and runs all three stories with real Ironwood notes. In the happy story, a stranger also
   sends small notes to the joint address while B waits to sweep. A fourth story checks that a wallet

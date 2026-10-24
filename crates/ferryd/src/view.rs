@@ -15,6 +15,11 @@ pub struct StatusView {
     pub role: Role,
     pub name: String,
     pub balances: Balances,
+    /// What new swaps (and withdrawals) may use: the balances less what live swaps hold, and
+    /// for ZEC the notes their locks may take (crate::capacity).
+    pub free: Balances,
+    /// Several swaps at once: the cap, what is live, how many more the node takes now.
+    pub capacity: crate::capacity::CapacityView,
     pub chains: Chains,
     pub offer: OfferView,
     /// What this ferryd supports beyond the base API: `route` (crate::route).
@@ -70,6 +75,9 @@ pub struct OfferView {
     /// As maker: the largest ZEC amount our balance covers now (capped at `max_zat`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liquidity_zat: Option<u64>,
+    /// As maker: how many more swaps we take right now (crate::capacity); 0: busy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub free_slots: Option<u32>,
     /// As maker: the live rate went stale and we take no proposals.
     pub paused: bool,
     /// Started with --maker-offer: it answers proposals, paused or not. A UI need not offer a
@@ -92,6 +100,7 @@ impl OfferView {
             rate_source: o.rate_source.clone(),
             rate_updated_at: o.rate_updated_at,
             liquidity_zat: o.liquidity.map(|l| l.zec_zat),
+            free_slots: o.free_slots,
             paused: o.paused,
             maker: o.making || o.paused,
         }

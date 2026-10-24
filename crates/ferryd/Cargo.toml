@@ -15,7 +15,7 @@ ferry-evm = { path = "../ferry-evm" }
 ferry-watchtower = { path = "../ferry-watchtower" }
 anyhow = "1"
 axum = "0.8"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
 futures-util = "0.3"
 hex.workspace = true
 humantime = "2"

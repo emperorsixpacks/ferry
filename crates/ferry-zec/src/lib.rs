@@ -269,6 +269,23 @@ impl Inner {
             SYNC_TIMEOUT,
         )
         .await?;
+        self.read_balance_locked().await
+    }
+
+    /// Once a transaction of ours is stored (a lock, a withdrawal), the notes it spends are no
+    /// longer spendable and its change is not yet: the cached balance must say so before the
+    /// daemon checks another swap against it, not one sync later. If the wallet can't be read,
+    /// the cache is dropped, so the next `status()` syncs first. The caller holds the lock.
+    async fn after_spend_locked(&self) {
+        if let Err(e) = self.read_balance_locked().await {
+            tracing::warn!("re-reading the balance after a spend: {e}");
+            self.cache.lock().unwrap().balance = None;
+        }
+    }
+
+    /// The spendable Ironwood balance from the wallet database (no sync), into the cache. The
+    /// caller holds the wallet lock.
+    async fn read_balance_locked(&self) -> Result<(), ZecError> {
         let out = run_devtool_wallet(
             &self.cfg,
             &["balance".into(), self.own_account.clone()],
@@ -389,6 +406,26 @@ impl Inner {
                 [account.replace('-', "")],
                 |r| r.get::<_, u64>(0),
             )
+        })
+        .await?)
+    }
+
+    /// The values of the account's `n` largest unspent Ironwood notes, largest first.
+    async fn largest_unspent_values(
+        &self,
+        account: String,
+        n: usize,
+    ) -> Result<Vec<u64>, ZecError> {
+        let limit = i64::try_from(n).unwrap_or(i64::MAX);
+        Ok(query(&self.cfg.wallet_dir, move |c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT n.value {} ORDER BY n.value DESC LIMIT ?2",
+                unspent_ironwood_sql()
+            ))?;
+            let rows = stmt.query_map(rusqlite::params![account.replace('-', ""), limit], |r| {
+                r.get::<_, u64>(0)
+            })?;
+            rows.collect::<Result<Vec<u64>, _>>()
         })
         .await?)
     }
@@ -939,7 +976,11 @@ impl ZecLeg for DevtoolZecLeg {
             .await
             .map_err(not_sent)?;
         let cfg = &self.0.cfg;
-        let out = run_pczt(cfg, &["send", &path_str(&done), "-s", &cfg.server]).await?;
+        let sent = run_pczt(cfg, &["send", &path_str(&done), "-s", &cfg.server]).await;
+        // `pczt send` stores the transaction before broadcasting it: whatever happened next,
+        // its notes may be spent, so the next swap is checked against the balance without them.
+        self.0.after_spend_locked().await;
+        let out = sent?;
         let txid = last_txid(&out)
             .ok_or_else(|| ZecError::Other(format!("pczt send printed no txid:\n{out}")))?;
 
@@ -954,6 +995,15 @@ impl ZecLeg for DevtoolZecLeg {
 
     fn send_fee_reserve(&self) -> u64 {
         SEND_FEE_RESERVE
+    }
+
+    async fn largest_notes(&self, n: usize) -> Result<Vec<u64>, ZecError> {
+        if n == 0 {
+            return Ok(vec![]);
+        }
+        self.0
+            .largest_unspent_values(self.0.own_account.clone(), n)
+            .await
     }
 
     /// Built (Ironwood in, Ironwood out), signed and its txid read from the finished PCZT, all
@@ -976,7 +1026,9 @@ impl ZecLeg for DevtoolZecLeg {
             .map_err(not_sent)?;
         before_broadcast(&built).map_err(ZecError::NotSent)?;
         let cfg = &self.0.cfg;
-        let out = run_pczt(cfg, &["send", &path_str(&done), "-s", &cfg.server]).await?;
+        let sent = run_pczt(cfg, &["send", &path_str(&done), "-s", &cfg.server]).await;
+        self.0.after_spend_locked().await;
+        let out = sent?;
         let txid = last_txid(&out)
             .ok_or_else(|| ZecError::Other(format!("pczt send printed no txid:\n{out}")))?;
         if txid != built.txid {
@@ -2143,6 +2195,51 @@ Version: V5
              INSERT INTO ironwood_received_notes VALUES (12, 12, 1, 200000000, 0);",
         );
         assert!(!w.lock_lapsed_in(joint, amount).await.unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The largest notes the daemon counts against several locks are our own unspent ones: a
+    /// note spent by a stored, unexpired transaction (a lock in flight) is out, one whose spend
+    /// expired unmined is ours to spend again, and other accounts' notes never count.
+    #[tokio::test]
+    async fn largest_notes_are_our_own_unspent_ones() {
+        let dir = test_dir("largest");
+        let w = fake_wallet(&dir);
+        let own = "00000000-0000-0000-0000-000000000002".to_string();
+        assert!(w
+            .largest_unspent_values(own.clone(), 3)
+            .await
+            .unwrap()
+            .is_empty());
+        exec(
+            &dir,
+            "INSERT INTO accounts VALUES (2, x'00000000000000000000000000000002', 'ferry', 1);
+             INSERT INTO transactions VALUES (20, x'14', NULL, 90, NULL, NULL);
+             INSERT INTO ironwood_received_notes VALUES (20, 20, 2, 500000000, 0);
+             INSERT INTO ironwood_received_notes VALUES (21, 20, 2, 100000000, 0);
+             INSERT INTO ironwood_received_notes VALUES (22, 20, 2, 300000000, 0);
+             INSERT INTO ironwood_received_notes VALUES (23, 20, 2, 200000000, 0);
+             -- our lock in flight spends the 5 ZEC note (stored, unmined, expires after 160)
+             INSERT INTO transactions VALUES (21, x'15', '2026-10-21', NULL, 160, x'dd');
+             INSERT INTO ironwood_received_note_spends VALUES (20, 21);",
+        );
+        assert_eq!(
+            w.largest_unspent_values(own.clone(), 2).await.unwrap(),
+            vec![300_000_000, 200_000_000]
+        );
+        assert_eq!(
+            w.largest_unspent_values(own.clone(), 9)
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+        // The lock expired unmined: its note is unspent again.
+        exec(&dir, "INSERT INTO blocks VALUES (160);");
+        assert_eq!(
+            w.largest_unspent_values(own, 1).await.unwrap(),
+            vec![500_000_000]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

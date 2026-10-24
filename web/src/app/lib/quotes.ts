@@ -99,13 +99,16 @@ export function useQuotes(pair: PairId, role: Role, zat: number): Quotes {
 export const secondsLeft = (q: FirmQuote, now: number) => Math.max(0, Math.floor((q.until - now) / 1000));
 
 // The price to show and start with: a firm one when there is one (with no partner picked, the best
-// of all; with one picked, that partner's), else the indicative offer `live` came up with.
+// of all; with one picked, that partner's), else the indicative offer `live` came up with. Only from
+// a partner that takes swaps now: one that went busy (it runs as many as it takes at once), paused or
+// offline since it quoted can't honour its price.
 export function withFirm<T extends { maker: Maker | null; quote: Quote | null }>(
   live: T,
-  firm: FirmQuote[],
+  all: FirmQuote[],
   makers: Maker[] | null | undefined,
   pick: string | null,
 ): T & { firm: FirmQuote | null } {
+  const firm = all.filter((q) => makers?.some((m) => m.name === q.maker && m.available) ?? true);
   const own = live.maker ? firm.find((q) => q.maker === live.maker!.name) : undefined;
   const chosen = pick ? own : (firm[0] ?? own);
   const maker = chosen ? (makers?.find((m) => m.name === chosen.maker) ?? null) : null;

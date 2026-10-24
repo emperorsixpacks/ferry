@@ -14,6 +14,10 @@ export interface MakerSummary {
   chain: string | null;
   online: boolean;
   available: boolean;
+  // making offers, but already running as many swaps as it takes at once
+  busy: boolean;
+  // how many more swaps it takes right now; null: it doesn't say (an older ferryd)
+  free_slots: number | null;
   paused: boolean;
   role: "Z" | "B" | null;
   rate_sat_per_zec: number | null;
