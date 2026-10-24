@@ -18,11 +18,17 @@
 //
 // MOCK_ROUTE_PORT (unset: none) also serves a mock ferry-route there, for private swaps: a route
 // runs two of these swaps one after the other (mock/router.mjs).
+//
+// MOCK_NEAR_PORT (unset: none) also serves a mock of NEAR Intents' 1Click API there (mock/oneclick.mjs).
+// Z takes payout_to (features: "payout"; MOCK_PAYOUT=0 leaves it out, as an older ferryd): its
+// redeem then pays into a 1Click deposit address, and the mock 1Click sees the deposit. What the
+// mock 1Click delivers to a party's own address (GET /api/addresses) is credited to it in BTC.
 
 import http from "node:http";
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { MOCK_MAKERS, mockMakerAt, mockMakerByUrl } from "./makers.mjs";
 import { mockRouter } from "./router.mjs";
+import { mockOneClick } from "./oneclick.mjs";
 import { bucketFor, marketOf, signingText } from "../server/quotes.mjs";
 
 const SPEED = Number(process.env.MOCK_SPEED ?? 1) || 1;
@@ -68,8 +74,8 @@ const chains = {
 
 const START = { Z: { zec_shielded_zat: 500000000, btc_sat: 0 }, B: { zec_shielded_zat: 0, btc_sat: 5000000 } };
 const parties = {
-  Z: { role: "Z", name: "zoe", port: Z_PORT, balances: { ...START.Z } },
-  B: { role: "B", name: "bram", port: B_PORT, balances: { ...START.B } },
+  Z: { role: "Z", name: "zoe", port: Z_PORT, balances: { ...START.Z }, address: "bcrt1q" + bech(38) },
+  B: { role: "B", name: "bram", port: B_PORT, balances: { ...START.B }, address: "bcrt1q" + bech(38) },
 };
 
 const swaps = [];
@@ -111,7 +117,7 @@ const rateOf = (makerUrl) => makerOf(makerUrl)?.rate ?? RATE;
 // `taker` proposes ("Z" sells ZEC, "B" buys it); the other party is the maker. `rate`: a firm
 // quote's, else the maker's offer. A route's swap (mock/router.mjs) carries its label (`route`), may
 // be in another coin's units (`coin`: only BTC moves balances) and sweeps to Z (`sweepTo`).
-function newSwap(taker, makerUrl, zec_zat, rate = rateOf(makerUrl), { route = null, coin = "btc", sweepTo = null } = {}) {
+function newSwap(taker, makerUrl, zec_zat, rate = rateOf(makerUrl), { route = null, coin = "btc", sweepTo = null, payoutTo = null } = {}) {
   const btc_sat = Math.round((zec_zat / 1e8) * rate);
   const pts = { Z: { p: hex(32), s: point() }, B: { p: hex(32), s: point() } };
   const s = {
@@ -121,6 +127,7 @@ function newSwap(taker, makerUrl, zec_zat, rate = rateOf(makerUrl), { route = nu
     route,
     coin,
     sweepTo,
+    payoutTo,
     amounts: { zec_zat, btc_sat },
     keys: { pts, joint_ak: hex(32), sigma: Math.random() < 0.5 ? 1 : -1 },
     addresses: { btc_lock: "bcrt1p" + bech(58), zec_joint: "uregtest1" + bech(104) },
@@ -398,6 +405,12 @@ function stepZ(s) {
       if (s.tx.btc_redeem && mined("btc", s.tx.btc_redeem)) {
         v.state = "BtcRedeemed";
         v.outcome = "swapped";
+        if (s.payoutTo) {
+          // payout_to: the redeem paid someone else (a NEAR Intents deposit address)
+          near?.deposit(s.payoutTo, s.amounts.btc_sat - FEE_SAT);
+          log(s, v, "local", "swap_complete", `Swap complete. ${btcAmount(s.amounts.btc_sat - FEE_SAT)} paid to ${s.payoutTo} (payout_to)`);
+          return;
+        }
         if (s.coin === "btc") credit("Z", "btc_sat", s.amounts.btc_sat - FEE_SAT);
         log(s, v, "local", "swap_complete", `Swap complete. ${btcAmount(s.amounts.btc_sat - FEE_SAT)} is in Z's wallet`);
         return;
@@ -457,6 +470,20 @@ function cancelZ(s, v) {
   s.observer.btc.push(`tx_cancel: spends the lock output through its ${T1}-block CSV leaf into a new P2TR output.`);
 }
 
+// the mock 1Click (mock/oneclick.mjs), when MOCK_NEAR_PORT is set: what it delivers to a party's own
+// BTC address, or refunds there, lands in that party's wallet
+const PAYOUT = process.env.MOCK_PAYOUT !== "0";
+const NEAR_PORT = process.env.MOCK_NEAR_PORT ? Number(process.env.MOCK_NEAR_PORT) : null;
+const near = NEAR_PORT
+  ? mockOneClick({
+      speed: SPEED,
+      onDeliver: ({ asset, address, amount }) => {
+        if (asset !== "nep141:btc.omft.near") return;
+        for (const role of ["Z", "B"]) if (parties[role].address === address) credit(role, "btc_sat", Number(amount));
+      },
+    })
+  : null;
+
 // the mock router (mock/router.mjs), when MOCK_ROUTE_PORT is set
 const ROUTE_PORT = process.env.MOCK_ROUTE_PORT ? Number(process.env.MOCK_ROUTE_PORT) : null;
 const router = ROUTE_PORT ? mockRouter({ swaps, newSwap: (...a) => newSwap(...a), chains, parties, inject: (s, role) => inject(s, role), makerOf, ms, speed: SPEED }) : null;
@@ -507,6 +534,7 @@ function swapView(s, role) {
     observer: { btc: [...s.observer.btc], zec: [...s.observer.zec] },
     // a route's swap: its label, as ferryd stores the one the router sends
     ...(s.route ? { route: s.route } : {}),
+    ...(s.payoutTo && role === "Z" ? { payout_to: s.payoutTo } : {}),
   };
 }
 
@@ -521,7 +549,14 @@ function statusView(role) {
       zec: { network: chains.zec.network, height: chains.zec.height, pool: chains.zec.pool },
     },
     offer: { pair: "ZEC/BTC", rate_sat_per_zec: RATE, min_zat: 10000000, max_zat: 1000000000, fee_sat: FEE_SAT, t1_blocks: T1, t2_blocks: T2, btc_lock_confs: BTC_CONFS, zec_confs: ZEC_CONFS },
+    features: PAYOUT ? ["route", "payout"] : ["route"],
   };
+}
+
+// GET /api/addresses: where to fund this party (its BTC address is fixed for the mock's lifetime)
+function addressesView(role) {
+  const p = parties[role];
+  return { role, name: p.name, btc: { coin: "btc", network: chains.btc.network, address: p.address }, zec: { address: `u${chains.zec.network}1mockwallet${Buffer.from(p.name).toString("hex")}` } };
 }
 
 const STARTED = now();
@@ -559,6 +594,8 @@ function peerOffer(m) {
     ...(updated != null ? { rate_updated_at: updated } : {}),
     liquidity: { zec_zat: Math.min(liquidity, m.max) },
     quote_key: quoteKey(m).public,
+    // a ferryd that can pay a taker's coin to a payout address (a NEAR Intents deposit address)
+    ...(PAYOUT ? { features: ["payout"] } : {}),
   };
 }
 
@@ -704,6 +741,7 @@ function handler(role) {
     if (req.method === "OPTIONS") return send(res, 204, {});
 
     if (req.method === "GET" && path === "/api/status") return send(res, 200, statusView(role));
+    if (req.method === "GET" && path === "/api/addresses") return send(res, 200, addressesView(role));
 
     // the mock makers' public offers (ferryd's GET /peer/offer): B makers on B, Z makers on Z
     const maker = req.method === "GET" ? mockMakerAt(path, role) : undefined;
@@ -750,6 +788,13 @@ function handler(role) {
       if (firm?.error) return send(res, 400, { error: firm.error });
       const rate = firm?.rate ?? maker.rate;
       const sat = Math.round((zat / 1e8) * rate);
+      // ferryd's route and payout fields, with its words
+      if (body.payout_to != null && (!PAYOUT || role !== "Z")) return send(res, 400, { error: PAYOUT ? "payout_to: only a Z taker (selling ZEC) is paid out" : "unknown field payout_to" });
+      if (body.payout_to != null && (typeof body.payout_to !== "string" || !/^[A-Za-z0-9:._-]{8,128}$/.test(body.payout_to))) return send(res, 400, { error: "payout_to: not an address" });
+      if (body.min_counter != null && role !== "Z") return send(res, 400, { error: "min_counter: only for role Z" });
+      if (body.max_counter != null && role !== "B") return send(res, 400, { error: "max_counter: only for role B" });
+      if (body.min_counter != null && sat < Number(body.min_counter)) return send(res, 400, { error: `The maker pays ${btcAmount(sat)} for ${zecAmount(zat)}, below your minimum of ${btcAmount(Number(body.min_counter))} (min_counter)` });
+      if (body.max_counter != null && sat > Number(body.max_counter)) return send(res, 400, { error: `The maker asks ${btcAmount(sat)} for ${zecAmount(zat)}, above your limit of ${btcAmount(Number(body.max_counter))} (max_counter)` });
       const theirs = (msg) => (role === "Z" ? msg : `The maker refused: ${msg}`);
       const mine = (msg) => (role === "B" ? msg : `The maker refused: ${msg}`);
       const zHave = parties.Z.balances.zec_shielded_zat;
@@ -759,7 +804,7 @@ function handler(role) {
       if (bHave < sat + LOCK_FEE_RESERVE)
         return send(res, 400, { error: mine(`B does not have enough BTC: ${btcAmount(sat + LOCK_FEE_RESERVE)} needed (the amount plus about ${btcAmount(LOCK_FEE_RESERVE)} for the lock's fee), ${btcAmount(bHave)} in the wallet`) });
       firm?.take();
-      const s = newSwap(role, body.maker ?? null, zat, rate);
+      const s = newSwap(role, body.maker ?? null, zat, rate, { payoutTo: body.payout_to ?? null });
       return send(res, 201, { id: s.id });
     }
 
@@ -807,6 +852,16 @@ for (const role of ["Z", "B"]) {
   http.createServer(handler(role)).listen(port, "127.0.0.1", () => {
     console.log(`mock ferryd ${role} (${parties[role].name}) on http://127.0.0.1:${port}  speed x${SPEED}`);
   });
+}
+
+if (NEAR_PORT) {
+  http
+    .createServer((req, res) =>
+      near.handler(req, res, readBody).catch(() => {
+        if (!res.headersSent) send(res, 500, { message: "internal error" });
+      }),
+    )
+    .listen(NEAR_PORT, "127.0.0.1", () => console.log(`mock 1Click (NEAR Intents) on http://127.0.0.1:${NEAR_PORT}  key ${near.publicKey}`));
 }
 
 if (ROUTE_PORT) {
