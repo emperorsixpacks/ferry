@@ -254,7 +254,7 @@ mark("under");
 await lower({ title: "Underneath", body: "The other side read z from your signature. With z and b, the joint note was theirs to sweep.", tone: "quiet" });
 await sleep(6500);
 mark("underEnd");
-await scrollTo(".observer");
+await scrollTo(".observer", 96); // clear the sticky app header
 await sleep(1200);
 await page.evaluate(() => {
   const li = [...document.querySelectorAll(".obs-btc li")].find((l) => /key-path/.test(l.textContent ?? ""));
@@ -282,6 +282,7 @@ mark("rCardEnd");
 await film("hideCard");
 await sleep(500);
 await lower({ n: "1", title: "A second swap", body: "Bitcoin locked, your ZEC sealed, exactly as before.", tone: "quiet" });
+const zecBefore = (await api("z", "/api/status")).balances.zec_shielded_zat;
 await clickWithRing(page.locator("form button[type=submit]"));
 mark("r0");
 await until((z) => z?.state === "ZecLocked" && confirmed(z, "zec_lock_broadcast"), "Z locked");
@@ -298,14 +299,21 @@ await hold("r2");
 mark("r3");
 await lower({ n: "4", title: "Your ZEC comes back", body: "Automatically, into your shielded wallet. Nothing changed hands; nobody lost a coin.", tone: "quiet" });
 await until((z, b) => z?.outcome && b?.outcome, "refund outcome");
-await sleep(1800);
+// a real wallet shows the returned note a sync after the outcome; wait so the header agrees
+for (let i = 0; i < 300; i++) {
+  if ((await api("z", "/api/status")).balances.zec_shielded_zat >= zecBefore - 1_000_000) break;
+  await sleep(500);
+}
 await hold("r3");
 mark("r4");
+// hold the refunded result on screen in real time; the sped-up segment above barely shows it
+await sleep(3000);
+mark("r4b");
 cue("rCard", "rCardEnd", "And if the other side vanishes?");
 cue("r0", "r1", "A second swap: bitcoin locked, your ZEC sealed, as before.");
 cue("r1", "r2", "Then silence. The claim never comes.");
 cue("r2", "r3", "The deadline passes and the swap is called off. Both ways back were signed in advance.");
-cue("r3", "r4", "Your ZEC comes back to your shielded wallet. Nobody lost a coin.");
+cue("r3", "r4b", "Your ZEC comes back to your shielded wallet. Nobody lost a coin.");
 
 // 6. end card
 await film("hideLower");
@@ -349,6 +357,7 @@ const EDL = [
   ["r1", "r2"],
   ["r2", "r3"],
   ["r3", "r4"],
+  ["r4", "r4b"],
   ["end", "endEnd"],
 ].map(([from, to]) => [from, to, TARGET[from] ?? null]);
 

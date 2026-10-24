@@ -12,3 +12,4 @@ spikes/zec/jointkey/target/
 .testnet/
 web/film/*.mp4
 .e2e-real/
+.film-real/
