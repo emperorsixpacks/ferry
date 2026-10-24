@@ -101,7 +101,14 @@ impl EvmClient {
             ))
             .transport(transport, local);
         let from = signer.address();
+        // The nonce comes from the node on every send. alloy's default cache counts a nonce as
+        // used even when the send then fails, which on a flaky public RPC would leave every
+        // later transaction (a claim, a refund) waiting behind a gap.
         let provider = ProviderBuilder::new()
+            .disable_recommended_fillers()
+            .with_gas_estimation()
+            .with_simple_nonce_management()
+            .fetch_chain_id()
             .wallet(EthereumWallet::from(signer))
             .connect_client(client)
             .erased();
