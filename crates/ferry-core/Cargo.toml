@@ -1,0 +1,24 @@
+[package]
+name = "ferry-core"
+description = "Ferry swap session logic: parameters, messages, key material, state machines (no I/O)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ferry-dleq.workspace = true
+ferry-btc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+rand_core.workspace = true
+blake2b_simd = "1"
+
+[dev-dependencies]
+ferry-btc = { path = "../ferry-btc", features = ["rpc"] }
+tokio.workspace = true
+reddsa = "=0.6.1"

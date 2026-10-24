@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ferry-dleq",
+    "crates/ferry-btc",
+    "crates/ferry-core",
+    # "crates/ferry-zec",  (added once the Zcash spike lands)
+]
+exclude = ["spikes", "third_party", "vendor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+ferry-dleq = { path = "crates/ferry-dleq" }
+ferry-btc = { path = "crates/ferry-btc", default-features = false }
+ferry-core = { path = "crates/ferry-core" }
+
+bitcoin = { version = "0.32", features = ["serde", "rand-std"] }
+schnorr_fun = { version = "0.13", features = ["serde"] }
+sha2 = "0.10"
+rand = "0.8"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+thiserror = "2"
+zeroize = "1.5"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[patch.crates-io]
+# pasta_curves 0.5.2 + `impl zeroize::DefaultIsZeroes` for Fp/Fq/Point/Affine, required by
+# Serai's dleq crate (grep "FERRY PATCH" in third_party/pasta_curves-0.5.2/src).
+pasta_curves = { path = "third_party/pasta_curves-0.5.2" }
+
+# The DLEQ proof is ~100x slower unoptimized; optimize dependencies even in dev/test builds.
+[profile.dev.package."*"]
+opt-level = 3

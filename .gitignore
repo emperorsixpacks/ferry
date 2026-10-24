@@ -1,0 +1,9 @@
+vendor/
+target/
+**/target/
+.env
+*.sqlite
+node_modules/
+spikes/zec/data/
+web/node_modules/
+web/dist/

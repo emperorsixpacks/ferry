@@ -1,0 +1,23 @@
+[package]
+name = "ferry-dleq"
+description = "Cross-group DLEQ proof between Orchard SpendAuthG (Pallas) and secp256k1 G"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dleq = { version = "=0.4.1", features = ["experimental", "serialize"] }
+flexible-transcript = { version = "0.3.4", features = ["recommended"] }
+pasta_curves = { version = "=0.5.2", features = ["alloc", "bits"] }
+k256 = { version = "0.13.4", default-features = false, features = ["std", "arithmetic", "bits", "hash2curve"] }
+ff = { version = "0.13", features = ["bits"] }
+group = "0.13"
+rand_core.workspace = true
+zeroize.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+# Cross-check against Zcash's own RedPallas (orchard 0.16 uses reddsa 0.6.1 / pasta_curves 0.6.1).
+reddsa = "=0.6.1"
