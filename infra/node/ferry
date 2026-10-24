@@ -1070,6 +1070,15 @@ cmd_restore() {
   fi
   PASSPHRASE=
   [ -f "$tmp/config" ] || { rm -rf "$tmp"; die "That archive is not a Ferry node backup (no config in it)."; }
+  # a mainnet node's config records its confirmation; keep the two kinds of node apart
+  if grep -q '^MAINNET_OK=' "$tmp/config" && [ "$NET" != mainnet ]; then
+    rm -rf "$tmp"
+    die "That is a backup of a MAINNET node." "Restore it with: ./infra/node/ferry --mainnet restore $in"
+  fi
+  if ! grep -q '^MAINNET_OK=' "$tmp/config" && [ "$NET" = mainnet ]; then
+    rm -rf "$tmp"
+    die "That is a backup of a test-network node." "Restore it without --mainnet: ./infra/node/ferry restore $in"
+  fi
   rm -rf "$DATA"
   mv "$tmp" "$DATA"
   chmod 700 "$DATA"
