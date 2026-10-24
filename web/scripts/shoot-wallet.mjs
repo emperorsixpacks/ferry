@@ -230,7 +230,8 @@ for (const theme of THEMES) {
   await each((p) => zfield(p).fill("tmJ1xYxP8XNTtCoDgvdmQPSrxh5qZJgy65Z"));
   await each((p) => zfield(p).blur());
   await each((p) => text(p, "That's a transparent Zcash address"));
-  check(true, t("a transparent Zcash address is refused: shielded only"));
+  await each((p) => text(p, "the kind Zodl marks “Not Private”"));
+  check(true, t("a transparent Zcash address is refused: shielded only, in Zodl's words"));
   await shoot("06-receive-zec-transparent");
   await each((p) => zfield(p).fill(MY_ZEC));
   await each((p) => p.getByRole("button", { name: "Done" }).click());
@@ -280,7 +281,9 @@ for (const theme of THEMES) {
   const zaddr = (await json(MZ + "/api/addresses")).zec.address;
   await each((p) => p.locator(`[data-qr="zcash:${zaddr}"] svg`).waitFor());
   check((await desk.locator("[data-address]").innerText()) === zaddr, t(`Add ZEC shows the selling side's shielded address and a ZIP-321 code (zcash:${zaddr})`));
-  await each((p) => text(p, "Transparent ZEC (from a t… address) can't be used here"));
+  await each((p) => text(p, "Works with Zodl: scan this code"));
+  await each((p) => text(p, "transparent ZEC (from a t… address) can't be used here"));
+  check(true, t("Add ZEC says it works with Zodl, and that transparent ZEC can't be used"));
   await shoot("09-add-zec");
   const addSheet = async (key, uri, address, note, name) => {
     await each((p) => p.goto(`${DEV}/wallet?add=${key}`));
@@ -327,14 +330,14 @@ for (const theme of THEMES) {
   // two sides hold ZEC (Z and the USDC node): the one with the most free comes first
   check((await desk.getByRole("radiogroup", { name: "Send from" }).getByRole("radio", { checked: true }).innerText()).includes("Selling ZEC for BTC"), t("sending ZEC starts from the side with the most free"));
   await each((p) => p.getByLabel("ZEC to send").fill("0.50"));
-  await each((p) => p.getByPlaceholder("Your unified address (u…)").fill("t1Rv4exT7bqhZqi2j7xz8bUHDMxwosrjADU"));
-  await each((p) => p.getByPlaceholder("Your unified address (u…)").blur());
+  await each((p) => p.getByPlaceholder("Your Zodl or other shielded address (u…)").fill("t1Rv4exT7bqhZqi2j7xz8bUHDMxwosrjADU"));
+  await each((p) => p.getByPlaceholder("Your Zodl or other shielded address (u…)").blur());
   await each((p) => text(p, "That's a transparent Zcash address"));
   check(true, t("send: a transparent address is refused before anything leaves"));
   // your remembered wallet, one tap away
   await each((p) => p.getByRole("button", { name: /Use your wallet/ }).click());
-  check((await desk.getByPlaceholder("Your unified address (u…)").inputValue()) === MY_ZEC, t("send: Use your wallet fills the address remembered for ZEC"));
-  await each((p) => p.getByPlaceholder("Your unified address (u…)").fill(MY_ZEC2));
+  check((await desk.getByPlaceholder("Your Zodl or other shielded address (u…)").inputValue()) === MY_ZEC, t("send: Use your wallet fills the address remembered for ZEC"));
+  await each((p) => p.getByPlaceholder("Your Zodl or other shielded address (u…)").fill(MY_ZEC2));
   await each((p) => text(p, "0.0001 ZEC"));
   check(true, t("send: the node previews the network fee (0.0001 ZEC)"));
   await shoot("14-send-form");
@@ -344,7 +347,8 @@ for (const theme of THEMES) {
   await shoot("15-send-review");
   const before = (await json(MZ + "/api/status")).balances.zec_shielded_zat;
   await each((p) => p.getByRole("button", { name: "Send 0.50 ZEC" }).click());
-  await each((p) => p.locator('[data-sent-state="sending"]').waitFor());
+  // "sending" can be over before a page looks (the mock is quick): either state will do here
+  await each((p) => p.locator('[data-sent-state="sending"], [data-sent-state="sent"]').first().waitFor());
   await shoot("16-send-sending", { settle: 200 });
   await each((p) => p.locator('[data-sent-state="sent"]').waitFor({ timeout: 20_000 }));
   const sent = (await json(MZ + "/api/withdrawals")).filter((x) => x.to === MY_ZEC2);
@@ -356,7 +360,7 @@ for (const theme of THEMES) {
   // refused: a swap takes the coins between the form and the send
   await each((p) => p.goto(DEV + "/wallet?send=zec"));
   await each((p) => p.getByLabel("ZEC to send").fill("1.00"));
-  await each((p) => p.getByPlaceholder("Your unified address (u…)").fill(MY_ZEC2));
+  await each((p) => p.getByPlaceholder("Your Zodl or other shielded address (u…)").fill(MY_ZEC2));
   await each((p) => p.getByRole("button", { name: "Review" }).click());
   const grab = await (await post(MZ, "/api/swaps", { maker: `http://127.0.0.1:${B}`, zec_zat: 380_000_000 })).json();
   check(!!grab.id, t("meanwhile a 3.8 ZEC swap starts on Z"));
@@ -372,7 +376,7 @@ for (const theme of THEMES) {
   await post(MZ, "/api/_mock/fail-next-withdraw", {});
   await desk.goto(DEV + "/wallet?send=zec");
   await desk.getByLabel("ZEC to send").fill("0.25");
-  await desk.getByPlaceholder("Your unified address (u…)").fill(MY_ZEC2);
+  await desk.getByPlaceholder("Your Zodl or other shielded address (u…)").fill(MY_ZEC2);
   await desk.getByRole("button", { name: "Review" }).click();
   await desk.getByRole("button", { name: "Send 0.25 ZEC" }).click();
   await desk.locator('[data-sent-state="failed"]').waitFor({ timeout: 20_000 });

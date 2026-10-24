@@ -272,7 +272,7 @@ export function fundingNotes(coin: Coin, h: Holding): string[] {
   const notes: string[] = [];
   if (coin.kind === "zec") {
     const confs = h.node.status?.offer.zec_confs ?? 3;
-    notes.push(`Shielded ZEC on ${coin.networkName} only. This is a unified address: send from a wallet that sends shielded, like Zashi. Transparent ZEC (from a t… address) can't be used here.`);
+    notes.push(`Works with Zodl: scan this code, or send from any wallet that sends shielded ZEC. ${coin.networkName} only; transparent ZEC (from a t… address) can't be used here.`);
     notes.push(`Ready to swap after ${confs} confirmation${confs === 1 ? "" : "s"}, about ${Math.max(1, Math.round((confs * BLOCK_SECS.zec) / 60))} min.`);
   } else if (coin.kind === "btc" || coin.kind === "ltc") {
     const name = coin.kind === "ltc" ? "Litecoin" : "Bitcoin";

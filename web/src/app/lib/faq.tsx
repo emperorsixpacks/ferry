@@ -33,6 +33,10 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
         a: "The small program that holds your keys and does the swap for you. This app talks to it; your coins never pass through a Ferry server, because there isn't one. On the public demo a node with test coins is run for you, so you can try it without installing anything.",
       },
       {
+        q: "Why is there no “Connect wallet” button?",
+        a: "Because a swap needs things no wallet can do: one-time keys shared between you and your partner, and someone online at the deadlines to claim or refund. Your Ferry node does both. Connecting a wallet would also tell a website who you are, and Ferry never asks. You still use your own wallet: it works with Zodl. Scan the code on the Wallet page to add funds, and paste your Zodl address in “Receive to” so the ZEC you buy lands there, still shielded. MetaMask and Bitcoin wallets work the same way.",
+      },
+      {
         q: "Who is my swap partner?",
         a: (
           <>

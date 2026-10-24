@@ -106,7 +106,7 @@ export function addressProblem(coin: ReceiveCoin, text: string): string | null {
   if (/\s/.test(a)) return "An address has no spaces. Copy it again from your wallet.";
   if (coin.kind === "zec") {
     const prefix = uaPrefix(coin.network);
-    if (/^(t1|t3|tm|t2)/i.test(a) || /^tex1/i.test(a)) return `That's a transparent Zcash address (t…). Ferry sends ZEC shielded only: paste your wallet's unified address, which starts with ${prefix}.`;
+    if (/^(t1|t3|tm|t2)/i.test(a) || /^tex1/i.test(a)) return `That's a transparent Zcash address (t…), the kind Zodl marks “Not Private”. Ferry sends ZEC shielded only: paste your wallet's shielded address, which starts with ${prefix}.`;
     if (/^z(s|testsapling|regtestsapling)1/i.test(a)) return `That's an older Sapling address (zs…). Paste your wallet's unified address, which starts with ${prefix}.`;
     const other = Object.values(UA_PREFIX).some((p) => p !== prefix && a.toLowerCase().startsWith(p));
     if (!a.toLowerCase().startsWith(prefix)) return other ? `That's a Zcash address for another network. This node is on ${coin.networkName}: its addresses start with ${prefix}.` : `That isn't a Zcash unified address. On ${coin.networkName} it starts with ${prefix}.`;

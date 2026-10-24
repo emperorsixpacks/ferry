@@ -69,7 +69,7 @@ export function WalletPage() {
   return (
     <Layout>
       <div className="mx-auto w-full max-w-[640px]" data-wallet={own ? "own" : "demo"}>
-        <PageHeader eyebrow="Your Ferry node" title="Wallet" subtitle={own ? "The coins your node holds. Add funds to swap, or send them to your own wallet." : "The coins this node holds."} />
+        <PageHeader eyebrow="Your Ferry node" title="Wallet" subtitle={own ? "The coins your node holds. Add funds to swap, or send them to your own wallet. Works with Zodl: scan to add funds, paste your Zodl address to receive." : "The coins this node holds."} />
 
         {!own ? (
           <div className="mt-6 flex items-start gap-3 rounded-2xl bg-slate-50 px-4 py-3.5 text-sm text-slate-600" data-demo-note>
@@ -485,7 +485,7 @@ function SendSheet({ coin, onClose, sends, refresh }: { coin: Coin; onClose: () 
                 autoCapitalize="off"
                 aria-invalid={toTouched && !!to.trim() && !!toProblem}
                 aria-describedby="send-to-note"
-                placeholder={coin.kind === "zec" ? "Your unified address (u…)" : coin.kind === "token" || coin.kind === "eth" ? "0x…" : `Your ${coin.ticker} address`}
+                placeholder={coin.kind === "zec" ? "Your Zodl or other shielded address (u…)" : coin.kind === "token" || coin.kind === "eth" ? "0x…" : `Your ${coin.ticker} address`}
                 className={cn(
                   "mt-1.5 h-12 w-full rounded-2xl border bg-slate-50 px-3.5 font-mono text-[13px] text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:bg-white focus:outline-none",
                   toTouched && to.trim() && toProblem ? "border-rose-300" : to.trim() && !toProblem ? "border-emerald-300" : "border-slate-200 focus:border-slate-300",

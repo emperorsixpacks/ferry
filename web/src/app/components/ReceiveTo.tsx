@@ -65,10 +65,10 @@ function ReceiveSheet({ coin, current, onClose }: { coin: ReceiveCoin; current: 
     storeReceive(coin.key, own ? cleanAddress(coin, typed) : null);
     onClose();
   };
-  const placeholder = coin.kind === "zec" ? "Your unified address (u…)" : coin.kind === "evm" ? "0x…" : `Your ${coin.ticker} address`;
+  const placeholder = coin.kind === "zec" ? "Your Zodl or other shielded address (u…)" : coin.kind === "evm" ? "0x…" : `Your ${coin.ticker} address`;
   const options = [
     { on: false, label: "Your Ferry node", note: `The ${coin.ticker} stays in your node. Send it on from Wallet whenever you like.` },
-    { on: true, label: "Your own wallet", note: coin.kind === "zec" ? "A shielded address from your Zcash wallet, like Zashi." : `An address of yours on ${coin.networkName}.` },
+    { on: true, label: "Your own wallet", note: coin.kind === "zec" ? "Works with Zodl: paste its shielded address, and the ZEC arrives there, still shielded." : `An address of yours on ${coin.networkName}.` },
   ];
 
   return (
