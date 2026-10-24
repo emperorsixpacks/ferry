@@ -1028,7 +1028,6 @@ function serveStatic(pathname, req, res) {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://ui");
-  const url = new URL(req.url ?? "/", "http://ui");
 
   if (PUBLIC_ORIGIN && url.pathname.startsWith("/daemon/") && req.method === "OPTIONS") {
     res.writeHead(204, {
