@@ -90,11 +90,11 @@ function LockArt() {
       <span className="relative block h-[60px] w-[52px]">
         <svg viewBox="0 0 52 60" className="absolute inset-0 h-full w-full overflow-visible">
           <g className="lp-shackle">
-            <path d="M15 28V19a11 11 0 0 1 22 0v9" fill="none" stroke="#18181b" strokeWidth="3.5" strokeLinecap="round" />
+            <path d="M15 28V19a11 11 0 0 1 22 0v9" fill="none" className="stroke-slate-900" strokeWidth="3.5" strokeLinecap="round" />
           </g>
-          <rect x="5" y="26" width="42" height="32" rx="9" fill="#fff" stroke="#18181b" strokeWidth="2" />
-          <circle cx="26" cy="40" r="3.5" fill="#18181b" />
-          <path d="M26 43v6" stroke="#18181b" strokeWidth="2.5" strokeLinecap="round" />
+          <rect x="5" y="26" width="42" height="32" rx="9" className="fill-white stroke-slate-900" strokeWidth="2" />
+          <circle cx="26" cy="40" r="3.5" className="fill-slate-900" />
+          <path d="M26 43v6" className="stroke-slate-900" strokeWidth="2.5" strokeLinecap="round" />
         </svg>
       </span>
       <Mark id="zec" size={32} />

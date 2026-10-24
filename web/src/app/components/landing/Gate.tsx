@@ -1,8 +1,9 @@
 import { useEffect, useRef, type RefObject } from "react";
+import { currentTheme, onThemeChange, type Theme } from "../../lib/theme";
 import { Mark, type MarkId } from "./marks";
 import { useOnScreen, useReducedMotion } from "./motion";
 
-// The hero: the Shield Gate, on the page's white. A hexagon drawn in ink hairlines with a soft
+// The hero: the Shield Gate, on the page's canvas. A hexagon drawn in ink hairlines with a soft
 // shadow, Zcash's emblem at its gold core, and a thin grey ring of ciphertext turning slowly round
 // it. Coins (their own marks, the only colour here besides the gold) drift in from the left on thin
 // grey trails, pass through the gate with a small gold pulse and a few grey glyphs scattering, and
@@ -12,8 +13,27 @@ import { useOnScreen, useReducedMotion } from "./motion";
 // hero is on screen and the tab is visible, at no more than 1.5 device pixels per CSS pixel.
 // `anchor` is an empty element the page places where the gate stands (below the text on wide
 // screens, above it on phones). Reduced motion: the same scene, still.
+//
+// It follows the theme (app/lib/theme.ts): every frame takes its colours from the palette below,
+// and a change of theme repaints at once, even when the scene is still. In dark mode the ink
+// lines are near-white on the dark canvas, the gate's face is the card colour and the shadows are
+// black; the gold and the coins stay as they are.
 
-const INK = "#18181b";
+type RGB = [number, number, number];
+interface Palette {
+  ink: RGB; // the gate's hairlines and the faint field round it
+  face: string; // the gate's face
+  shadow: RGB; // under the gate and the coins
+  shade: number; // how strong those shadows are, as a multiple of light mode's
+  ring: string; // the ciphertext round the gate
+  trail: RGB; // behind each coin
+  glyph: RGB; // the glyphs scattering out of the gate
+}
+const PALETTES: Record<Theme, Palette> = {
+  light: { ink: [24, 24, 27], face: "#fff", shadow: [24, 24, 27], shade: 1, ring: "#a1a1aa", trail: [161, 161, 170], glyph: [113, 113, 122] },
+  dark: { ink: [232, 233, 236], face: "#16171b", shadow: [0, 0, 0], shade: 2.6, ring: "#5f626b", trail: [104, 107, 116], glyph: [138, 141, 150] },
+};
+const rgba = ([r, g, b]: RGB, a: number) => `rgba(${r},${g},${b},${a})`;
 // Zcash gold (#F4B728) appears only at the core: its glow, the emblem, and the pulse as a coin passes
 const GLYPHS = "░▒▓#%&@$01<>/=+*";
 
@@ -196,6 +216,7 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
     const frame = (dt: number) => {
       const g = s.geo;
       if (!g) return;
+      const pal = PALETTES[currentTheme()];
       s.t += dt;
       const { W, H, gx, gy, R } = g;
       ctx.setTransform(s.dpr, 0, 0, s.dpr, 0, 0);
@@ -211,7 +232,7 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
       for (let i = 0; i < 3; i++) {
         const f = (s.t * 0.05 + i / 3) % 1;
         hexPath(ctx, gx, gy, R * (1.9 + f * 3));
-        ctx.strokeStyle = `rgba(24,24,27,${0.07 * (1 - f)})`;
+        ctx.strokeStyle = rgba(pal.ink, 0.07 * (1 - f));
         ctx.stroke();
       }
 
@@ -224,7 +245,7 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
         alive.push(tr);
         // in: a little faster as it nears the gate
         const pin = Math.pow(clamp(age / tr.din, 0, 1.6), 1.25);
-        if (pin < 1 + TRAIL) trail(ctx, tr.qin, Math.max(0, pin - TRAIL), Math.min(1, pin));
+        if (pin < 1 + TRAIL) trail(ctx, tr.qin, Math.max(0, pin - TRAIL), Math.min(1, pin), pal.trail);
         if (pin < 1) heads.push({ ...xy(qAt(tr.qin, pin)), c: tr.a, sc: 1 - 0.55 * smooth(0.82, 1, pin), o: smooth(0, 0.06, pin) * (1 - smooth(0.9, 1, pin)) });
         if (!tr.passed && age >= tr.din) {
           tr.passed = true;
@@ -235,7 +256,7 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
         if (ao > 0) {
           const x = clamp(ao / tr.dout, 0, 1.6);
           const pout = 1 - Math.pow(1 - Math.min(x, 1), 1.25) + Math.max(0, x - 1);
-          if (pout < 1 + TRAIL) trail(ctx, tr.qout, Math.max(0, pout - TRAIL), Math.min(1, pout));
+          if (pout < 1 + TRAIL) trail(ctx, tr.qout, Math.max(0, pout - TRAIL), Math.min(1, pout), pal.trail);
           if (pout < 1) heads.push({ ...xy(qAt(tr.qout, pout)), c: tr.b, sc: 0.45 + 0.55 * smooth(0, 0.14, pout), o: smooth(0, 0.07, pout) });
         }
       }
@@ -245,7 +266,7 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
       // behind its face and come out from under it
       const cs = g.narrow ? 38 : 50;
       ctx.save();
-      ctx.shadowColor = "rgba(24,24,27,0.18)";
+      ctx.shadowColor = rgba(pal.shadow, Math.min(1, 0.18 * pal.shade));
       ctx.shadowBlur = 14;
       ctx.shadowOffsetY = 5;
       for (const h of heads) {
@@ -259,7 +280,7 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
       ctx.globalAlpha = 1;
 
       // the gate's ring: a hairline and a band of grey ciphertext turning slowly
-      ctx.strokeStyle = "rgba(24,24,27,0.12)";
+      ctx.strokeStyle = rgba(pal.ink, 0.12);
       ctx.beginPath();
       ctx.arc(gx, gy, R * 1.3, 0, Math.PI * 2);
       ctx.stroke();
@@ -268,7 +289,7 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
       ctx.font = mono(gs);
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillStyle = "#a1a1aa";
+      ctx.fillStyle = pal.ring;
       for (let i = 0; i < s.ring.length; i++) {
         if (rand() < 0.015) s.ring[i] = GLYPHS[Math.floor(rand() * GLYPHS.length)];
         const a = (i / s.ring.length) * Math.PI * 2 + s.t * 0.07;
@@ -279,23 +300,24 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
         ctx.restore();
       }
 
-      // the hexagon: white, a soft shadow, an ink hairline (warming to gold as a coin passes)
+      // the hexagon: the paper's colour, a soft shadow, an ink hairline (warming to gold as a coin
+      // passes)
       ctx.save();
-      ctx.shadowColor = "rgba(24,24,27,0.16)";
+      ctx.shadowColor = rgba(pal.shadow, Math.min(1, 0.16 * pal.shade));
       ctx.shadowBlur = 36;
       ctx.shadowOffsetY = 14;
       hexPath(ctx, gx, gy, R);
-      ctx.fillStyle = "#fff";
+      ctx.fillStyle = pal.face;
       ctx.fill();
       ctx.restore();
       hexPath(ctx, gx, gy, R);
       ctx.lineWidth = 1.5;
       ctx.lineJoin = "round";
-      ctx.strokeStyle = s.pulse > 0.02 ? mixInkGold(s.pulse) : INK;
+      ctx.strokeStyle = mixInkGold(pal.ink, s.pulse > 0.02 ? s.pulse : 0);
       ctx.stroke();
       hexPath(ctx, gx, gy, R * 0.84);
       ctx.lineWidth = 1;
-      ctx.strokeStyle = "rgba(24,24,27,0.1)";
+      ctx.strokeStyle = rgba(pal.ink, 0.1);
       ctx.stroke();
 
       // the gold core: a soft glow, then Zcash's emblem
@@ -333,7 +355,7 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
         q.x += q.vx * dt;
         q.y += q.vy * dt;
         if (rand() < 0.1) q.ch = GLYPHS[Math.floor(rand() * GLYPHS.length)];
-        ctx.fillStyle = `rgba(113,113,122,${0.8 * (1 - smooth(0.4, 1, q.age / q.life))})`;
+        ctx.fillStyle = rgba(pal.glyph, 0.8 * (1 - smooth(0.4, 1, q.age / q.life)));
         ctx.fillText(q.ch, q.x, q.y);
         live.push(q);
       }
@@ -398,7 +420,12 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
     ro.observe(box);
     // the gate's spot moves when the text above it settles (web fonts), without the hero resizing
     if (anchor.current) ro.observe(anchor.current);
-    return () => ro.disconnect();
+    // light or dark: repaint at once, whether the scene runs, stands still or waits off screen
+    const off = onThemeChange(redraw);
+    return () => {
+      ro.disconnect();
+      off();
+    };
   }, [reduced, anchor]);
 
   useEffect(() => {
@@ -429,9 +456,8 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
 const xy = ([x, y]: P) => ({ x, y });
 
 // ink warming to gold, t 0..1
-function mixInkGold(t: number) {
+function mixInkGold(a: RGB, t: number) {
   const k = Math.min(1, t);
-  const a = [24, 24, 27];
   const b = [244, 183, 40];
   return `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * k)).join(",")})`;
 }
@@ -459,13 +485,13 @@ function through(s: Sim, tr: Traveller) {
 }
 
 // a thin grey trail behind a coin, fading to nothing at its tail
-function trail(ctx: CanvasRenderingContext2D, q: Q, from: number, to: number) {
+function trail(ctx: CanvasRenderingContext2D, q: Q, from: number, to: number, grey: RGB) {
   if (to - from < 0.004) return;
   const tail = qAt(q, from);
   const head = qAt(q, to);
   const grad = ctx.createLinearGradient(tail[0], tail[1], head[0], head[1]);
-  grad.addColorStop(0, "rgba(161,161,170,0)");
-  grad.addColorStop(1, "rgba(161,161,170,0.75)");
+  grad.addColorStop(0, rgba(grey, 0));
+  grad.addColorStop(1, rgba(grey, 0.75));
   ctx.strokeStyle = grad;
   ctx.lineWidth = 1.5;
   ctx.lineCap = "round";
