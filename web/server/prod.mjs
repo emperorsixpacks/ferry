@@ -19,6 +19,8 @@
 //   DEMO_MAX_ZAT [50000000] largest swap a visitor may start (0.5 ZEC)
 //   DEMO_MIN_ZAT [unset]    smallest; the maker's own minimum applies anyway
 //   DEMO_RATE_PER_HOUR [3]  swap starts per client IP per rolling hour
+//   DEMO_SWAPS_PER_HOUR [12] swap starts across all clients per rolling hour (rotating addresses
+//                           can't get past it, so fees can't drain the wallets)
 //   DEMO_FAULTS [0]         1 allows POST /api/swaps/:id/fault (the inspector's stall buttons)
 //
 // The daemons see no browser Origin header: this server strips it after its own PUBLIC_ORIGIN
@@ -38,6 +40,7 @@ const MAKER_URL = env.FERRY_MAKER_URL ?? "http://127.0.0.1:7112";
 const DEMO_MAX_ZAT = Number(env.DEMO_MAX_ZAT ?? 50_000_000);
 const DEMO_MIN_ZAT = env.DEMO_MIN_ZAT ? Number(env.DEMO_MIN_ZAT) : 0;
 const RATE_PER_HOUR = Number(env.DEMO_RATE_PER_HOUR ?? 3);
+const SWAPS_PER_HOUR = Number(env.DEMO_SWAPS_PER_HOUR ?? 12);
 const FAULTS = env.DEMO_FAULTS === "1";
 
 // ------------------------------------------------------------------------------------------------
@@ -126,6 +129,15 @@ function clientIp(req) {
   return req.socket.remoteAddress ?? "unknown";
 }
 
+const recentAll = []; // timestamps of every swap start in the last hour
+
+// the global cap, checked before the per-IP limit so a refused start costs nobody a slot
+function globalWait() {
+  const now = Date.now();
+  while (recentAll.length && now - recentAll[0] >= 3_600_000) recentAll.shift();
+  return recentAll.length >= SWAPS_PER_HOUR ? Math.ceil((recentAll[0] + 3_600_000 - now) / 1000) : 0;
+}
+
 function takeRate(ip) {
   const now = Date.now();
   const recent = (rates.get(ip) ?? []).filter((t) => now - t < 3_600_000);
@@ -205,15 +217,21 @@ async function guard(key, path, req, res) {
       json(res, 400, { error: `The smallest demo swap is ${zec(DEMO_MIN_ZAT)} ZEC` });
       return false;
     }
-    let swaps;
+    // the maker (B) finishes a moment after Z, and refuses a new swap until it has
+    let lists;
     try {
-      swaps = await daemonJson("z", "/api/swaps");
+      lists = await Promise.all([daemonJson("z", "/api/swaps"), daemonJson("b", "/api/swaps")]);
     } catch {
       json(res, 502, { error: "Can't reach the daemon. Is it running?" });
       return false;
     }
-    if (swaps.status === 200 && Array.isArray(swaps.body) && swaps.body.some((s) => !s.outcome)) {
+    if (lists.some((l) => l.status === 200 && Array.isArray(l.body) && l.body.some((s) => !s.outcome))) {
       json(res, 409, { error: "A swap is already in progress on the demo. Try again when it finishes." });
+      return false;
+    }
+    const busy = globalWait();
+    if (busy) {
+      json(res, 429, { error: `The demo has hit its limit of ${SWAPS_PER_HOUR} swaps an hour. Try again in ${Math.ceil(busy / 60)} minutes.` }, { "retry-after": String(busy) });
       return false;
     }
     const wait = takeRate(clientIp(req));
@@ -221,6 +239,15 @@ async function guard(key, path, req, res) {
       json(res, 429, { error: `Too many swaps from your address. Try again in ${Math.ceil(wait / 60)} minutes.` }, { "retry-after": String(wait) });
       return false;
     }
+    const at = Date.now();
+    recentAll.push(at);
+    // a start the daemon refuses gives both slots back
+    req.ferryRefused = () => {
+      const i = recentAll.indexOf(at);
+      if (i >= 0) recentAll.splice(i, 1);
+      const mine = rates.get(clientIp(req));
+      if (mine?.length) mine.pop();
+    };
     // the maker is always ours: the daemon fetches whatever URL it's given
     return JSON.stringify({ maker: MAKER_URL, zec_zat: zat });
   }
@@ -321,6 +348,7 @@ async function proxy(key, path, search, req, res) {
     // the body may be rewritten below, so its length is recomputed by Node
     const sse = String(up.headers["content-type"] ?? "").startsWith("text/event-stream");
     if (path === "/api/status" && up.statusCode === 200) delete out["content-length"];
+    if ((up.statusCode ?? 502) >= 300) req.ferryRefused?.();
     res.writeHead(up.statusCode ?? 502, out);
     if (sse && path === "/api/events") rewriteEvents(up, res);
     else if (path === "/api/status" && up.statusCode === 200) rewriteJson(up, res);
@@ -331,6 +359,7 @@ async function proxy(key, path, search, req, res) {
     });
   });
   upstream.on("error", () => {
+    req.ferryRefused?.();
     if (!res.headersSent) json(res, 502, { error: "Can't reach the daemon. Is it running?" });
     else res.destroy();
   });
@@ -405,7 +434,7 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`ferry-ui on http://${HOST}:${PORT}  dist ${DIST}`);
   console.log(`  Z ${DAEMONS.z.url.origin}  B ${DAEMONS.b.url.origin}  maker ${MAKER_URL}`);
-  console.log(`  demo: max ${zec(DEMO_MAX_ZAT)} ZEC, ${RATE_PER_HOUR} swaps/IP/hour, faults ${FAULTS ? "on" : "off"}${PUBLIC_ORIGIN ? `, origin ${PUBLIC_ORIGIN}` : ""}`);
+  console.log(`  demo: max ${zec(DEMO_MAX_ZAT)} ZEC, ${RATE_PER_HOUR} swaps/IP/hour, ${SWAPS_PER_HOUR} swaps/hour in all, faults ${FAULTS ? "on" : "off"}${PUBLIC_ORIGIN ? `, origin ${PUBLIC_ORIGIN}` : ""}`);
 });
 
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => server.close(() => process.exit(0)));
