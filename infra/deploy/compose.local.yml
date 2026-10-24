@@ -1,0 +1,17 @@
+# A local rehearsal of the server deploy (docs/DEPLOY.md, "Rehearse locally"): the same services,
+# images, private networks, hardening and secrets, with one difference. Caddy listens on
+# 127.0.0.1:7950 only and signs its certificate with its own local CA, instead of serving 80/443
+# to the internet with Let's Encrypt. Use it through the wrappers, with its own project name so
+# nothing collides with other Docker use on the machine:
+#
+#   export FERRY_COMPOSE_PROJECT=ferry-local FERRY_COMPOSE_OVERRIDE=infra/deploy/compose.local.yml
+#   infra/deploy/compose up -d --build
+#
+# and DOMAIN=localhost:7950 in infra/deploy/.env: Caddy then serves https://localhost:7950, and
+# the web server's PUBLIC_ORIGIN (https://$DOMAIN) is that same origin. To use another port,
+# change it here and in DOMAIN together.
+services:
+  caddy:
+    # Replaces 80/443 (`!override` needs compose 2.24 or newer).
+    ports: !override
+      - 127.0.0.1:7950:7950

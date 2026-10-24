@@ -1,6 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import { ArrowLeft, ArrowRight, CircleNotch, Lock, ShieldCheck, ShieldSlash } from "@phosphor-icons/react";
-import { directionOf, type Status, type SwapView } from "@/api";
+import { directionOf, isMine, type Status, type SwapView } from "@/api";
 import { CHAIN_NAMES, coin } from "@/format";
 import { Link } from "@/router";
 import { btcText } from "@/swap/shared";
@@ -26,8 +26,10 @@ export function SwapDetail({ id }: { id: string }) {
   const d = useLocal();
   const swap = d.swaps[id];
   // A swap of the other direction (opened from a link, or the banner after a flip): follow the
-  // daemon that runs it, so the page updates live and reads that daemon's status.
-  const other = !!swap && swap.role !== d.role && d.canFlip;
+  // daemon that runs it, so the page updates live and reads that daemon's status. Only the
+  // person's own side: a maker's copy of the same swap (its daemon here too) is not a reason to
+  // flip, as it can arrive first while the followed daemon is still connecting.
+  const other = !!swap && swap.role !== d.role && d.canFlip && isMine(swap);
   useEffect(() => {
     if (other && swap) d.chooseDirection(directionOf(swap.role));
     // eslint-disable-next-line react-hooks/exhaustive-deps

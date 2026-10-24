@@ -18,7 +18,11 @@
 #   infra/deploy/ctl compose <args>          docker compose for this deployment (= infra/deploy/compose)
 #
 # Pairs (compose profiles): ltc (ZEC/LTC, Litecoin testnet), usdc-base (ZEC/USDC, Base Sepolia),
-# weth-base (ZEC/WETH, Base Sepolia). ZEC/BTC always runs.
+# weth-base (ZEC/WETH, Base Sepolia). ZEC/BTC always runs. Visitors sell ZEC on every pair; BUY_ZEC
+# in .env names the pairs where they may also buy it (btc and the optional pairs).
+#
+# FERRY_COMPOSE_PROJECT [ferry] names the compose project; FERRY_COMPOSE_OVERRIDE adds a compose
+# file (a local rehearsal: infra/deploy/compose.local.yml, docs/DEPLOY.md "Rehearse locally").
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -68,6 +72,26 @@ enabled_pairs() {
 
 is_enabled() { case " $(enabled_pairs) " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
+# The pairs on which visitors may also buy ZEC (BUY_ZEC from the environment, else from .env;
+# docs/DEPLOY.md, "Buying ZEC"): btc, and those of the optional pairs that are enabled.
+ALL_BUYS="btc $ALL_PAIRS"
+buy_pairs() {
+  local raw p out=
+  if [ -n "${BUY_ZEC+x}" ]; then raw=$BUY_ZEC; else raw=$(env_get BUY_ZEC); fi
+  for p in $(printf '%s' "$raw" | tr ',' ' '); do
+    case " $ALL_BUYS " in
+      *" $p "*) ;;
+      *) die "BUY_ZEC names \"$p\"; the pairs are: ${ALL_BUYS// /, }" ;;
+    esac
+  done
+  for p in $ALL_BUYS; do
+    case ",$(printf '%s' "$raw" | tr -d ' ')," in
+      *",$p,"*) if [ "$p" = btc ] || is_enabled "$p"; then out="$out $p"; fi ;;
+    esac
+  done
+  printf '%s' "${out# }"
+}
+
 # the containers of a pair
 services_of() {
   case $1 in
@@ -78,24 +102,42 @@ services_of() {
 
 # FERRY_LTC_URL, FERRY_USDC_BASE_URL, ...
 url_var() { printf 'FERRY_%s_URL' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')"; }
+# FERRY_LTC_B_URL, FERRY_USDC_BASE_B_URL, ...: the pair's B daemon, where visitors buy ZEC
+buy_url_var() { printf 'FERRY_%s_B_URL' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')"; }
 
 # ------------------------------------------------------------------ compose
 
 # docker compose, with the web server's view of the enabled pairs: Z's URL for each one (empty for
-# the others, which then show as "not available here"), and unless .env sets FERRY_MAKERS, a maker
-# list with every enabled pair's maker.
+# the others, which then show as "not available here"), B's for each pair BUY_ZEC names, and
+# unless .env sets FERRY_MAKERS, a maker list with every enabled pair's maker (B) and, for each
+# pair BUY_ZEC names, its Z as the maker that sells ZEC.
 cmd_compose() {
   [ -f "$ENV_FILE" ] || die "no $ENV_FILE yet (deploy.sh creates it; or: infra/deploy/ctl secrets)"
-  local pairs p makers
+  local pairs buys p makers
   pairs=$(enabled_pairs)
+  buys=$(buy_pairs)
   for p in $ALL_PAIRS; do
     if is_enabled "$p"; then
       export "$(url_var "$p")=http://ferryd-z-$p:7101"
     else
       export "$(url_var "$p")="
     fi
+    export "$(buy_url_var "$p")="
   done
-  if [ -n "$pairs" ] && [ -z "$(env_get FERRY_MAKERS)" ] && [ -z "${FERRY_MAKERS:-}" ]; then
+  # Every daemon's --max-swaps: passed through only when .env sets MAX_SWAPS, so ferryd's own
+  # default (by network) applies otherwise; ferryd refuses an empty value.
+  local max
+  max=$(env_get MAX_SWAPS)
+  if [ -n "$max" ]; then export FERRY_MAX_SWAPS="$max"; else unset FERRY_MAX_SWAPS; fi
+  export FERRY_B_BUYS=0
+  for p in $buys; do
+    if [ "$p" = btc ]; then
+      export FERRY_B_BUYS=1
+    else
+      export "$(buy_url_var "$p")=http://ferryd-b-$p:7102"
+    fi
+  done
+  if [ -n "$pairs$buys" ] && [ -z "$(env_get FERRY_MAKERS)" ] && [ -z "${FERRY_MAKERS:-}" ]; then
     # B's peer URLs on the private network; the first stays the ZEC/BTC maker (the default).
     makers="Demo maker|http://ferryd-b:7112|ZEC/BTC"
     for p in $pairs; do
@@ -105,7 +147,18 @@ cmd_compose() {
         weth-base) makers="$makers, Demo maker (WETH)|http://ferryd-b-weth-base:7112|ZEC/WETH|base" ;;
       esac
     done
+    # Z's peer URLs: the operator's own Z sells the ZEC a visitor buys
+    for p in $buys; do
+      case $p in
+        btc) makers="$makers, Demo maker (ZEC for BTC)|http://ferryd-z:7111|ZEC/BTC" ;;
+        ltc) makers="$makers, Demo maker (ZEC for LTC)|http://ferryd-z-ltc:7111|ZEC/LTC" ;;
+        usdc-base) makers="$makers, Demo maker (ZEC for USDC)|http://ferryd-z-usdc-base:7111|ZEC/USDC|base" ;;
+        weth-base) makers="$makers, Demo maker (ZEC for WETH)|http://ferryd-z-weth-base:7111|ZEC/WETH|base" ;;
+      esac
+    done
     export FERRY_MAKERS="$makers"
+  elif [ -n "$buys" ]; then
+    log "BUY_ZEC is on ($buys) and FERRY_MAKERS is set: list the Z makers that sell ZEC there yourself (docs/DEPLOY.md, \"Buying ZEC\")"
   fi
   local files=(-f infra/deploy/docker-compose.yml)
   # a local rehearsal can add its own overrides (ports, a fork RPC); never needed on the server
@@ -118,10 +171,16 @@ compose() { "$ROOT/infra/deploy/ctl" compose "$@"; }
 # ------------------------------------------------------------------ pairs on/off
 
 cmd_pairs() {
-  local p
+  local p buys state
+  buys=" $(buy_pairs) "
   for p in $ALL_PAIRS; do
-    printf '  %-10s %s\n' "$p" "$(is_enabled "$p" && echo enabled || echo off)"
+    state=off
+    is_enabled "$p" && state=enabled
+    [[ $buys == *" $p "* ]] && state="$state, visitors also buy ZEC (BUY_ZEC)"
+    printf '  %-10s %s\n' "$p" "$state"
   done
+  [[ $buys == *" btc "* ]] && echo "  ZEC/BTC: visitors also buy ZEC (BUY_ZEC)"
+  return 0
 }
 
 set_profiles() { # set_profiles "<pair> <pair>..."
@@ -521,7 +580,7 @@ usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' 
 # A typo in COMPOSE_PROFILES stops every command here (a command substitution would hide it).
 case "${1:-help}" in
   help | -h | --help) ;;
-  *) enabled_pairs >/dev/null ;;
+  *) enabled_pairs >/dev/null && buy_pairs >/dev/null ;;
 esac
 
 case "${1:-help}" in

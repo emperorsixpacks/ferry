@@ -1,7 +1,8 @@
 # Deploying the Ferry testnet demo
 
 To run Ferry for yourself on your own computer instead, see [RUN-A-NODE.md](RUN-A-NODE.md)
-(`./infra/node/ferry up`).
+(`./infra/node/ferry up`). To try this whole deploy on your own machine before the server, see
+[Rehearse locally](#rehearse-locally) (`infra/deploy/deploy.sh local`).
 
 This guide takes you from a fresh clone of the repository to the public demo running on one Linux
 server. The demo uses test coins only. It always runs ZEC/BTC:
@@ -162,9 +163,22 @@ T2 = 6 blocks after the cancel. If something stalls, the swap refunds by itself,
 protocol working.
 
 The public UI is guarded by `web/server/prod.mjs`: visitors can only read status and start a swap
-on a Z. Starts are capped at `DEMO_MAX_ZAT` (0.5 ZEC), one active swap at a time per pair,
-`DEMO_RATE_PER_HOUR` per IP and `DEMO_SWAPS_PER_HOUR` across all visitors. These limits are shared
-by every pair.
+on a Z (selling ZEC), or on a B for the pairs `BUY_ZEC` names (buying it, section 7.6). Starts
+are capped at `DEMO_MAX_ZAT` (0.5 ZEC), `DEMO_RATE_PER_HOUR` per IP and `DEMO_SWAPS_PER_HOUR`
+across all visitors. These limits are shared by every pair and both directions, and counted in the
+web server's memory: a redeploy or a restart of `web` starts them afresh.
+
+Each daemon runs several swaps at once, as many as its free funds cover, up to `MAX_SWAPS` in
+`.env` (ferryd `--max-swaps`; empty: ferryd's default, 4 on these test networks). Past that, or
+when its funds are tied up in swaps in progress, a start is refused as busy and the swap card
+says that every partner is busy. Lower it to 1 to go back to one swap at a time per daemon.
+
+On the Zcash side, "free funds" means notes: a ZEC lock spends whole notes, oldest first, until
+they cover it, so a Z holding one large note runs one swap at a time whatever `MAX_SWAPS` says
+(on the local rehearsal a 0.03 ZEC lock took both of Z's notes, 0.024 and 0.10, and the next start
+was busy). To let a pair run several swaps at once, fund its Z with several separate payments,
+one per swap you want running together, each a little more than the largest swap. Each swap's
+change comes back as one new note.
 
 ## 7. More pairs: ZEC/LTC, ZEC/USDC, ZEC/WETH (optional)
 
@@ -324,6 +338,42 @@ infra/deploy/deploy.sh <ssh-host>
 The deploy stops that pair's containers and the web server stops listing it. Its volumes, keys and
 funds stay; enabling it again brings it back as it was. Let its swaps finish first (`status`).
 
+### 7.6 Buying ZEC (optional): `BUY_ZEC`
+
+By default visitors only sell ZEC: the swap starts on the pair's Z, and B is the maker. `BUY_ZEC`
+in the server's `.env` turns on the other direction for the pairs it names, comma-separated:
+`btc`, `ltc`, `usdc-base`, `weth-base` (an optional pair must also be in `COMPOSE_PROFILES`). On
+the server, add or set the line in `~/ferry/infra/deploy/.env` (a `.env` from before this option
+has no such line), then deploy:
+
+```sh
+BUY_ZEC=usdc-base,weth-base
+```
+
+```sh
+infra/deploy/deploy.sh <ssh-host>
+infra/deploy/deploy.sh <ssh-host> pairs   # "usdc-base  enabled, visitors also buy ZEC (BUY_ZEC)"
+```
+
+What changes:
+- A visitor's buy starts on the pair's **B**, and the pair's **Z** is the maker that sells the
+  ZEC. Every Z makes that offer (`--maker-offer`, at the pair's rate and sizes), on the private
+  network only like B's; the web server lists it, and so uses it, only for the pairs `BUY_ZEC`
+  names (`/api/makers`: `Demo maker (ZEC for USDC)` and so on, with `"role": "Z"`).
+- **The wallets and funding are the same as for a sell**: both sides are still this server's
+  wallets, ZEC still goes from Z to B and the coin from B to Z. Only who proposes the swap changes.
+- **The same guard** applies (section 6): the caps and both rate limits, whichever way, and no
+  visitor can say where coins go. A daemon counts its swaps as maker and taker together against
+  `MAX_SWAPS`.
+- If you set `FERRY_MAKERS` yourself, list the Z makers in it too, e.g.
+  `Demo maker (ZEC for USDC)|http://ferryd-z-usdc-base:7111|ZEC/USDC|base`, or
+  `Demo maker (ZEC for BTC)|http://ferryd-z:7111|ZEC/BTC`. List only your own Z there: a
+  visitor's buy pays B's coins to whichever listed maker it picks.
+
+Check with `curl -fsS https://<DOMAIN>/api/pairs`: `"buy"` lists the optional pairs and
+`"main": {"buy": true}` means ZEC/BTC. In the UI, the swap card's flip (receive ZEC) then works for
+those coins.
+
 ## 8. Operations
 
 ```sh
@@ -357,11 +407,11 @@ sudo ufw allow OpenSSH && sudo ufw allow 80,443/tcp && sudo ufw allow 443/udp &&
 Ports that Docker publishes bypass ufw, which is why the compose file publishes nothing but
 Caddy's 80/443.
 
-**Outside takers are not supported yet.** The makers' peer listeners (7112) are reachable only by
-the takers on the private network. Publishing one would hand the internet an unauthenticated
-maker API, which skips every guard of the public UI (swap size, rate limits) and lets anyone tie
-up the maker's one swap slot. Opening a maker to other people's ferryd needs a rate-limited,
-authenticated proxy in front of it first.
+**Outside takers are not supported yet.** The makers' peer listeners (7112, and Z's 7111 for
+`BUY_ZEC`) are reachable only by the daemons on the private network. Publishing one would hand
+the internet an unauthenticated maker API, which skips every guard of the public UI (swap size,
+rate limits) and lets anyone tie up the maker's swap slots (`MAX_SWAPS`). Opening a maker to
+other people's ferryd needs a rate-limited, authenticated proxy in front of it first.
 
 ## 10. Backups
 
@@ -451,6 +501,61 @@ The funded addresses then keep working. Run it right after the first deploy, whi
 node is still syncing, because a pruned node can only rescan blocks it still has. The backups in
 `~/ferry-backups/` on the server hold wallet keys: keep a copy if you need one, then delete them.
 It covers ZEC/BTC only. Anyone else can ignore this section.
+
+## Rehearse locally
+
+`local` in place of the SSH host runs this same deploy on your own machine, so you can watch it
+build, sync and swap before the server does. You need Docker with compose 2.24 or newer (Docker
+Desktop on a Mac is fine), `python3`, and about 8 GB of memory for Docker with every pair on.
+
+```sh
+infra/deploy/deploy.sh local enable usdc-base     # the pairs you want, as on the server
+infra/deploy/deploy.sh local                      # .env, secrets, build, start
+infra/deploy/deploy.sh local status
+infra/deploy/deploy.sh local addresses
+infra/deploy/deploy.sh local down                 # stop; volumes (wallets, chains) are kept
+```
+
+It is the server's deploy, with these differences only:
+- **Caddy listens on `https://localhost:7950` only**, with a certificate from its own local CA,
+  instead of serving ports 80/443 to the internet with Let's Encrypt
+  (`infra/deploy/compose.local.yml`). Nothing else is published, and `deploy.sh local` sets
+  `DOMAIN=localhost:7950`, so the web server's `PUBLIC_ORIGIN` is that page. Your browser warns
+  about the certificate once. For curl, take Caddy's root certificate:
+
+  ```sh
+  export FERRY_COMPOSE_PROJECT=ferry-local FERRY_COMPOSE_OVERRIDE=infra/deploy/compose.local.yml
+  infra/deploy/compose cp caddy:/data/caddy/pki/authorities/local/root.crt /tmp/ferry-local-ca.crt
+  curl --cacert /tmp/ferry-local-ca.crt https://localhost:7950/healthz
+  ```
+- **The compose project is `ferry-local`** (containers `ferry-local-*`, volumes `ferry-local_*`),
+  so it can't touch anything else on the machine. On the machine itself, `infra/deploy/compose`
+  and `infra/deploy/ctl` take the same two settings as above (`FERRY_COMPOSE_PROJECT`,
+  `FERRY_COMPOSE_OVERRIDE`).
+- **Nothing is copied**: it uses this checkout's `infra/deploy/.env` and `infra/deploy/secrets/`,
+  which git ignores and `deploy.sh` never copies to a server. Your local keys and the server's are
+  different wallets. Set `FERRYD_IMAGE` and `WEB_IMAGE` in that `.env` to name the images apart
+  from others on the machine (e.g. `ferry-local-ferryd:local`).
+- `migrate-wallets` works with `local` too; it keeps the replaced volumes in `~/ferry-local-backups`.
+
+What behaves differently on a Mac with Docker Desktop (checked on Apple silicon, arm64), and is
+not a sign of a problem on the server:
+- **Closed tabs hold their live-update stream for minutes.** Docker Desktop's port forwarding
+  tells Caddy late that a browser has gone, so the web server counts each closed or reloaded tab's
+  `/api/events` stream as open for 6 minutes or more, and after a few reloads answers "Too many
+  open Ferry tabs from your address" (`DEMO_SSE_PER_IP`, 8). On a Linux server the browser's
+  connection reaches Caddy directly and the stream is let go within about 20 s (ferryd's 15 s
+  keep-alive). Locally, raise the limits in `infra/deploy/.env` (`DEMO_SSE_PER_IP=200`,
+  `DEMO_SSE_TOTAL=2000`); restarting the web server (`infra/deploy/compose up -d --no-deps web`)
+  also frees them.
+- **File ownership isn't enforced on bind mounts**: a key file is readable by the daemons' uid
+  whoever owns it. On Linux it must belong to uid 10001 (`ctl secrets` sees to that for the keys it
+  creates; a key you copy into `infra/deploy/secrets/` by hand needs `sudo chown 10001:10001`).
+- Every image the deploy uses is published for both amd64 and arm64, so nothing runs emulated; the
+  binaries are built for the machine's own architecture.
+
+The coins are real test coins on the public test networks, from the same faucets. A wallet
+belongs in one place: don't run the same keys or Zcash wallet here and on the server at once.
 
 ## What runs
 

@@ -180,6 +180,9 @@ impl DevtoolZecLeg {
             run_devtool_wallet(&cfg, &args, SYNC_TIMEOUT).await?;
             tracing::info!(wallet = %cfg.wallet_dir.display(), "initialized a new Zcash wallet");
         }
+        recover_wallet_db(&cfg.wallet_dir)
+            .await
+            .map_err(|e| ZecError::Other(format!("opening the wallet database: {e}")))?;
         let own_account = query(&cfg.wallet_dir, |c| {
             c.query_row(
                 "SELECT uuid FROM accounts WHERE has_spend_key = 1 ORDER BY id LIMIT 1",
@@ -1798,6 +1801,28 @@ async fn sign_pczt(
     Ok(())
 }
 
+/// Opens the wallet database once for writing and reads from it, which makes SQLite roll back a
+/// hot journal: what a zcash-devtool write leaves when it is cut short (stopping ferryd's container
+/// kills its child processes mid-write). Until a writable connection does that, every read-only
+/// open fails with "attempt to write a readonly database", and the daemon can't start. Run before
+/// the first read-only query, while no zcash-devtool of ours is running.
+async fn recover_wallet_db(wallet_dir: &Path) -> rusqlite::Result<()> {
+    let path = wallet_dir.join("data.sqlite");
+    tokio::task::spawn_blocking(move || {
+        let conn = rusqlite::Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(Duration::from_secs(10))?;
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .map(|_| ())
+    })
+    .await
+    .expect("wallet recovery task panicked")
+}
+
 /// Runs a read-only query against the wallet database off the async runtime.
 async fn query<T: Send + 'static>(
     wallet_dir: &Path,
@@ -2424,5 +2449,61 @@ Version: V5
             last_txid(out).as_deref(),
             Some("2e90568486787c4e6cd86db81f33d3adbf78cb16a7b915aa37436e52666e5d73")
         );
+    }
+
+    /// A wallet write cut short (the container stopped while zcash-devtool wrote) leaves a hot
+    /// journal; read-only queries then fail until a writable connection rolls it back, which
+    /// recover_wallet_db does at start. Seen on the local deploy: ferryd restarted in a loop with
+    /// "no spending account in the wallet: attempt to write a readonly database".
+    #[tokio::test]
+    async fn a_write_cut_short_does_not_keep_the_wallet_closed() {
+        let base = std::env::temp_dir().join(format!("ferry-zec-journal-{}", std::process::id()));
+        let (src, wallet) = (base.join("src"), base.join("wallet"));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&wallet).unwrap();
+        let db = src.join("data.sqlite");
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute_batch(
+            "PRAGMA journal_mode=DELETE; CREATE TABLE accounts (id INTEGER PRIMARY KEY, x BLOB);",
+        )
+        .unwrap();
+        for i in 0..200 {
+            c.execute(
+                "INSERT INTO accounts VALUES (?1, zeroblob(4096))",
+                rusqlite::params![i],
+            )
+            .unwrap();
+        }
+        // a transaction with its changes spilled into the file and the originals in the journal,
+        // copied while it is open: the copy is a database whose writer died mid-write
+        c.execute_batch(
+            "PRAGMA cache_size=1; BEGIN; UPDATE accounts SET x = randomblob(4096); DELETE FROM accounts WHERE id >= 100;",
+        )
+        .unwrap();
+        let journal = src.join("data.sqlite-journal");
+        assert!(journal.exists(), "the open transaction has a journal");
+        std::fs::copy(&db, wallet.join("data.sqlite")).unwrap();
+        std::fs::copy(&journal, wallet.join("data.sqlite-journal")).unwrap();
+        drop(c);
+
+        let count = |dir: PathBuf| async move {
+            query(&dir, |c| {
+                c.query_row("SELECT count(*) FROM accounts", [], |r| r.get::<_, i64>(0))
+            })
+            .await
+        };
+        let err = count(wallet.clone()).await.unwrap_err();
+        assert!(
+            err.to_string().contains("readonly"),
+            "read-only open: {err}"
+        );
+        recover_wallet_db(&wallet).await.unwrap();
+        assert_eq!(
+            count(wallet.clone()).await.unwrap(),
+            200,
+            "rolled back to the last commit"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
