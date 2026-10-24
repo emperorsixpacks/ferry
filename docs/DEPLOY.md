@@ -567,3 +567,21 @@ The ferryd image contains `ferryd`, `zcash-devtool` (pinned revision plus Ferry'
 values chosen for signet's ~10-minute blocks; `infra/testnet.sh help` explains them. The Base
 pairs' keys and the WETH wrap use `cast` from `ghcr.io/foundry-rs/foundry:v1.5.1` (pinned digest),
 pulled only when a Base pair is on.
+
+## Coolify + Vercel (separate static frontend)
+
+If you prefer to host the UI on Vercel and only run the daemons on Coolify:
+
+1. **Backend on Coolify.** Point a Coolify application at this repo with `docker-compose.coolify.yml`.
+   Paste the environment from `infra/deploy/.env.coolify.example`. The daemons stay on the private
+   `internal` network; only the `web` proxy service is exposed.
+
+2. **Expose the web proxy.** In Coolify, give the `web` service a domain (for example,
+   `https://ferry-web.your-coolify.app`). This is the only Coolify URL the browser will call.
+
+3. **Frontend on Vercel.** Deploy the `web/` directory to Vercel. It detects Vite. Paste the
+   environment from `infra/deploy/.env.vercel.example`, with `VITE_DAEMON_BASE_URL` set to the
+   Coolify `web` domain from step 2. No serverless functions or rewrites are needed.
+
+The browser on Vercel calls the Coolify `web` proxy at `/daemon/{z,b}/...`, which adds the daemon
+bearer token and forwards to `ferryd-z` / `ferryd-b` on the private network.

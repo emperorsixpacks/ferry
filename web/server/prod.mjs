@@ -766,6 +766,10 @@ async function proxy(key, path, search, req, res) {
     const out = { ...SECURITY };
     for (const [k, v] of Object.entries(up.headers)) if (!HOP.has(k) && !k.startsWith("access-control-")) out[k] = v;
     out["cache-control"] = "no-store";
+    if (PUBLIC_ORIGIN) {
+      out["access-control-allow-origin"] = PUBLIC_ORIGIN;
+      out["access-control-allow-credentials"] = "true";
+    }
     if (String(up.headers["content-type"] ?? "").startsWith("text/event-stream")) out["x-accel-buffering"] = "no";
     // the body may be rewritten below, so its length is recomputed by Node
     const sse = String(up.headers["content-type"] ?? "").startsWith("text/event-stream");
@@ -1024,6 +1028,19 @@ function serveStatic(pathname, req, res) {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://ui");
+  const url = new URL(req.url ?? "/", "http://ui");
+
+  if (PUBLIC_ORIGIN && url.pathname.startsWith("/daemon/") && req.method === "OPTIONS") {
+    res.writeHead(204, {
+      ...SECURITY,
+      "access-control-allow-origin": PUBLIC_ORIGIN,
+      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-headers": "authorization, content-type",
+      "access-control-allow-credentials": "true",
+    });
+    return res.end();
+  }
+
   const m = url.pathname.match(/^\/daemon\/([a-z-]+)(\/.*)?$/);
   if (m && !Object.hasOwn(DAEMONS, m[1])) return json(res, 404, { error: "No such daemon on this server" });
   if (m) {

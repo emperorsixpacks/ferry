@@ -1,14 +1,4 @@
 {
-  "rewrites": [
-    {
-      "source": "/daemon/z/:path*",
-      "destination": "https://YOUR_COOLIFY_DOMAIN/daemon/z/:path*"
-    },
-    {
-      "source": "/daemon/b/:path*",
-      "destination": "https://YOUR_COOLIFY_DOMAIN/daemon/b/:path*"
-    }
-  ],
   "headers": [
     {
       "source": "/(.*)",
