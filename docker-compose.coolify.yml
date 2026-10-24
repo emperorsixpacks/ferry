@@ -23,7 +23,7 @@ services:
       - -server
       - -printtoconsole
       - -rpcuser=${BTC_RPC_USER:-ferry}
-      - -rpcpassword=${BTC_RPC_PASS:?set BTC_RPC_PASS}
+      - -rpcpassword=${BTC_RPC_PASS}
       - -rpcbind=0.0.0.0
       - -rpcallowip=172.16.0.0/12
       - -rpcallowip=10.0.0.0/8
@@ -48,13 +48,13 @@ services:
       - --api-listen=0.0.0.0:7102
       - --listen=0.0.0.0:7112
       - --public-url=${B_PUBLIC_PEER_URL:-http://ferryd-b:7112}
-      - --api-token=${FERRY_B_TOKEN:?set FERRY_B_TOKEN}
+      - --api-token=${FERRY_B_TOKEN}
       - --maker-offer=${RATE:-410000}:${MIN_ZAT:-10000000}:${MAX_ZAT:-100000000}
       - --data-dir=/data
       - --network=signet
       - --btc-rpc=http://bitcoind:38332
       - --btc-rpc-user=${BTC_RPC_USER:-ferry}
-      - --btc-rpc-pass=${BTC_RPC_PASS:?set BTC_RPC_PASS}
+      - --btc-rpc-pass=${BTC_RPC_PASS}
       - --zec=devtool
       - --zec-network=test
       - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
@@ -89,12 +89,12 @@ services:
       - --api-listen=0.0.0.0:7101
       - --listen=0.0.0.0:7111
       - --public-url=http://ferryd-z:7111
-      - --api-token=${FERRY_Z_TOKEN:?set FERRY_Z_TOKEN}
+      - --api-token=${FERRY_Z_TOKEN}
       - --data-dir=/data
       - --network=signet
       - --btc-rpc=http://bitcoind:38332
       - --btc-rpc-user=${BTC_RPC_USER:-ferry}
-      - --btc-rpc-pass=${BTC_RPC_PASS:?set BTC_RPC_PASS}
+      - --btc-rpc-pass=${BTC_RPC_PASS}
       - --zec=devtool
       - --zec-network=test
       - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
@@ -139,9 +139,12 @@ services:
       DEMO_MAX_ZAT: ${DEMO_MAX_ZAT:-50000000}
       DEMO_RATE_PER_HOUR: ${DEMO_RATE_PER_HOUR:-3}
       DEMO_FAULTS: ${DEMO_FAULTS:-0}
-    # Coolify's reverse proxy attaches here
+    # Coolify's reverse proxy attaches here; Vercel rewrites /daemon/* to this service
     expose:
       - "8080"
+    # Uncomment if Coolify needs an explicit port mapping:
+    # ports:
+    #   - "8080:8080"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
       interval: 30s
