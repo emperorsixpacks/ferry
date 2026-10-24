@@ -20,7 +20,11 @@ mod z;
 pub use b::{EvmBState, EvmBSwap};
 pub use keys::{EvmKeys, EvmPeer, EvmSetup};
 pub use messages::{EvmEnvelope, EvmMessage, EvmTranscript, EVM_PROTOCOL_VERSION};
-pub use params::{EvmParams, EvmPolicy, ANVIL_CHAIN_ID, BASE_CHAIN_ID, BASE_SEPOLIA_CHAIN_ID};
+pub use params::{
+    EvmParams, EvmPolicy, PolicyOptIn, ANVIL_CHAIN_ID, ARBITRUM_CHAIN_ID,
+    ARBITRUM_SEPOLIA_CHAIN_ID, BASE_CHAIN_ID, BASE_SEPOLIA_CHAIN_ID, ETHEREUM_CHAIN_ID,
+    OPTIMISM_CHAIN_ID, OP_SEPOLIA_CHAIN_ID, SEPOLIA_CHAIN_ID,
+};
 pub use session::EvmSession;
 pub use z::{EvmZState, EvmZSwap};
 

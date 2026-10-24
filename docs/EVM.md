@@ -161,6 +161,51 @@ New rules for EVM, because **a transaction that reverts still publishes its call
   asks for 1 h margins and at least 4 h from the proposal to t1 − Δ; Base Sepolia asks for 2 min
   margins (`EvmPolicy::for_chain`).
 
+**Per-chain minimums** (`EvmPolicy::for_chain`). Each party refuses terms below these. Δ is both
+margins; the claim window is the time from the proposal to t1 − Δ.
+
+| Chain (id) | Δ | lock confirmations | ZEC confirmations | claim window |
+|---|---|---|---|---|
+| Ethereum (1) | 15 min | 64 (~13 min) | 10 | 2 h |
+| Base (8453), Optimism (10) | 1 h | 30 (~1 min) | 10 | 4 h |
+| Arbitrum One (42161) | 1 h | 240 (~1 min) | 10 | 4 h |
+| Sepolia, Base Sepolia, OP Sepolia, Arbitrum Sepolia | 2 min | 2 | 3 | 20 min |
+| anvil (31337) | only with `--dev-policy`: 2 s | 1 | 1 | 10 s |
+| anything else | refused, unless `--evm-testnet-policy` | | | |
+
+- **Ethereum** has no sequencer: many builders compete to include a transaction, so one with a
+  fair fee lands within a few 12 s blocks. 15 min (75 blocks) leaves room for congestion and fee
+  spikes. 64 lock confirmations are about two epochs, when a block is normally finalized, so Z
+  locks ZEC only behind a lock that can't be reorganized without a third of the stake being
+  slashed. 2 h covers B's lock and its confirmations (~13 min), Z's ZEC lock and 10 Zcash
+  confirmations (~12.5 min), and the claim with its 15 min margin, with room to spare.
+- **Base and Optimism** are both OP Stack chains with 2 s blocks, a single sequencer and a 12 h
+  forced-inclusion window, so they share one policy: the 1 h margins and 4 h window above. 30
+  lock confirmations are a minute of blocks. They guard against the sequencer replacing recent
+  blocks, not against L1 reorgs: full finality waits for the batch to be posted and finalized on
+  Ethereum.
+- **Arbitrum One** has a single sequencer and a 24 h delay before a transaction can be forced in
+  through L1, so its margins and claim window are at least Base's. It makes a block about every
+  0.25 s, so 240 lock confirmations cover the same minute as Base's 30 (blocks come only with
+  transactions, so a quiet chain takes longer, never less).
+- **ZEC confirmations** are the Zcash side's and don't depend on the EVM chain: 10 (about
+  12.5 min) on every mainnet.
+- **Test networks** get short margins so a swap fits in minutes. That is fine without value at
+  stake, and nothing more: `infra/evm-testnet.sh` already runs Base Sepolia with a 5 min Δ.
+- **Unknown chains are refused.** A chain id Ferry has no row for gets no silent default. An
+  operator who runs some other test network can pass `--evm-testnet-policy` to give it the
+  test-network minimums; ferryd refuses that flag for a listed chain, so it can't loosen a
+  mainnet.
+
+**The honest limit.** A 1 h margin protects against a sequencer that is slow or down for a
+while. It does not cover one that withholds a transaction for its whole forced-inclusion window
+(12 h on Base and Optimism, 24 h on Arbitrum). Such a sequencer can make Z's claim or B's refund
+miss its window. If the withheld transaction is then included after the deadline, it reverts but
+still publishes its share (z or b), and the other side can take both coins. Covering that would
+need margins longer than the window, so swaps lasting days. Ferry doesn't do that: on these
+chains you also trust the sequencer to include transactions within the margin. On Ethereum no
+single party can withhold a transaction for long.
+
 Compared with Bitcoin, one race is gone. A valid claim and a valid refund can never compete in
 the mempool, because the windows don't overlap. The only risk left is a late transaction
 reverting with its scalar visible, and the rules above cover it.
@@ -226,8 +271,8 @@ is the real USDC: a malicious token could block Z's claim alone.
     relayed happy claim with an EIP-712 signature checked against the contract's digest, a
     refund and a punish, all with DLEQ-proven shares), and `tests/artifacts.rs` (the committed
     ABI and bytecode match a fresh `forge build`).
-- **`ferry_core::evm`.** `EvmParams` with block-time windows, and `EvmPolicy` per chain (anvil
-  needs `--dev-policy`). `EvmKeys`/`EvmSetup`, `EvmSession` (joint key, the shares from revealed
+- **`ferry_core::evm`.** `EvmParams` with block-time windows, and `EvmPolicy` per chain (the
+  table above; anvil needs `--dev-policy`, an unlisted chain `--evm-testnet-policy`). `EvmKeys`/`EvmSetup`, `EvmSession` (joint key, the shares from revealed
   scalars, swap id, ready digest, the exact lock terms), versioned `EvmEnvelope`/`EvmMessage`,
   and the two state machines.
   - **Shared with the Bitcoin machines:** the joint-key and DLEQ code, the `ZecLeg` actions,
@@ -246,6 +291,7 @@ is the real USDC: a malicious token could block Z's claim alone.
     - `--evm-token-symbol`, `--evm-token-decimals`.
     - `--evm-t1-secs` (proposal to t1), `--evm-refund-secs` (t2 − t1), `--evm-delta-secs`.
     - `--evm-lock-confs`, `--evm-max-tip`, `--evm-log-chunk`.
+    - `--evm-testnet-policy`: accept a chain id with no policy as a test network (above).
     - `--watchtower`, `--watchtower-token-file`, `--watchtower-own`, as on Bitcoin (see
       [Watchtower](#watchtower)).
   - `--maker-offer RATE:MIN:MAX` gives the rate in token base units per ZEC. The price feed

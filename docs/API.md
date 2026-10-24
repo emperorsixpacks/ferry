@@ -99,8 +99,10 @@ another coin; the coin is part of `SwapParams` and so of the transcript.
 
 **USDC on an EVM chain.** A daemon started with `--counter evm` swaps ZEC against an ERC-20 in
 FerryLock (docs/EVM.md). The same paths answer, in the same shape:
-- `chains.btc` is `{ "coin": "usdc", "ticker": "USDC", "decimals": 6, "network": "anvil" |
-  "base-sepolia" | "base", "height", "time" }`, where `time` is the latest block's unix time.
+- `chains.btc` is `{ "coin": "usdc", "ticker": "USDC", "decimals": 6, "network", "height",
+  "time" }`, where `time` is the latest block's unix time and `network` is one of `anvil`,
+  `ethereum`, `optimism`, `base`, `arbitrum`, `sepolia`, `op-sepolia`, `base-sepolia`,
+  `arbitrum-sepolia`, or `evm-<chain id>` for an unlisted chain (`--evm-testnet-policy`).
 - `btc_sat` fields hold token base units.
 - `balances.eth_wei` is gas money.
 - `offer` has `pair: "ZEC/USDC"`, `rate_sat_per_zec` in token units per ZEC, and `t1_secs`,
