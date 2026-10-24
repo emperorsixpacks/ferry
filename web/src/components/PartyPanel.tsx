@@ -1,14 +1,14 @@
 import type { Role, Status, SwapView, TimelineEntry } from "../api";
-import { btc, offset, short, zec } from "../format";
+import { btc, coin, offset, short, zec } from "../format";
 
-const ROLE = {
-  Z: { has: "has shielded ZEC", wants: "wants BTC", mine: "z", peer: "b", peerName: "B" },
-  B: { has: "has BTC", wants: "wants shielded ZEC", mine: "b", peer: "z", peerName: "Z" },
-} as const;
+const ROLE = () => ({
+  Z: { has: "has shielded ZEC", wants: `wants ${coin().ticker}`, mine: "z", peer: "b", peerName: "B" },
+  B: { has: `has ${coin().ticker}`, wants: "wants shielded ZEC", mine: "b", peer: "z", peerName: "Z" },
+});
 
 const OUTCOME: Record<string, string> = { swapped: "Swapped", refunded: "Refunded", punished: "Punished" };
 
-const CHAIN_MARK: Record<TimelineEntry["chain"], string> = { btc: "Bitcoin", zec: "Zcash", peer: "Message", local: "Local" };
+const CHAIN_MARK = (): Record<TimelineEntry["chain"], string> => ({ btc: coin().name, zec: "Zcash", peer: "Message", local: "Local" });
 
 export function PartyPanel({
   role,
@@ -25,7 +25,7 @@ export function PartyPanel({
   error: string | null;
   stalled: boolean;
 }) {
-  const r = ROLE[role];
+  const r = ROLE()[role];
   const start = swap?.timeline[0]?.at;
   const outcome = swap?.outcome;
   const won = outcome === "swapped" || (outcome === "punished" && role === "Z");
@@ -52,7 +52,7 @@ export function PartyPanel({
           <dd className="mono" key={`z${status?.balances.zec_shielded_zat}`}>{status ? zec(status.balances.zec_shielded_zat) : "–"}</dd>
         </div>
         <div>
-          <dt>BTC</dt>
+          <dt>{coin().ticker}</dt>
           <dd className="mono" key={`b${status?.balances.btc_sat}`}>{status ? btc(status.balances.btc_sat) : "–"}</dd>
         </div>
       </dl>
@@ -71,7 +71,7 @@ export function PartyPanel({
             <span className="share-sym">{r.mine}</span>
             <span>
               {r.mine === "z" ? "Z's share" : "B's share"}, known to {role}
-              {swap?.secrets.mine_revealed ? <em> revealed on Bitcoin</em> : null}
+              {swap?.secrets.mine_revealed ? <em> revealed on {coin().name}</em> : null}
             </span>
           </li>
           <li className={`share${swap?.secrets.peer_learned ? " share-learned" : ""}`}>
@@ -105,7 +105,7 @@ export function PartyPanel({
                   <span className="entry-label">{e.label}</span>
                   {e.txid || e.height != null ? (
                     <span className="entry-meta">
-                      <span className="entry-chain">{CHAIN_MARK[e.chain]}</span>
+                      <span className="entry-chain">{CHAIN_MARK()[e.chain]}</span>
                       {e.txid ? <span className="mono" title={e.txid}>{short(e.txid, 8, 6)}</span> : null}
                       <span className="mono">{e.height != null ? `height ${e.height}` : "in mempool"}</span>
                     </span>

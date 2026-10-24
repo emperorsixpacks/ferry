@@ -3,6 +3,7 @@
 // against the mock and against real ferryd.
 
 import type { SwapView, TimelineEntry } from "./api";
+import { coin } from "./format";
 
 export type Path = "happy" | "refund" | "punish";
 
@@ -62,15 +63,15 @@ export function deriveCrossing(z?: SwapView, b?: SwapView): Crossing {
   if (punish && zlock) zec = { ...zec, stuck: true };
 
   const legs: Leg[] = [
-    leg(1, "B locks BTC", "B", "btc", lock),
+    leg(1, `B locks ${coin().ticker}`, "B", "btc", lock),
     leg(2, "Z locks ZEC", "Z", "zec", zlock),
   ];
   if (path === "happy") {
-    legs.push(leg(3, "Z redeems BTC", "Z", "btc", redeem), leg(4, "B sweeps ZEC", "B", "zec", sweep));
+    legs.push(leg(3, `Z redeems ${coin().ticker}`, "Z", "btc", redeem), leg(4, "B sweeps ZEC", "B", "zec", sweep));
   } else {
     legs.push(leg(3, "Cancel after T1", "Z or B", "btc", cancel));
     if (path === "refund") {
-      legs.push(leg(4, "B refunds BTC", "B", "btc", refund));
+      legs.push(leg(4, `B refunds ${coin().ticker}`, "B", "btc", refund));
       if (zlock) legs.push(leg(5, "Z reclaims ZEC", "Z", "zec", reclaim));
     } else {
       legs.push(leg(4, "Z punishes", "Z", "btc", punish));

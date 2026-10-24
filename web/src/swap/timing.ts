@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Status, SwapView } from "../api";
+import { coin } from "../format";
 
 // Seconds per block. Public networks use their target spacing; regtest has whatever block
 // producer is running (the demo stack mines both chains every ~5 s), so it starts from that and
@@ -23,7 +24,8 @@ export function useBlockTimes(status: Status | null): BlockTimes {
     for (const chain of ["btc", "zec"] as const) {
       const { network, height } = status.chains[chain];
       if (network !== "regtest") {
-        next[chain] = TARGET[chain];
+        // Litecoin targets 2.5 min blocks
+        next[chain] = chain === "btc" && coin().id === "ltc" ? 150 : TARGET[chain];
         continue;
       }
       const f = first.current[chain];
@@ -68,7 +70,7 @@ export function typicalSeconds(status: Status | null, bt: BlockTimes): number {
 
 export function confirmationsLabel(status: Status | null): string {
   const t = terms(status, undefined);
-  return `${t.lockConfs} Bitcoin + ${t.zecConfs} Zcash confirmations`;
+  return `${t.lockConfs} ${coin().name} + ${t.zecConfs} Zcash confirmations`;
 }
 
 // When the swap has fully unwound if the other side disappears: T1 after the BTC lock confirms,

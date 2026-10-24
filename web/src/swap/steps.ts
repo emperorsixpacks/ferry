@@ -1,6 +1,7 @@
 // Plain-language progress for one side of a swap, read from that party's own timeline.
 
 import type { SwapView, TimelineEntry } from "../api";
+import { coin } from "../format";
 
 export type StepStatus = "done" | "active" | "pending";
 
@@ -53,16 +54,16 @@ export function stepsOf(v: SwapView): Step[] {
       v.role === "Z"
         ? [
             step("Agreed the swap with the other side", terms),
-            step("Bitcoin locked by the other side", find(v, "btc_lock_seen")),
+            step(`${coin().name} locked by the other side`, find(v, "btc_lock_seen")),
             step("Your ZEC is locked in a shielded address only this swap can open", confirmed(find(v, "zec_lock_broadcast"))),
             step("The other side stopped responding, so the swap was called off", cancel),
-            step("They never took their bitcoin back, so after the deadline it was released to you", punish),
+            step(`They never took their ${coin().name.toLowerCase()} back, so after the deadline it was released to you`, punish),
           ]
         : [
             step("Agreed the swap with the other side", terms),
-            step("Your BTC is locked", confirmed(find(v, "btc_lock_broadcast"))),
+            step(`Your ${coin().ticker} is locked`, confirmed(find(v, "btc_lock_broadcast"))),
             step("Your daemon stopped responding, so the swap was called off", cancel),
-            step("After the deadline, the BTC went to the other side", punish),
+            step(`After the deadline, the ${coin().ticker} went to the other side`, punish),
           ],
     );
   }
@@ -77,39 +78,39 @@ export function stepsOf(v: SwapView): Step[] {
         const done = v.outcome === "refunded" ? v.timeline[v.timeline.length - 1] : undefined;
         return activate([
           step("Your wallet couldn't send the ZEC from shielded notes only, so nothing was sent", refused),
-          step("The swap was called off", cancel, "Waiting for the deadline, then for the Bitcoin network"),
-          step("Their Bitcoin goes back to them", find(v, "secret_extracted", "refund_seen") ?? done, "Waiting for the Bitcoin network"),
+          step("The swap was called off", cancel, `Waiting for the deadline, then for the ${coin().name} network`),
+          step(`Their ${coin().name} goes back to them`, find(v, "secret_extracted", "refund_seen") ?? done, `Waiting for the ${coin().name} network`),
         ]);
       }
       const refundSeen = find(v, "secret_extracted");
       const back = find(v, "reclaimed") ?? (v.outcome === "refunded" ? refundSeen : undefined);
       return activate([
         step("The swap didn't finish in time, so it was called off", cancel),
-        step("Their Bitcoin goes back to them, which unlocks your ZEC", refundSeen, "Waiting for the Bitcoin network"),
+        step(`Their ${coin().name} goes back to them, which unlocks your ZEC`, refundSeen, `Waiting for the ${coin().name} network`),
         ...(lockedZec ? [step("Bringing your ZEC back to your wallet", back, "Moving it back to your shielded address")] : []),
       ]);
     }
     const refund = find(v, "refund_broadcast");
     return activate([
       step("The swap didn't finish in time, so it was called off", cancel),
-      step("Bringing your BTC back to your wallet", v.outcome === "refunded" ? find(v, "refunded") ?? confirmed(refund) : undefined, "Waiting for the Bitcoin network"),
+      step(`Bringing your ${coin().ticker} back to your wallet`, v.outcome === "refunded" ? find(v, "refunded") ?? confirmed(refund) : undefined, `Waiting for the ${coin().name} network`),
     ]);
   }
 
   if (v.role === "Z") {
     return activate([
       step("Agreed the swap with the other side", terms, "Setting up the swap"),
-      step("Bitcoin locked by the other side", find(v, "btc_lock_seen"), "Waiting for their Bitcoin to confirm"),
+      step(`${coin().name} locked by the other side`, find(v, "btc_lock_seen"), `Waiting for their ${coin().name} to confirm`),
       step("Your ZEC is locked in a shielded address only this swap can open", confirmed(find(v, "zec_lock_broadcast")), "Waiting for the Zcash network"),
-      step("Claiming your BTC", confirmed(find(v, "btc_redeem_broadcast")), "Waiting for the other side, then for one Bitcoin block"),
+      step(`Claiming your ${coin().ticker}`, confirmed(find(v, "btc_redeem_broadcast")), `Waiting for the other side, then for one ${coin().name} block`),
       step("Done", find(v, "swap_complete")),
     ]);
   }
   return activate([
     step("Agreed the swap with the other side", terms, "Setting up the swap"),
-    step("Your BTC is locked", confirmed(find(v, "btc_lock_broadcast")), "Waiting for the Bitcoin network"),
+    step(`Your ${coin().ticker} is locked`, confirmed(find(v, "btc_lock_broadcast")), `Waiting for the ${coin().name} network`),
     step("ZEC locked by the other side", find(v, "zec_confirmed"), "Waiting for their ZEC to confirm"),
-    step("Claiming your ZEC", confirmed(find(v, "zec_sweep_broadcast")), "Waiting for their Bitcoin claim, then sending the ZEC to your shielded wallet"),
+    step("Claiming your ZEC", confirmed(find(v, "zec_sweep_broadcast")), `Waiting for their ${coin().name} claim, then sending the ZEC to your shielded wallet`),
     step("Done", find(v, "swap_complete")),
   ]);
 }
@@ -117,19 +118,19 @@ export function stepsOf(v: SwapView): Step[] {
 // Transactions for the Details section, oldest first.
 export function transactions(v: SwapView): { chain: "btc" | "zec"; label: string; txid: string; height: number | null }[] {
   const names: Record<string, string> = {
-    btc_lock_broadcast: "Bitcoin lock",
-    btc_lock_seen: "Bitcoin lock",
+    btc_lock_broadcast: `${coin().name} lock`,
+    btc_lock_seen: `${coin().name} lock`,
     zec_lock_broadcast: "ZEC lock",
     zec_note_seen: "ZEC lock",
-    btc_redeem_broadcast: "Bitcoin claim",
+    btc_redeem_broadcast: `${coin().name} claim`,
     secret_extracted: "",
     zec_sweep_broadcast: "ZEC claim",
-    cancel_broadcast: "Bitcoin cancel",
-    cancel_seen: "Bitcoin cancel",
-    refund_broadcast: "Bitcoin refund",
+    cancel_broadcast: `${coin().name} cancel`,
+    cancel_seen: `${coin().name} cancel`,
+    refund_broadcast: `${coin().name} refund`,
     zec_reclaim_broadcast: "ZEC return",
-    punish_broadcast: "Bitcoin settlement",
-    punish_seen: "Bitcoin settlement",
+    punish_broadcast: `${coin().name} settlement`,
+    punish_seen: `${coin().name} settlement`,
   };
   const seen = new Set<string>();
   const out: ReturnType<typeof transactions> = [];
@@ -138,7 +139,7 @@ export function transactions(v: SwapView): { chain: "btc" | "zec"; label: string
     let label = names[e.kind];
     if (!label) {
       if (seen.has(e.txid)) continue;
-      label = v.role === "B" ? "Bitcoin claim" : "Bitcoin refund";
+      label = v.role === "B" ? `${coin().name} claim` : `${coin().name} refund`;
     }
     seen.add(e.txid);
     out.push({ chain: e.chain === "zec" ? "zec" : "btc", label, txid: e.txid, height: e.height });

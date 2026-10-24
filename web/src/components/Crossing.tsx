@@ -1,5 +1,5 @@
 import type { Crossing as CrossingModel, Leg } from "../derive";
-import { btcShort, zec } from "../format";
+import { btcShort, coin, zec } from "../format";
 
 type Pt = [number, number];
 
@@ -81,7 +81,7 @@ function Token({ kind, at, pending, stuck, label }: { kind: "btc" | "zec"; at: P
     <g className={`token token-${kind}${pending ? " token-pending" : ""}${stuck ? " token-stuck" : ""}`} style={{ transform: `translate(${at[0]}px, ${at[1]}px)` }}>
       <rect x={-34} y={-15} width={68} height={30} rx={15} className="token-hull" />
       {kind === "zec" ? <rect x={-34} y={-15} width={68} height={30} rx={15} fill="url(#hatch)" className="token-hatch" /> : null}
-      <text className="token-sym" dy="0.36em">{kind.toUpperCase()}</text>
+      <text className="token-sym" dy="0.36em">{kind === "zec" ? "ZEC" : coin().ticker}</text>
       <text className="token-amt" y={30}>{label}</text>
     </g>
   );
@@ -140,7 +140,7 @@ export function CrossingChart({
   const jointEdgeB: Pt = narrow ? [g.zec.joint[0] + 14, g.zec.joint[1] + 20] : [g.zec.joint[0] + 14, g.zec.joint[1] - 19];
 
   return (
-    <svg className="chart" viewBox={`0 0 ${g.w} ${g.h}`} role="img" aria-label="Swap crossing between the Zcash and Bitcoin chains">
+    <svg className="chart" viewBox={`0 0 ${g.w} ${g.h}`} role="img" aria-label={`Swap crossing between the Zcash and ${coin().name} chains`}>
       <defs>
         <pattern id="hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
           <line x1="0" y1="0" x2="0" y2="5" className="hatch-line" />
@@ -157,7 +157,7 @@ export function CrossingChart({
       <g className="shore-zec">
         <Label at={g.shoreA.name} title="Zcash" sub={["Ironwood pool", heights.zec != null ? `height ${heights.zec}` : ""]} anchor="start" land />
       </g>
-      <Label at={g.shoreB.name} title="Bitcoin" sub={["Taproot", heights.btc != null ? `height ${heights.btc}` : ""]} anchor={narrow ? "start" : "end"} land />
+      <Label at={g.shoreB.name} title={coin().name} sub={["Taproot", heights.btc != null ? `height ${heights.btc}` : ""]} anchor={narrow ? "start" : "end"} land />
       <g className="party-flag" transform={`translate(${g.shoreA.party[0]} ${g.shoreA.party[1]})`}>
         <circle r={17} />
         <text dy="0.36em">Z</text>
@@ -209,7 +209,7 @@ export function CrossingChart({
       ) : null}
 
       <Token kind="zec" at={zecAt} pending={!!model?.zec.pending} stuck={model?.zec.stuck} label={`${zec(amounts.zec_zat)} ZEC`} />
-      <Token kind="btc" at={btcAt} pending={!!model?.btc.pending} label={`${btcShort(amounts.btc_sat)} BTC`} />
+      <Token kind="btc" at={btcAt} pending={!!model?.btc.pending} label={`${btcShort(amounts.btc_sat)} ${coin().ticker}`} />
     </svg>
   );
 }

@@ -1,6 +1,8 @@
 # Ferry protocol (draft v0.1)
 
 Trustless atomic swap between **shielded ZEC (Ironwood pool)** and **native BTC (Taproot)**.
+The same BTC-side transactions run unchanged on Litecoin (Taproot since Core 0.21.2), so the
+counter-chain can also be LTC; see [LITECOIN.md](LITECOIN.md). "BTC" below means either.
 No bridge, no custodian, no committee, and the ZEC never touches a transparent address.
 
 The construction follows Gugger's XMR↔BTC protocol (2020, arXiv 2101.12332), with Zcash's

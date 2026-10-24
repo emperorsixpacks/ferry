@@ -5,7 +5,7 @@
 //! A spend with `CSV t` enters the mempool once its parent has `t` confirmations.
 
 use ferry_btc::bitcoin::{Amount, Network};
-use ferry_btc::tx::DUST_LIMIT;
+use ferry_btc::{Chain, Coin};
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
@@ -56,10 +56,34 @@ impl Policy {
             }),
         }
     }
+
+    /// [`Policy::for_network`] for any counter-chain. The minimums are in blocks, so on a
+    /// faster chain (Litecoin: 2.5 min) they scale up to keep the same wall-clock margins:
+    /// Δ by the block-time ratio, lock and cancel confirmations to the chain's defaults.
+    pub fn for_chain(chain: Chain, dev: bool) -> Result<Policy, Error> {
+        let mut p = Policy::for_network(chain.network, dev)?;
+        if dev {
+            return Ok(p);
+        }
+        let ratio = Coin::Btc.block_time_secs() / chain.block_time_secs();
+        p.min_margin = p.min_margin.saturating_mul(ratio.max(1) as u16);
+        p.min_btc_lock_confirmations = p
+            .min_btc_lock_confirmations
+            .max(chain.default_confirmations());
+        p.min_cancel_confirmations = p
+            .min_cancel_confirmations
+            .max(chain.default_confirmations());
+        Ok(p)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwapParams {
+    /// The counter-chain's coin. Bitcoin is left out of the JSON, so BTC swaps serialize (and
+    /// hash into the transcript) exactly as before; any other coin is part of the Propose
+    /// message and so of the transcript both parties sign up to.
+    #[serde(default, skip_serializing_if = "Coin::is_btc")]
+    pub coin: Coin,
     pub network: Network,
     /// BTC B locks (sats). Z receives `btc_amount - fee`.
     pub btc_amount: u64,
@@ -89,6 +113,7 @@ pub struct SwapParams {
 impl SwapParams {
     /// Hard sanity checks, independent of any policy.
     pub fn validate(&self) -> Result<(), Error> {
+        let chain = self.chain()?;
         if self.btc_fee < RELAY_FLOOR_SAT_PER_VB * MAX_SPEND_VSIZE {
             return Err(Error::InvalidParams(
                 "btc_fee is below the relay floor for a presigned spend",
@@ -106,7 +131,7 @@ impl SwapParams {
         }
         let fee = Amount::from_sat(self.btc_fee);
         let after_fees = Amount::from_sat(self.btc_amount).checked_sub(fee * 2);
-        if after_fees.is_none_or(|v| v < DUST_LIMIT) {
+        if after_fees.is_none_or(|v| v < chain.dust_limit()) {
             return Err(Error::InvalidParams(
                 "btc_amount does not cover two fees plus dust",
             ));
@@ -173,6 +198,13 @@ impl SwapParams {
         Ok(())
     }
 
+    /// The counter-chain (coin and network).
+    pub fn chain(&self) -> Result<Chain, Error> {
+        Chain::new(self.coin, self.network).map_err(|_| {
+            Error::InvalidParams("the counter-chain has no such network (Litecoin has no signet)")
+        })
+    }
+
     pub fn btc_amount(&self) -> Amount {
         Amount::from_sat(self.btc_amount)
     }
@@ -211,6 +243,7 @@ impl SwapParams {
 #[cfg(test)]
 pub(crate) fn test_params() -> SwapParams {
     SwapParams {
+        coin: Coin::Btc,
         network: Network::Regtest,
         btc_amount: 100_000_000,
         zec_amount: 5_000_000_000,
@@ -304,6 +337,62 @@ mod tests {
             ..p
         };
         assert!(thin.check_policy(&main).is_err());
+    }
+
+    #[test]
+    fn coin_in_params() {
+        let p = test_params();
+        // BTC params serialize as before (no "coin" key), so old peers and records agree.
+        let json = serde_json::to_value(&p).unwrap();
+        assert!(json.get("coin").is_none());
+        let ltc = SwapParams {
+            coin: Coin::Ltc,
+            ..p.clone()
+        };
+        let json = serde_json::to_value(&ltc).unwrap();
+        assert_eq!(json["coin"], "ltc");
+        assert_eq!(serde_json::from_value::<SwapParams>(json).unwrap(), ltc);
+        assert!(SwapParams {
+            network: Network::Signet,
+            ..ltc.clone()
+        }
+        .validate()
+        .is_err());
+
+        // Litecoin dust is 10x: 4100 after two fees is fine on BTC, dust on LTC.
+        let small = SwapParams {
+            btc_amount: 4_500,
+            btc_fee: 200,
+            ..p
+        };
+        small.validate().unwrap();
+        assert!(SwapParams {
+            coin: Coin::Ltc,
+            ..small
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn litecoin_policy_scales_to_block_time() {
+        let ltc = |n| Chain::new(Coin::Ltc, n).unwrap();
+        let btc_main = Policy::for_network(Network::Bitcoin, false).unwrap();
+        let ltc_main = Policy::for_chain(ltc(Network::Bitcoin), false).unwrap();
+        assert_eq!(ltc_main.min_margin, btc_main.min_margin * 4);
+        assert_eq!(ltc_main.min_btc_lock_confirmations, 8);
+        assert_eq!(
+            ltc_main.min_zec_confirmations,
+            btc_main.min_zec_confirmations
+        );
+        assert_eq!(
+            Policy::for_chain(Chain::bitcoin(Network::Bitcoin), false).unwrap(),
+            btc_main
+        );
+        assert_eq!(
+            Policy::for_chain(ltc(Network::Regtest), true).unwrap(),
+            Policy::for_network(Network::Regtest, true).unwrap()
+        );
     }
 
     #[test]

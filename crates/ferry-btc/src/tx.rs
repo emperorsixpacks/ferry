@@ -9,11 +9,9 @@ use bitcoin::transaction::Version;
 use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 
 use crate::adaptor::Signature;
+use crate::chain::Coin;
 use crate::scripts::{SwapScripts, TapOut};
 use crate::Role;
-
-/// Smallest output value relayed for a P2TR/P2WPKH-sized output.
-pub const DUST_LIMIT: Amount = Amount::from_sat(330);
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TxError {
@@ -52,8 +50,11 @@ pub struct SwapTxs {
 
 impl SwapTxs {
     /// Build all templates. Each transaction pays one fixed `fee`; refund and punish come
-    /// out of the cancel output, so they pay `lock_amount - 2·fee`.
+    /// out of the cancel output, so they pay `lock_amount - 2·fee`. Every output must clear
+    /// `coin`'s dust threshold for its script type.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        coin: Coin,
         scripts: SwapScripts,
         lock_outpoint: OutPoint,
         lock_amount: Amount,
@@ -64,6 +65,17 @@ impl SwapTxs {
     ) -> Result<Self, TxError> {
         let cancel_value = checked_sub(lock_amount, fee)?;
         let final_value = checked_sub(cancel_value, fee)?;
+        let cancel_spk = scripts.cancel_out.script_pubkey();
+        for (value, spk) in [
+            (cancel_value, &cancel_spk),
+            (cancel_value, &redeem_to),
+            (final_value, &refund_to),
+            (final_value, &punish_to),
+        ] {
+            if value < coin.dust(spk) {
+                return Err(TxError::Dust(value));
+            }
+        }
         let lock_txout = TxOut {
             value: lock_amount,
             script_pubkey: scripts.lock.script_pubkey(),
@@ -269,10 +281,7 @@ impl SwapTxs {
 }
 
 fn checked_sub(value: Amount, fee: Amount) -> Result<Amount, TxError> {
-    match value.checked_sub(fee) {
-        Some(v) if v >= DUST_LIMIT => Ok(v),
-        _ => Err(TxError::Dust(value)),
-    }
+    value.checked_sub(fee).ok_or(TxError::Dust(value))
 }
 
 /// 1-in-1-out, version 2 (BIP68 relative locktimes need it).
@@ -303,6 +312,7 @@ mod tests {
         };
         let to = |k: &BtcKey| ScriptBuf::new_p2tr(&bitcoin::key::Secp256k1::new(), k.xonly(), None);
         let txs = SwapTxs::new(
+            Coin::Btc,
             scripts,
             lock,
             Amount::from_sat(100_000),
@@ -344,6 +354,7 @@ mod tests {
             vout: 0,
         };
         let r = SwapTxs::new(
+            Coin::Btc,
             scripts,
             lock,
             Amount::from_sat(2_200),
@@ -353,6 +364,26 @@ mod tests {
             ScriptBuf::new(),
         );
         assert!(matches!(r, Err(TxError::Dust(_))));
+
+        // 3000 after two fees clears P2TR dust on Bitcoin (330) but not on Litecoin (3300).
+        let to = ScriptBuf::new_p2tr(&bitcoin::key::Secp256k1::new(), z.xonly(), None);
+        let build = |coin| {
+            SwapTxs::new(
+                coin,
+                SwapScripts::new(b.xonly(), z.xonly(), 10, 20, false),
+                lock,
+                Amount::from_sat(5_000),
+                Amount::from_sat(1_000),
+                to.clone(),
+                to.clone(),
+                to.clone(),
+            )
+        };
+        assert!(build(Coin::Btc).is_ok());
+        assert_eq!(
+            build(Coin::Ltc).unwrap_err(),
+            TxError::Dust(Amount::from_sat(3_000))
+        );
     }
 
     #[test]

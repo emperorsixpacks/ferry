@@ -1,4 +1,5 @@
 // "What each chain sees": the observer lines from the API, one per public transaction.
+import { coin } from "../format";
 
 function split(line: string): [string | null, string] {
   const i = line.indexOf(": ");
@@ -15,7 +16,7 @@ export function Observer({ btc, zec }: { btc: string[]; zec: string[] }) {
 
       <div className="observer-cols">
         <div className="obs obs-btc">
-          <h3>A Bitcoin observer</h3>
+          <h3>A {coin().name} observer</h3>
           {btc.length ? (
             <ol>
               {btc.map((l, i) => {
@@ -64,11 +65,11 @@ export function Observer({ btc, zec }: { btc: string[]; zec: string[] }) {
       <dl className="unlink">
         <div>
           <dt>Shared amount</dt>
-          <dd>None. The ZEC value is encrypted, so there is nothing to match against the BTC amount.</dd>
+          <dd>None. The ZEC value is encrypted, so there is nothing to match against the {coin().ticker} amount.</dd>
         </div>
         <div>
           <dt>Shared key</dt>
-          <dd>None. Bitcoin shows secp256k1 keys; each Ironwood spend shows only a freshly randomized rk.</dd>
+          <dd>None. {coin().name} shows secp256k1 keys; each Ironwood spend shows only a freshly randomized rk.</dd>
         </div>
         <div>
           <dt>Shared address</dt>
@@ -76,7 +77,7 @@ export function Observer({ btc, zec }: { btc: string[]; zec: string[] }) {
         </div>
         <div>
           <dt>Timing</dt>
-          <dd>The ZEC sweep waits a random delay, so it doesn't line up with the Bitcoin redeem.</dd>
+          <dd>The ZEC sweep waits a random delay, so it doesn't line up with the {coin().name} redeem.</dd>
         </div>
       </dl>
     </section>

@@ -103,10 +103,12 @@ function summarize(m, index, offer, now) {
   const updated = num(offer?.rate_updated_at);
   const paused = offer?.paused === true;
   const making = offer?.making === true;
+  // The offer says which coin the maker swaps (ferryd --chain); older makers leave it out.
+  const pair = offer?.coin === "ltc" ? "ZEC/LTC" : offer?.coin === "btc" ? "ZEC/BTC" : m.pair;
   return {
     index,
     name: m.name,
-    pair: m.pair,
+    pair,
     online: rate != null,
     // can take a swap right now
     available: rate != null && making && !paused,

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 use ferry_btc::bitcoin::Network;
+use ferry_btc::{Chain, Coin};
 use ferry_core::{Envelope, Role, SwapParams};
 use serde::{Deserialize, Serialize};
 
@@ -105,6 +106,10 @@ pub struct Cli {
     pub btc_watch_wallet: Option<String>,
     #[arg(long, default_value = "regtest")]
     pub network: Network,
+    /// The coin swapped against ZEC: btc (bitcoind) or ltc (litecoind, Core >= 0.21.2). The
+    /// --btc-* options then point at that coin's node and wallet.
+    #[arg(long, default_value = "btc")]
+    pub chain: Coin,
 
     #[arg(long, value_enum, default_value = "mock")]
     pub zec: ZecBackend,
@@ -163,7 +168,8 @@ pub struct Cli {
     #[arg(long, default_value_t = 0, allow_negative_numbers = true,
           value_parser = clap::value_parser!(i32).range(-5_000..=5_000))]
     pub maker_spread_bps: i32,
-    /// The pair the price feed quotes (BASE/QUOTE: ZEC/BTC, ZEC/LTC, ZEC/USD, ZEC/USDC).
+    /// The pair the price feed quotes (BASE/QUOTE: ZEC/BTC, ZEC/LTC, ZEC/USD, ZEC/USDC). A BTC or
+    /// LTC quote follows --chain, so `--chain ltc` quotes ZEC/LTC.
     #[arg(long, default_value = "ZEC/BTC")]
     pub maker_price_pair: crate::pricefeed::Pair,
     /// Testing and mirrors: SOURCE=BASE_URL to reach a feed somewhere else (repeatable).
@@ -263,6 +269,29 @@ impl std::str::FromStr for OfferArg {
 }
 
 impl Cli {
+    /// --maker-price-pair with a BTC or LTC quote set to --chain's coin (the rate is in its
+    /// smallest unit per ZEC).
+    pub fn price_pair(&self) -> crate::pricefeed::Pair {
+        use crate::pricefeed::Asset;
+        let mut pair = self.maker_price_pair;
+        if matches!(pair.quote, Asset::Btc | Asset::Ltc) {
+            pair.quote = match self.chain {
+                Coin::Btc => Asset::Btc,
+                Coin::Ltc => Asset::Ltc,
+            };
+        }
+        pair
+    }
+
+    /// Counter-chain coin and network.
+    pub fn chain(&self) -> anyhow::Result<Chain> {
+        if self.chain == Coin::Ltc && self.watchtower.is_some() {
+            // ferry-watchtower follows a bitcoind; it would never see a Litecoin lock.
+            anyhow::bail!("--watchtower is Bitcoin-only; it cannot guard a --chain ltc swap");
+        }
+        Ok(Chain::new(self.chain, self.network)?)
+    }
+
     pub fn public_url(&self) -> String {
         self.public_url
             .clone()
@@ -291,6 +320,7 @@ impl Cli {
         });
         Offer {
             role: self.role.into(),
+            coin: self.chain,
             network: self.network,
             making: self.maker_offer.is_some(),
             rate_sat_per_zec: o.rate_sat_per_zec,
@@ -318,11 +348,14 @@ impl Cli {
                     .maker_price_feed_url
                     .iter()
                     .find_map(|o| o.strip_prefix(&prefix).map(str::to_string));
-                url.map_or_else(|| Source::public(*k), |base_url| Source { kind: *k, base_url })
+                url.map_or_else(
+                    || Source::public(*k),
+                    |base_url| Source { kind: *k, base_url },
+                )
             })
             .collect();
         Some(LiveRate::new(FeedConfig {
-            pair: self.maker_price_pair,
+            pair: self.price_pair(),
             sources,
             spread_bps: self.maker_spread_bps,
             refresh: Duration::from_secs(self.maker_price_refresh_secs.max(1)),
@@ -348,9 +381,10 @@ pub struct Terms {
 }
 
 impl Terms {
-    pub fn params(&self, network: Network, zec_zat: u64, btc_sat: u64) -> SwapParams {
+    pub fn params(&self, chain: Chain, zec_zat: u64, btc_sat: u64) -> SwapParams {
         SwapParams {
-            network,
+            coin: chain.coin,
+            network: chain.network,
             btc_amount: btc_sat,
             zec_amount: zec_zat,
             t1: self.t1,
@@ -385,6 +419,9 @@ impl Terms {
 pub struct Offer {
     /// The maker's role; a taker must hold the other one.
     pub role: Role,
+    /// The coin swapped against ZEC (absent from older makers: btc).
+    #[serde(default)]
+    pub coin: Coin,
     pub network: Network,
     /// Whether this daemon accepts proposals at all.
     pub making: bool,
@@ -413,6 +450,11 @@ pub struct Liquidity {
 }
 
 impl Offer {
+    /// "ZEC/BTC", "ZEC/LTC".
+    pub fn pair(&self) -> String {
+        format!("ZEC/{}", self.coin.ticker())
+    }
+
     pub fn btc_for(&self, zec_zat: u64) -> u64 {
         btc_for(zec_zat, self.rate_sat_per_zec)
     }
@@ -440,6 +482,50 @@ pub struct Delivery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn litecoin_cli() {
+        let cli = |extra: &[&str]| {
+            let base = [
+                "ferryd",
+                "--role",
+                "b",
+                "--name",
+                "n",
+                "--data-dir",
+                "/nonexistent",
+            ];
+            Cli::try_parse_from(base.iter().chain(extra)).unwrap()
+        };
+        let btc = cli(&[]);
+        assert_eq!(btc.offer().pair(), "ZEC/BTC");
+        assert_eq!(btc.price_pair().to_string(), "ZEC/BTC");
+        let ltc = cli(&["--chain", "ltc"]);
+        assert_eq!(ltc.offer().pair(), "ZEC/LTC");
+        assert_eq!(ltc.chain().unwrap().hrp(), "rltc");
+        // a BTC/LTC price quote follows --chain; a USD quote is left alone
+        assert_eq!(ltc.price_pair().to_string(), "ZEC/LTC");
+        let usd = cli(&["--chain", "ltc", "--maker-price-pair", "ZEC/USD"]);
+        assert_eq!(usd.price_pair().to_string(), "ZEC/USD");
+        assert!(cli(&["--chain", "ltc", "--network", "signet"])
+            .chain()
+            .is_err());
+        assert!(cli(&["--chain", "ltc", "--watchtower", "http://t"])
+            .chain()
+            .is_err());
+        assert!(Cli::try_parse_from([
+            "ferryd",
+            "--role",
+            "b",
+            "--name",
+            "n",
+            "--data-dir",
+            "/x",
+            "--chain",
+            "doge"
+        ])
+        .is_err());
+    }
 
     #[test]
     fn offer_parsing_and_rate() {

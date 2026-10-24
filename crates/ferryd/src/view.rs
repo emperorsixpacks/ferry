@@ -4,6 +4,7 @@ use ferry_btc::bitcoin::opcodes::all::OP_CSV;
 use ferry_btc::bitcoin::script::Instruction;
 use ferry_btc::bitcoin::{Amount, Transaction};
 use ferry_btc::scripts::NUMS;
+use ferry_btc::{Chain, Coin};
 use ferry_core::{Role, Spend};
 use serde::Serialize;
 
@@ -32,6 +33,10 @@ pub struct Chains {
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct BtcChain {
+    /// The coin swapped against ZEC: "btc" or "ltc".
+    pub coin: Coin,
+    /// "BTC" or "LTC".
+    pub ticker: &'static str,
     pub network: String,
     pub height: u64,
 }
@@ -70,7 +75,7 @@ pub struct OfferView {
 impl OfferView {
     pub fn of(o: &crate::config::Offer) -> OfferView {
         OfferView {
-            pair: "ZEC/BTC".into(),
+            pair: o.pair(),
             rate_sat_per_zec: o.rate_sat_per_zec,
             min_zat: o.min_zat,
             max_zat: o.max_zat,
@@ -90,6 +95,8 @@ impl OfferView {
 #[derive(Clone, Debug, Serialize)]
 pub struct SwapView {
     pub id: String,
+    /// The coin swapped against ZEC: "btc" or "ltc".
+    pub coin: Coin,
     pub role: Role,
     pub counterparty: String,
     pub state: String,
@@ -151,8 +158,10 @@ pub struct Observer {
 pub fn swap_view(rec: &SwapRecord) -> SwapView {
     let s = rec.swap.session();
     let p = &s.params;
+    let coin = p.coin;
     SwapView {
         id: rec.id.clone(),
+        coin,
         role: rec.role(),
         counterparty: rec.counterparty.clone(),
         state: rec.state(),
@@ -178,23 +187,74 @@ pub fn swap_view(rec: &SwapRecord) -> SwapView {
             sigma: s.joint_sigma().unwrap_or(1),
         },
         addresses: Addresses {
-            btc_lock: s.lock_address().to_string(),
+            btc_lock: Chain {
+                coin,
+                network: p.network,
+            }
+            .encode_address(&s.lock_address()),
             zec_joint: rec.zec_joint.clone(),
         },
         secrets: Secrets {
             mine_revealed: rec.mine_revealed,
             peer_learned: rec.peer_learned,
         },
-        timeline: rec.timeline.clone(),
+        timeline: rec
+            .timeline
+            .iter()
+            .map(|e| TimelineEntry {
+                label: localize(&e.label, coin),
+                ..e.clone()
+            })
+            .collect(),
         observer: Observer {
             btc: ordered(
                 &rec.observer_btc,
                 &["lock", "cancel", "redeem", "refund", "punish"],
-            ),
-            zec: ordered(&rec.observer_zec, &["lock", "sweep"]),
+            )
+            .iter()
+            .map(|l| localize(l, coin))
+            .collect(),
+            zec: ordered(&rec.observer_zec, &["lock", "sweep"])
+                .iter()
+                .map(|l| localize(l, coin))
+                .collect(),
         },
         watchtower: rec.watchtower.clone(),
     }
+}
+
+/// The daemon narrates the counter-chain as Bitcoin ("0.5 BTC", "fee 2000 sat", "the Bitcoin
+/// transaction"). For another coin, swap those whole words for its own ticker, name and unit
+/// when the text is shown.
+pub fn localize(text: &str, coin: Coin) -> String {
+    if coin.is_btc() {
+        return text.to_string();
+    }
+    let words = [
+        ("BTC", coin.ticker()),
+        ("Bitcoin", coin.name()),
+        ("sat", coin.base_unit()),
+        ("sats", coin.base_unit()),
+    ];
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        let w = std::mem::take(word);
+        match words.iter().find(|(from, _)| *from == w) {
+            Some((_, to)) => out.push_str(to),
+            None => out.push_str(&w),
+        }
+    };
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            word.push(ch);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(ch);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
 }
 
 fn ordered(lines: &[(String, String)], order: &[&str]) -> Vec<String> {
@@ -325,6 +385,16 @@ pub fn describe_spend(spend: Spend, tx: &Transaction, prev_value: Amount) -> Str
 mod tests {
     use super::*;
     use ferry_btc::bitcoin::{absolute::LockTime, transaction::Version, ScriptBuf, TxOut};
+
+    #[test]
+    fn localize_whole_words_only() {
+        let s = "Locked 0.5 BTC; fee 2000 sat. The Bitcoin lock (BtcRedeemed, satisfied, sats)";
+        assert_eq!(localize(s, Coin::Btc), s);
+        assert_eq!(
+            localize(s, Coin::Ltc),
+            "Locked 0.5 LTC; fee 2000 lit. The Litecoin lock (BtcRedeemed, satisfied, lit)"
+        );
+    }
 
     #[test]
     fn describe_lock_survives_a_bad_vout() {

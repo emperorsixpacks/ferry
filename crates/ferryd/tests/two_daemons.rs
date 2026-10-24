@@ -731,6 +731,7 @@ async fn taker_refuses_out_of_policy_terms() {
 fn propose(sid: [u8; 32]) -> (ferry_core::Proposal, Value) {
     use ferry_btc::bitcoin::{key::Secp256k1, Address};
     let params = ferry_core::SwapParams {
+        coin: ferry_btc::Coin::Btc,
         network: Network::Regtest,
         btc_amount: 205_000,
         zec_amount: 50_000_000,

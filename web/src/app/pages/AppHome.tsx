@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ArrowDown, ArrowsLeftRight, ShieldCheck } from "@phosphor-icons/react";
 import { startSwap, type Status, type SwapView } from "@/api";
-import { zec } from "@/format";
+import { coin, zec } from "@/format";
 import { Link, navigate } from "@/router";
 import { btcText } from "@/swap/shared";
 import { phaseOf } from "@/swap/steps";
@@ -24,7 +24,7 @@ export function AppHome() {
       <div className="space-y-8">
         <PageHeader
           eyebrow="Shielded atomic swaps"
-          title={d.role === "Z" ? "Swap ZEC for BTC" : "Buy ZEC with BTC"}
+          title={d.role === "Z" ? `Swap ZEC for ${coin().ticker}` : `Buy ZEC with ${coin().ticker}`}
           subtitle="No bridge. No custodian. Your ZEC never leaves the shielded pool."
           aside={
             live ? (
@@ -99,7 +99,7 @@ function SwapForm({ status, bt, busySwap }: { status: Status | null; bt: BlockTi
     else if (zat > offer.max) problem = `The largest swap is ${zec(offer.max)} ZEC.`;
     else if (offer.liquidity != null && zat > offer.liquidity) problem = `${maker?.name ?? "The maker"} can fill up to ${zec(offer.liquidity)} ZEC right now.`;
     else if (role === "Z" && status && zat > status.balances.zec_shielded_zat) problem = `You have ${zec(status.balances.zec_shielded_zat)} shielded ZEC.`;
-    else if (role === "B" && status && gross > status.balances.btc_sat) problem = `You have ${btcText(status.balances.btc_sat)} BTC.`;
+    else if (role === "B" && status && gross > status.balances.btc_sat) problem = `You have ${btcText(status.balances.btc_sat)} ${coin().ticker}.`;
   }
   const blocked = busySwap ? "Finish the swap in progress first." : null;
 
@@ -133,7 +133,7 @@ function SwapForm({ status, bt, busySwap }: { status: Status | null; bt: BlockTi
     </Field>
   );
   const btcField = (
-    <Field label={role === "Z" ? "You receive" : "You pay"} unit="BTC" note="In the open, like any Bitcoin payment" readOnly>
+    <Field label={role === "Z" ? "You receive" : "You pay"} unit={coin().ticker} note={`In the open, like any ${coin().name} payment`} readOnly>
       <span className="font-mono text-2xl font-medium text-slate-900">≈ {valid && offer ? btcSide : "–"}</span>
     </Field>
   );
@@ -165,8 +165,8 @@ function SwapForm({ status, bt, busySwap }: { status: Status | null; bt: BlockTi
             {btcField}
           </div>
           <div className="grid grid-cols-2 gap-4 border-t border-slate-100 pt-4 text-sm md:grid-cols-4">
-            <Detail label="Rate" value={<span className="font-mono">{offer ? `1 ZEC = ${btcText(offer.rate)} BTC` : "–"}</span>} />
-            <Detail label="Network fee" value={<span className="font-mono">{offer?.fee != null ? `${offer.fee.toLocaleString("en-US")} sat` : "–"}</span>} />
+            <Detail label="Rate" value={<span className="font-mono">{offer ? `1 ZEC = ${btcText(offer.rate)} ${coin().ticker}` : "–"}</span>} />
+            <Detail label="Network fee" value={<span className="font-mono">{offer?.fee != null ? `${offer.fee.toLocaleString("en-US")} ${coin().unit}` : "–"}</span>} />
             <Detail
               label="Takes"
               value={
