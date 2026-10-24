@@ -53,14 +53,14 @@ export function stepsOf(v: SwapView): Step[] {
       const back = find(v, "reclaimed") ?? (v.outcome === "refunded" ? refundSeen : undefined);
       return activate([
         step("The swap didn't finish in time, so it was called off", cancel),
-        step("Their Bitcoin went back to them, which unlocks your ZEC", refundSeen, "Waiting for the Bitcoin network"),
-        ...(lockedZec ? [step("Your ZEC is back in your wallet", back, "Moving it back to your shielded address")] : []),
+        step("Their Bitcoin goes back to them, which unlocks your ZEC", refundSeen, "Waiting for the Bitcoin network"),
+        ...(lockedZec ? [step("Bringing your ZEC back to your wallet", back, "Moving it back to your shielded address")] : []),
       ]);
     }
     const refund = find(v, "refund_broadcast");
     return activate([
       step("The swap didn't finish in time, so it was called off", cancel),
-      step("Your BTC is back in your wallet", v.outcome === "refunded" ? find(v, "refunded") ?? confirmed(refund) : undefined, "Waiting for the Bitcoin network"),
+      step("Bringing your BTC back to your wallet", v.outcome === "refunded" ? find(v, "refunded") ?? confirmed(refund) : undefined, "Waiting for the Bitcoin network"),
     ]);
   }
 

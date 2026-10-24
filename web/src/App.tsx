@@ -7,6 +7,13 @@ import { PartyPanel } from "./components/PartyPanel";
 import { deriveCrossing, deriveDeadlines, latestEvent } from "./derive";
 import { btcShort, zec } from "./format";
 import { Link } from "./router";
+import "@fontsource/instrument-serif/latin-400";
+import "@fontsource/instrument-serif/latin-400-italic";
+import "@fontsource/instrument-sans/latin-400";
+import "@fontsource/instrument-sans/latin-500";
+import "@fontsource/instrument-sans/latin-600";
+import "@fontsource/fragment-mono/latin-400";
+import "./inspector.css";
 import { currentSwapId, useDaemon } from "./useDaemon";
 
 function useNarrow(query = "(max-width: 720px)") {
@@ -75,7 +82,7 @@ export default function App() {
   };
 
   return (
-    <div className="page">
+    <div className="page insp">
       <header className="masthead">
         <h1 className="wordmark">Ferry</h1>
         <p className="thesis">Shielded ZEC ⇄ BTC. No bridge. No custodian. Nothing unshielded.</p>

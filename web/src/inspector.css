@@ -1,0 +1,139 @@
+/* /inspect in Ferry's identity: ink on paper, Instrument Serif and Sans, Fragment Mono, one
+   ultramarine accent. The visualizer's own tokens are redefined here, so its layout is untouched.
+   One theme only, like the app. */
+
+body:has(.insp) {
+  background: #ece8de;
+}
+
+.insp {
+  --ink: #101218;
+  --ink-2: #4b4d5b;
+  --ink-3: #9a99a3;
+  --rule: #d2ccbd;
+  --paper: #ece8de;
+  --water: #dde0f0;
+  --land: #d9d1bc;
+  --land-edge: #b4aa90;
+  --magenta: #2b3bff;
+  --magenta-wash: #dfe2ff;
+  --abort: #b3261e;
+  --abort-wash: #f4dcd7;
+  --on-ink: #ece8de;
+  --serif: "Instrument Serif", Georgia, serif;
+  --sans: "Instrument Sans", system-ui, sans-serif;
+  --mono: "Fragment Mono", ui-monospace, monospace;
+  color: var(--ink);
+  color-scheme: light;
+}
+
+/* Instrument Serif comes in one weight: size carries the hierarchy instead of bold */
+.insp .wordmark {
+  font: italic 400 64px/1 var(--serif);
+}
+
+.insp .crossing-head h2,
+.insp .observer-head h2 {
+  font: italic 400 40px/1.05 var(--serif);
+  letter-spacing: -0.015em;
+}
+
+.insp .party h3,
+.insp .obs h3 {
+  font: italic 400 22px/1.2 var(--serif);
+}
+
+.insp .unlink dt {
+  font: italic 400 21px var(--serif);
+}
+
+.insp .party-letter {
+  font: italic 400 28px/1 var(--serif);
+}
+
+.insp .share-sym {
+  font: italic 400 20px/1 var(--serif);
+}
+
+.insp .narration b {
+  font: italic 400 15px/1 var(--serif);
+}
+
+.insp .chart-label-title {
+  font: italic 400 17px var(--serif);
+}
+
+.insp .party-flag text {
+  font: italic 400 21px var(--serif);
+}
+
+.insp .thesis {
+  max-width: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.insp .party-head h2 {
+  font-weight: 500;
+}
+
+/* the masthead rule picks up the accent, like the app's one accent line */
+.insp .controls {
+  border-top-color: var(--ink);
+}
+
+.insp .masthead {
+  position: relative;
+}
+
+.insp .masthead::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -2px;
+  width: 120px;
+  height: 2px;
+  background: var(--magenta);
+}
+
+.insp .btn {
+  border-radius: 999px;
+}
+
+.insp .btn-primary:hover:not(:disabled) {
+  background: var(--magenta);
+}
+
+.insp .back-link {
+  font-size: 13px;
+  padding: 8px 15px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+}
+
+.insp .back-link:hover {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+
+/* the shielded shore reads as the app's dark half */
+.insp .chart .land-zec {
+  fill: #0e1030;
+  stroke: #0e1030;
+}
+
+.insp .chart .shore-zec .chart-label-title,
+.insp .chart .shore-zec .chart-label-sub {
+  fill: #ece8de !important;
+}
+
+.insp .chart .shore-zec .chart-label-land {
+  stroke: #0e1030;
+}
+
+.insp .magic {
+  border-left-color: var(--magenta);
+}

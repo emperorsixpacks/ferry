@@ -151,10 +151,12 @@ export function CrossingChart({
       </defs>
 
       <rect width={g.w} height={g.h} className="water" />
-      <path d={g.landA} className="land" />
+      <path d={g.landA} className="land land-zec" />
       <path d={g.landB} className="land" />
 
-      <Label at={g.shoreA.name} title="Zcash" sub={["Ironwood pool", heights.zec != null ? `height ${heights.zec}` : ""]} anchor="start" land />
+      <g className="shore-zec">
+        <Label at={g.shoreA.name} title="Zcash" sub={["Ironwood pool", heights.zec != null ? `height ${heights.zec}` : ""]} anchor="start" land />
+      </g>
       <Label at={g.shoreB.name} title="Bitcoin" sub={["Taproot", heights.btc != null ? `height ${heights.btc}` : ""]} anchor={narrow ? "start" : "end"} land />
       <g className="party-flag" transform={`translate(${g.shoreA.party[0]} ${g.shoreA.party[1]})`}>
         <circle r={17} />

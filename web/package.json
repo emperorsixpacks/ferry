@@ -13,10 +13,18 @@
     "shoot": "node scripts/shoot.mjs",
     "shoot:real": "node scripts/shoot.mjs --real",
     "film": "node scripts/film.mjs",
-    "shoot:app": "node scripts/shoot-app.mjs"
+    "shoot:app": "node scripts/shoot-app.mjs",
+    "shoot:directions": "node scripts/shoot-directions.mjs",
+    "shoot:app:real": "node scripts/shoot-app.mjs --real",
+    "shoot:explainer": "node scripts/shoot-explainer.mjs"
   },
   "dependencies": {
+    "@fontsource/big-shoulders-display": "^5.3.0",
+    "@fontsource/fragment-mono": "^5.3.0",
     "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/instrument-sans": "^5.3.0",
+    "@fontsource/instrument-serif": "^5.3.0",
+    "@fontsource/martian-mono": "^5.3.0",
     "@fontsource/public-sans": "^5.3.0",
     "@fontsource/spectral": "^5.3.0",
     "react": "18.3.1",

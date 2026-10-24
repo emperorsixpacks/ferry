@@ -44,7 +44,7 @@ for (const v of views) {
   const ctx = await browser.newContext({ viewport: v.viewport, deviceScaleFactor: v.deviceScaleFactor, colorScheme: v.colorScheme, reducedMotion: "no-preference" });
   const page = await ctx.newPage();
   page.on("console", (m) => m.type() === "error" && console.log(`[${v.tag}] console:`, m.text()));
-  await page.goto(BASE + "/how-it-works");
+  await page.goto(BASE + "/inspect");
   pages.push({ ...v, page });
 }
 const main = pages[0].page;

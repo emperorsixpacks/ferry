@@ -1,19 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { LOCAL_ROLE, startSwap, type Role, type Status, type SwapView } from "../api";
-import { btcShort, short, zec } from "../format";
+import { short, zec } from "../format";
+import { btcFor, btcText } from "./shared";
 import { Link } from "../router";
 import { useDaemon } from "../useDaemon";
 import { phaseOf, stepsOf, transactions, type Phase } from "./steps";
 import { clock, clockSeconds, roughDuration, typicalSeconds, unwoundBy, useBlockTimes, type BlockTimes } from "./timing";
+import { directionParam, pinScene, pinnedStep, sceneOf } from "./visual/scene";
+import { Visual } from "./visual/Visual";
+import { Bold } from "./bold/Bold";
 import "./swap.css";
 
 const DISMISSED = "ferry.dismissed";
-const btcText = (sat: number) => (sat === 0 ? "0" : btcShort(sat));
-
-// What the BTC side means to this party: Z receives the locked amount less the fee of the
-// transaction that pays it out; B pays the locked amount (its own lock fee comes on top).
-const btcFor = (role: Role, sat: number, status: Status | null) =>
-  role === "Z" ? Math.max(0, sat - (status?.offer.fee_sat ?? 0)) : sat;
 
 export default function SwapApp() {
   const role = LOCAL_ROLE;
@@ -27,6 +25,8 @@ export default function SwapApp() {
     }
   });
   const [starting, setStarting] = useState(false);
+  const [amount, setAmount] = useState("1.00");
+  const direction = directionParam();
 
   const latest = useMemo(() => {
     const all = Object.values(d.swaps);
@@ -48,35 +48,85 @@ export default function SwapApp() {
     }
   };
 
+  const panel =
+    !d.connected && !d.status ? (
+      <Offline error={d.error} />
+    ) : current ? (
+      ["progress", "unwinding"].includes(phaseOf(current)) ? (
+        <Progress swap={current} status={d.status} bt={bt} />
+      ) : (
+        <Result swap={current} status={d.status} onAgain={dismiss} />
+      )
+    ) : starting ? (
+      <Starting />
+    ) : (
+      <SwapForm role={role} status={d.status} bt={bt} amount={amount} setAmount={setAmount} onStarted={() => setStarting(true)} />
+    );
+
+  const header = (
+    <header className="sw-top">
+      <div className="sw-brand">
+        <span className="sw-wordmark">Ferry</span>
+        <span className="sw-thesis">Shielded ZEC ⇄ BTC. No bridge. No custodian. Nothing unshielded.</span>
+      </div>
+      <Link to="/how-it-works" className="sw-how">
+        How it works →
+      </Link>
+    </header>
+  );
+
+  if (direction === "bold1" || direction === "bold2") {
+    return (
+      <Bold
+        take={direction}
+        role={role}
+        status={d.status}
+        connected={d.connected}
+        error={d.error}
+        swap={current}
+        starting={starting}
+        bt={bt}
+        amount={amount}
+        setAmount={setAmount}
+        onStarted={() => setStarting(true)}
+        onAgain={dismiss}
+      />
+    );
+  }
+
+  if (direction) {
+    let scene = sceneOf(role, current);
+    if (starting && !current) scene = { ...scene, step: 1, phase: "progress", caption: "Agreeing the swap with the other side" };
+    scene = pinScene(scene, pinnedStep());
+    const zat = current?.amounts.zec_zat ?? Math.round(Number(amount) * 1e8);
+    const gross = current?.amounts.btc_sat ?? (d.status && Number.isFinite(zat) ? Math.round((zat / 1e8) * d.status.offer.rate_sat_per_zec) : 0);
+    const amounts = { zec: Number.isFinite(zat) && zat > 0 ? zec(zat) : "0.00", btc: btcText(btcFor(role, gross, d.status)) };
+    return (
+      <div className={`vx-page vx-page-${direction}`}>
+      <div className={`sw vx vx-${direction}`}>
+        {header}
+        <main className="vx-grid">
+          <figure className="vx-stage">
+            <Visual direction={direction} scene={scene} amounts={amounts} />
+            <figcaption className="vx-caption" aria-live="polite">
+              <span key={scene.caption}>{scene.caption}</span>
+            </figcaption>
+          </figure>
+          <div className="vx-panel">
+            <Wallet status={d.status} />
+            {panel}
+          </div>
+        </main>
+      </div>
+      </div>
+    );
+  }
+
   return (
     <div className="sw">
-      <header className="sw-top">
-        <div className="sw-brand">
-          <span className="sw-wordmark">Ferry</span>
-          <span className="sw-thesis">Shielded ZEC ⇄ BTC. No bridge. No custodian. Nothing unshielded.</span>
-        </div>
-        <Link to="/how-it-works" className="sw-how">
-          How it works →
-        </Link>
-      </header>
-
+      {header}
       <Wallet status={d.status} />
-
-      <main className="sw-main">
-        {!d.connected && !d.status ? (
-          <Offline error={d.error} />
-        ) : current ? (
-          ["progress", "unwinding"].includes(phaseOf(current)) ? (
-            <Progress swap={current} status={d.status} bt={bt} />
-          ) : (
-            <Result swap={current} status={d.status} onAgain={dismiss} />
-          )
-        ) : starting ? (
-          <Starting />
-        ) : (
-          <SwapForm role={role} status={d.status} bt={bt} onStarted={() => setStarting(true)} />
-        )}
-      </main>
+      <main className="sw-main">{panel}</main>
     </div>
   );
 }
@@ -116,8 +166,21 @@ function Starting() {
 
 // ------------------------------------------------------------------------------------------------
 
-function SwapForm({ role, status, bt, onStarted }: { role: Role; status: Status | null; bt: BlockTimes; onStarted: () => void }) {
-  const [amount, setAmount] = useState("1.00");
+function SwapForm({
+  role,
+  status,
+  bt,
+  amount,
+  setAmount,
+  onStarted,
+}: {
+  role: Role;
+  status: Status | null;
+  bt: BlockTimes;
+  amount: string;
+  setAmount: (v: string) => void;
+  onStarted: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -331,7 +394,7 @@ function Result({ swap, status, onAgain }: { swap: SwapView; status: Status | nu
 
 // ------------------------------------------------------------------------------------------------
 
-function Details({ swap, status, by }: { swap: SwapView; status: Status | null; by: Date | null }) {
+export function Details({ swap, status, by }: { swap: SwapView; status: Status | null; by: Date | null }) {
   const txs = transactions(swap);
   const phase = phaseOf(swap);
   return (

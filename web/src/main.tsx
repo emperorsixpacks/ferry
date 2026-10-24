@@ -11,11 +11,15 @@ import "./styles.css";
 import App from "./App";
 import { usePath } from "./router";
 import SwapApp from "./swap/SwapApp";
+import HowItWorks from "./explain/HowItWorks";
 
-// `/` is the swap app for this party; `/how-it-works` is the two-party protocol view.
+// `/` is the swap app for this party, `/how-it-works` the plain-language explainer and
+// `/inspect` the live two-party protocol view for developers.
 function Root() {
-  const path = usePath();
-  return path.replace(/\/+$/, "") === "/how-it-works" ? <App /> : <SwapApp />;
+  const path = usePath().replace(/\/+$/, "");
+  if (path === "/how-it-works") return <HowItWorks />;
+  if (path === "/inspect") return <App />;
+  return <SwapApp />;
 }
 
 createRoot(document.getElementById("root")!).render(
