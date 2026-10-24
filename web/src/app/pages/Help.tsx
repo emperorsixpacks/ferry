@@ -1,11 +1,11 @@
-import { ArrowRight, BookOpen, ShieldCheck } from "@phosphor-icons/react";
+import { ArrowRight, BookOpen, EyeSlash, ShieldCheck } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { Link } from "@/router";
 import { FaqList } from "../components/FaqList";
 import { Layout } from "../components/Layout";
 import { FAQ_GROUPS } from "../lib/faq";
 
-// /help: plain answers, grouped, with the two deep pages for anyone who wants more.
+// /help: plain answers, grouped, with the deeper pages for anyone who wants more.
 export function Help() {
   return (
     <Layout>
@@ -20,11 +20,24 @@ export function Help() {
                 {g.title}
               </h2>
               <FaqList items={g.items} />
+              {g.title === "Privacy" ? (
+                <Link to="/privacy" className="mt-3 inline-flex items-center gap-1.5 rounded text-sm font-medium text-slate-700 transition-colors hover:text-slate-900">
+                  See it next to a bridge and NEAR Intents
+                  <ArrowRight size={13} weight="bold" className="text-slate-400" aria-hidden />
+                </Link>
+              ) : null}
             </section>
           ))}
         </div>
 
         <div className="mt-12 grid gap-3 sm:grid-cols-2">
+          <Deeper
+            to="/privacy"
+            icon={<EyeSlash size={20} weight="regular" />}
+            title="What the world sees"
+            body="The same swap through a bridge, NEAR Intents and Ferry, side by side: what anyone can see of each."
+            className="sm:col-span-2"
+          />
           <Deeper to="/how-it-works" icon={<BookOpen size={20} weight="regular" />} title="The full explanation" body="How a swap works, step by step, in plain words." />
           <Deeper to="/safety" icon={<ShieldCheck size={20} weight="regular" />} title="Every way it can go wrong" body="Who you trust, each failure case, and what each side ends up with." />
         </div>
@@ -33,9 +46,9 @@ export function Help() {
   );
 }
 
-function Deeper({ to, icon, title, body }: { to: string; icon: ReactNode; title: string; body: string }) {
+function Deeper({ to, icon, title, body, className = "" }: { to: string; icon: ReactNode; title: string; body: string; className?: string }) {
   return (
-    <Link to={to} className="group flex flex-col rounded-3xl border border-slate-200 p-5 transition-colors hover:border-slate-300 hover:bg-slate-50">
+    <Link to={to} className={`group flex flex-col rounded-3xl border border-slate-200 p-5 transition-colors hover:border-slate-300 hover:bg-slate-50 ${className}`}>
       <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-100 text-slate-700" aria-hidden>
         {icon}
       </span>

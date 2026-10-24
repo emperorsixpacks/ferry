@@ -1,5 +1,5 @@
 import { useRef, type CSSProperties } from "react";
-import { ArrowDown } from "@phosphor-icons/react";
+import { ArrowDown, ArrowRight } from "@phosphor-icons/react";
 import { Link } from "@/router";
 import { SiteFooter, SiteHeader } from "../components/Layout";
 import { Gate } from "../components/landing/Gate";
@@ -170,6 +170,13 @@ function How() {
         <div className="mt-12">
           <Steps />
         </div>
+        <p data-reveal className="mt-10 text-[15px] text-slate-600">
+          Curious what a chain analyst sees?{" "}
+          <Link to="/privacy" className="inline-flex items-center gap-1 font-medium text-slate-900 underline decoration-slate-300 underline-offset-4 transition-colors hover:decoration-slate-900">
+            Compare Ferry with a bridge and NEAR Intents
+            <ArrowRight size={14} weight="bold" aria-hidden />
+          </Link>
+        </p>
       </div>
     </section>
   );
