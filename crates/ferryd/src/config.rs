@@ -64,6 +64,13 @@ pub struct Cli {
     /// single-key Taproot payment (`--btc-keypath false`: 2-of-2 script-path redeem).
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub btc_keypath: bool,
+    /// Relaxed local policy for development (regtest only, where it is required): margins and
+    /// confirmation minimums drop to 1.
+    #[arg(long)]
+    pub dev_policy: bool,
+    /// A swap that has locked nothing after this long is aborted, freeing the maker's slot.
+    #[arg(long, default_value_t = 1800)]
+    pub negotiation_timeout_secs: u64,
     /// URL the counterparty uses to reach our peer listener (default http://<listen>).
     #[arg(long)]
     pub public_url: Option<String>,
@@ -119,9 +126,11 @@ pub struct Cli {
     /// Activation heights file, needed to initialize a regtest wallet.
     #[arg(long)]
     pub zec_activation_heights: Option<PathBuf>,
-    /// The Zcash node's JSON-RPC endpoint (Zebra).
-    #[arg(long, default_value = "http://127.0.0.1:18232")]
-    pub zec_node_rpc: String,
+    /// The Zcash node's JSON-RPC endpoint (Zebra, e.g. http://127.0.0.1:18232). Without it the
+    /// chain tip and confirmations come from the wallet's own scan, and the UI gets no
+    /// public-view description of ZEC transactions.
+    #[arg(long)]
+    pub zec_node_rpc: Option<String>,
     /// USER:PASS for the node's JSON-RPC, if it needs any.
     #[arg(long)]
     pub zec_node_rpc_auth: Option<String>,

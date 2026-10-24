@@ -18,6 +18,14 @@ pub struct TimelineEntry {
     pub height: Option<u64>,
 }
 
+/// A transaction we keep (re)broadcasting.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Rebroadcast {
+    pub tx: Transaction,
+    /// The timeline already has its `*_broadcast` entry.
+    pub announced: bool,
+}
+
 /// An [`Action`] the daemon has not executed yet, in a form that survives a restart.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -87,9 +95,29 @@ pub struct SwapRecord {
     pub zec_lock_txid: Option<String>,
     /// Our sweep of the joint address.
     pub zec_sweep_txid: Option<String>,
+    /// Whoever's transaction spent the joint note (seen with the viewing key).
+    #[serde(default)]
+    pub zec_spent_by: Option<String>,
     /// Unix ms before which we do not sweep (random delay, set when the sweep is queued).
     #[serde(default)]
     pub sweep_not_before: Option<u64>,
+    /// We are about to send (or sent) our ZEC lock; set and persisted before calling the
+    /// wallet, so a crash in between can never lead to a second send.
+    #[serde(default)]
+    pub zec_send_intent: bool,
+    /// Presigned spends we broadcast, rebroadcast every tick until they or a conflicting spend
+    /// are buried (a rejected or evicted refund must not be lost).
+    #[serde(default)]
+    pub rebroadcast: Vec<Rebroadcast>,
+    /// Unix ms when the swap was created (negotiation deadline).
+    #[serde(default)]
+    pub created_ms: u64,
+    /// Peer envelopes refused so far (bounded: past the cap the peer gets 429).
+    #[serde(default)]
+    pub rejected: u32,
+    /// Demo fault: treat the next N broadcasts as rejected by the node.
+    #[serde(default)]
+    pub drop_broadcasts: u32,
     pub mine_revealed: bool,
     pub peer_learned: bool,
     pub zec_joint: String,
@@ -123,7 +151,16 @@ impl SwapRecord {
             cancel_height: None,
             zec_lock_txid: None,
             zec_sweep_txid: None,
+            zec_spent_by: None,
             sweep_not_before: None,
+            zec_send_intent: false,
+            rebroadcast: vec![],
+            rejected: 0,
+            drop_broadcasts: 0,
+            created_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
             mine_revealed: false,
             peer_learned: false,
             zec_joint,
@@ -210,10 +247,13 @@ impl Store {
         Ok(Store { dir })
     }
 
+    /// Durable once it returns Ok: the file is fsynced, renamed into place and the directory
+    /// entry fsynced.
     pub fn save(&self, rec: &SwapRecord) -> std::io::Result<()> {
         let tmp = self.dir.join(format!(".{}.json.tmp", rec.id));
         write_private(&tmp, &serde_json::to_vec_pretty(rec)?)?;
-        std::fs::rename(tmp, self.dir.join(format!("{}.json", rec.id)))
+        std::fs::rename(tmp, self.dir.join(format!("{}.json", rec.id)))?;
+        std::fs::File::open(&self.dir)?.sync_all()
     }
 
     pub fn load_all(&self) -> std::io::Result<Vec<SwapRecord>> {
@@ -267,10 +307,67 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    fn sample_record() -> SwapRecord {
+        use ferry_btc::bitcoin::{Address, Network};
+        use ferry_core::{accept, Proposal, SwapParams};
+        let secp = ferry_btc::bitcoin::key::Secp256k1::new();
+        let addr = || {
+            Address::p2tr(
+                &secp,
+                ferry_btc::BtcKey::random().xonly(),
+                None,
+                Network::Regtest,
+            )
+        };
+        let params = SwapParams {
+            network: Network::Regtest,
+            btc_amount: 1_000_000,
+            zec_amount: 1_000_000,
+            t1: 12,
+            t2: 12,
+            btc_fee: 2_000,
+            btc_lock_confirmations: 1,
+            zec_confirmations: 1,
+            cancel_confirmations: 1,
+            redeem_margin: 3,
+            refund_margin: 3,
+            keypath: true,
+        };
+        let mut rng = rand_core::OsRng;
+        let (_, propose) = Proposal::new(&mut rng, [1; 32], Role::Z, params, addr()).unwrap();
+        let (swap, _) = accept(&mut rng, &propose, addr()).unwrap();
+        SwapRecord::new(
+            "01".repeat(32),
+            swap,
+            "http://peer".into(),
+            false,
+            "u1".into(),
+        )
+    }
+
     #[test]
     fn state_labels() {
         assert_eq!(state_label("ZecSeen { confs: 2 }"), "ZecSeen");
         assert_eq!(state_label("BtcLocked"), "BtcLocked");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_reports_failure_and_never_leaves_a_partial_record() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let swaps = tmp.path().join("swaps");
+        std::fs::set_permissions(&swaps, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let rec = sample_record();
+        assert!(
+            store.save(&rec).is_err(),
+            "a read-only directory must surface as an error"
+        );
+        std::fs::set_permissions(&swaps, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(std::fs::read_dir(&swaps).unwrap().next().is_none());
+        store.save(&rec).unwrap();
+        assert_eq!(store.load_all().unwrap().len(), 1);
     }
 
     #[cfg(unix)]

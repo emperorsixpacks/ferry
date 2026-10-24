@@ -5,10 +5,11 @@ use ferry_btc::bitcoin::address::NetworkUnchecked;
 use ferry_btc::bitcoin::key::XOnlyPublicKey;
 use ferry_btc::bitcoin::{Address, Network};
 use ferry_btc::{BtcKey, EncryptionKey};
-use ferry_dleq::k256::elliptic_curve::PrimeField;
-use ferry_dleq::{PallasPoint, PallasScalar};
+use ferry_dleq::k256::elliptic_curve::{Field, PrimeField};
+use ferry_dleq::{PallasPoint, PallasScalar, SecpPoint, SecpScalar};
 use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::{Error, Role, Secret32};
@@ -42,6 +43,14 @@ pub struct Setup {
     pub nonce: [u8; 32],
     /// Z: where tx_redeem and tx_punish pay. B: where tx_refund pays.
     pub btc_address: Address<NetworkUnchecked>,
+    /// Ephemeral secp256k1 ECDH key (SEC1). The shared secret keeps the joint `nk`/`rivk` (and
+    /// the peer channel token) out of reach of anyone who only sees the transcript.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::hex_opt"
+    )]
+    pub ecdh: Option<[u8; 33]>,
 }
 
 /// Our own secrets plus the setup we published.
@@ -51,6 +60,9 @@ pub struct LocalKeys {
     share: Secret32,
     /// BTC signing key (big-endian).
     btc: Secret32,
+    /// Ephemeral ECDH secret (big-endian secp256k1 scalar).
+    #[serde(default)]
+    ecdh: Option<Secret32>,
     pub setup: Setup,
 }
 
@@ -67,9 +79,12 @@ impl LocalKeys {
         let btc = BtcKey::random();
         let mut nonce = [0u8; 32];
         rng.fill_bytes(&mut nonce);
+        let ecdh = Zeroizing::new(SecpScalar::random(&mut *rng));
+        let ecdh_pub = ferry_dleq::secp_bytes(&(SecpPoint::GENERATOR * *ecdh));
         LocalKeys {
             share: Secret32::new(share.to_repr()),
             btc: Secret32::new(*btc.secret_bytes()),
+            ecdh: Some(Secret32::new(ecdh.to_repr().into())),
             setup: Setup {
                 role,
                 btc_key: btc.xonly().serialize(),
@@ -78,6 +93,7 @@ impl LocalKeys {
                 dleq_proof: proven.proof,
                 nonce,
                 btc_address: btc_address.into_unchecked(),
+                ecdh: Some(ecdh_pub),
             },
         }
     }
@@ -111,6 +127,21 @@ impl LocalKeys {
     pub fn encryption_key(&self) -> EncryptionKey {
         EncryptionKey::from_sec1(&self.setup.secp_pub).expect("own point")
     }
+
+    /// `H(e·E_peer)`: the ECDH secret shared with the peer (None for a swap that predates it).
+    pub fn ecdh_shared(&self, peer: &Setup) -> Option<[u8; 32]> {
+        let e: Option<SecpScalar> =
+            SecpScalar::from_repr((*self.ecdh.as_ref()?.expose()).into()).into();
+        let theirs = ferry_dleq::secp_from_bytes(peer.ecdh.as_ref()?)?;
+        let point = Zeroizing::new(ferry_dleq::secp_bytes(&(theirs * e?)));
+        Some(
+            Sha256::new()
+                .chain_update(b"ferry/v1/ecdh")
+                .chain_update(&point[..])
+                .finalize()
+                .into(),
+        )
+    }
 }
 
 /// The counterparty's verified setup, decoded.
@@ -142,6 +173,17 @@ impl Peer {
             });
         }
         let peer = Peer::decode(setup, network)?;
+        if peer
+            .setup
+            .ecdh
+            .and_then(|e| ferry_dleq::secp_from_bytes(&e))
+            .is_none()
+        {
+            return Err(Error::InvalidSetup {
+                role,
+                reason: "missing or invalid ECDH key",
+            });
+        }
         let secp =
             ferry_dleq::secp_from_bytes(&peer.setup.secp_pub).ok_or(Error::InvalidSetup {
                 role,
@@ -239,6 +281,22 @@ mod tests {
         assert!(
             Peer::verify(&mut OsRng, &sid, Role::Z, Network::Bitcoin, k.setup.clone()).is_err()
         );
+    }
+
+    #[test]
+    fn ecdh_secret_is_shared_and_required() {
+        let sid = [3u8; 32];
+        let z = LocalKeys::generate(&mut OsRng, &sid, Role::Z, addr());
+        let b = LocalKeys::generate(&mut OsRng, &sid, Role::B, addr());
+        let shared = z.ecdh_shared(&b.setup).unwrap();
+        assert_eq!(Some(shared), b.ecdh_shared(&z.setup));
+        let mut stripped = z.setup.clone();
+        stripped.ecdh = None;
+        assert!(b.ecdh_shared(&stripped).is_none());
+        assert!(matches!(
+            Peer::verify(&mut OsRng, &sid, Role::Z, Network::Regtest, stripped),
+            Err(Error::InvalidSetup { .. })
+        ));
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::{FromRequest, Path, Query, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseFrame, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -158,6 +158,8 @@ async fn create_swap<L: ZecLeg + 'static>(
 #[derive(Deserialize)]
 struct Fault {
     fault: String,
+    /// `drop_broadcasts`: how many (default 1).
+    count: Option<u32>,
 }
 
 async fn fault<L: ZecLeg + 'static>(
@@ -165,7 +167,7 @@ async fn fault<L: ZecLeg + 'static>(
     Path(id): Path<String>,
     ApiJson(f): ApiJson<Fault>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    d.fault(&id, &f.fault).await?;
+    d.fault(&id, &f.fault, f.count).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -216,12 +218,20 @@ async fn propose<L: ZecLeg + 'static>(
     Ok((StatusCode::CREATED, Json(reply)))
 }
 
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+}
+
 async fn deliver<L: ZecLeg + 'static>(
     State(d): D<L>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     ApiJson(env): ApiJson<Envelope>,
 ) -> Result<Json<crate::config::Delivery>, ApiError> {
-    d.peer_deliver(&id, env).await.map(Json)
+    d.peer_deliver(&id, env, bearer(&headers)).await.map(Json)
 }
 
 #[derive(Deserialize)]
@@ -234,6 +244,9 @@ async fn outbox<L: ZecLeg + 'static>(
     State(d): D<L>,
     Path(id): Path<String>,
     Query(q): Query<After>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<Envelope>>, ApiError> {
-    d.peer_outbox(&id, q.after).await.map(Json)
+    d.peer_outbox(&id, q.after, bearer(&headers))
+        .await
+        .map(Json)
 }

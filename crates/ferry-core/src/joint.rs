@@ -38,28 +38,33 @@ pub fn joint_ask_bytes(z: &PallasScalar, b: &PallasScalar) -> Result<Zeroizing<[
 }
 
 /// Joint full viewing key in Orchard's 96-byte encoding `ak || nk || rivk`, with `nk`, `rivk`
-/// derived from `H(session_id, Z_p, B_p, nonce_Z, nonce_B)` so neither party picks them alone.
+/// derived from `H(session_id, Z_p, B_p, nonce_Z, nonce_B, ecdh)` so neither party picks them
+/// alone. Everything but the ECDH secret travels in the clear, so without it an observer of the
+/// peer channel could rebuild the viewing key and find the lock note.
 pub fn joint_fvk_bytes(
     session_id: &[u8; 32],
     z_p: &PallasPoint,
     b_p: &PallasPoint,
     nonce_z: &[u8; 32],
     nonce_b: &[u8; 32],
+    ecdh_shared: Option<&[u8; 32]>,
 ) -> Result<[u8; 96], Error> {
     let ak = joint_ak_bytes(z_p, b_p)?;
     let wide = |tag: &[u8]| -> [u8; 64] {
-        let h = blake2b_simd::Params::new()
+        let mut st = blake2b_simd::Params::new()
             .hash_length(64)
             .personal(b"Ferry_JointFVK__")
-            .to_state()
-            .update(tag)
+            .to_state();
+        st.update(tag)
             .update(session_id)
             .update(&z_p.to_bytes())
             .update(&b_p.to_bytes())
             .update(nonce_z)
-            .update(nonce_b)
-            .finalize();
-        h.as_bytes().try_into().expect("64-byte hash")
+            .update(nonce_b);
+        if let Some(secret) = ecdh_shared {
+            st.update(b"ecdh").update(secret);
+        }
+        st.finalize().as_bytes().try_into().expect("64-byte hash")
     };
     let nk = pallas::Base::from_uniform_bytes(&wide(b"nk"));
     let rivk = pallas::Scalar::from_uniform_bytes(&wide(b"rivk"));
@@ -123,18 +128,18 @@ mod tests {
     fn fvk_depends_on_every_input() {
         let g = ferry_dleq::spend_auth_g();
         let (z_p, b_p) = (g * PallasScalar::from(5), g * PallasScalar::from(7));
-        let base = joint_fvk_bytes(&[0; 32], &z_p, &b_p, &[1; 32], &[2; 32]).unwrap();
+        let base = joint_fvk_bytes(&[0; 32], &z_p, &b_p, &[1; 32], &[2; 32], None).unwrap();
         assert_ne!(
             base,
-            joint_fvk_bytes(&[9; 32], &z_p, &b_p, &[1; 32], &[2; 32]).unwrap()
+            joint_fvk_bytes(&[9; 32], &z_p, &b_p, &[1; 32], &[2; 32], None).unwrap()
         );
         assert_ne!(
             base,
-            joint_fvk_bytes(&[0; 32], &z_p, &b_p, &[3; 32], &[2; 32]).unwrap()
+            joint_fvk_bytes(&[0; 32], &z_p, &b_p, &[3; 32], &[2; 32], None).unwrap()
         );
         assert_ne!(
             base,
-            joint_fvk_bytes(&[0; 32], &z_p, &b_p, &[1; 32], &[3; 32]).unwrap()
+            joint_fvk_bytes(&[0; 32], &z_p, &b_p, &[1; 32], &[3; 32], None).unwrap()
         );
         assert_eq!(&base[..32], &joint_ak_bytes(&z_p, &b_p).unwrap());
     }

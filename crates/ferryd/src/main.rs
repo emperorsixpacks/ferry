@@ -4,6 +4,7 @@ mod config;
 mod daemon;
 mod http;
 mod mock_zec;
+mod rebroadcast;
 mod record;
 mod view;
 

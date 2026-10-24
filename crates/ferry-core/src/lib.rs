@@ -19,7 +19,7 @@ pub use b::{BState, BSwap};
 pub use error::Error;
 pub use keys::{LocalKeys, Peer, Setup};
 pub use messages::{Envelope, Message, Transcript, PROTOCOL_VERSION};
-pub use params::SwapParams;
+pub use params::{Policy, SwapParams};
 pub use secret::{Secret, Secret32, Secret64};
 pub use session::Session;
 pub use swap::{accept, Action, ChainEvent, Event, Proposal, Swap};

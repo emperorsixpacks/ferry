@@ -1,20 +1,25 @@
 //! One party's swaps: negotiation, the peer exchange, the chain driver and narration.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use futures_util::FutureExt;
 
 use ferry_btc::bitcoin::{Address, Amount, Network, Transaction, Txid};
 use ferry_btc::rpc::{BitcoinRpc, RpcError};
 use ferry_core::{
-    accept, ChainEvent, Envelope, Event, Message, Proposal, Role, Spend, Swap, ZecLeg,
+    accept, ChainEvent, Envelope, Event, Message, Policy, Proposal, Role, Spend, Swap, ZecLeg,
 };
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, Mutex};
 
 use crate::config::{Cli, Delivery, Offer, ProposeRequest, Terms};
-use crate::record::{fvk_from_hex, Pending, Store, SwapRecord};
+use crate::rebroadcast::{RebroadcastDecision, Rebroadcaster};
+use crate::record::{fvk_from_hex, Pending, Rebroadcast, Store, SwapRecord};
 use crate::view::{self, StatusView};
 
 /// An HTTP-facing error: status code and message.
@@ -62,6 +67,21 @@ pub struct Daemon<L> {
     pub events: broadcast::Sender<SseEvent>,
     /// Bearer token required on /api/*.
     pub api_token: String,
+    /// Local minimums for any terms we sign up to.
+    pub policy: Policy,
+    /// Recent proposals received as maker (rate limit).
+    proposals: std::sync::Mutex<VecDeque<Instant>>,
+}
+
+/// At most this many proposals per minute reach the maker's negotiation code.
+const PROPOSALS_PER_MINUTE: usize = 6;
+/// Past this many refused envelopes a swap answers 429: a peer can't grow the record forever.
+const MAX_REJECTED: u32 = 16;
+/// The protocol needs a handful of taker messages per swap.
+const MAX_RECEIVED: usize = 32;
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// A failed action that should be retried on the next tick.
@@ -113,6 +133,16 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             .with_watch_wallet(watch);
         rpc.ensure_wallet().await?;
         rpc.ensure_watch_wallet().await?;
+        let policy = Policy::for_network(cli.network, cli.dev_policy)
+            .map_err(|e| anyhow::anyhow!("{e} (pass --dev-policy for a local regtest setup)"))?;
+        let offer = cli.offer();
+        if offer.making {
+            offer
+                .terms
+                .params(cli.network, offer.max_zat, offer.btc_for(offer.max_zat))
+                .check_policy(&policy)
+                .map_err(|e| anyhow::anyhow!("our own maker terms: {e}"))?;
+        }
         let store = Store::open(&cli.data_dir)?;
         // Keep the token across restarts, so a running UI proxy stays authorized.
         let token_file = cli.data_dir.join("api-token");
@@ -151,6 +181,8 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             state: Mutex::new(state),
             events,
             api_token,
+            policy,
+            proposals: std::sync::Mutex::new(VecDeque::new()),
         }))
     }
 
@@ -158,9 +190,15 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         self.cli.network
     }
 
-    fn save(&self, rec: &SwapRecord) {
-        if let Err(e) = self.store.save(rec) {
-            tracing::error!(id = %rec.id, "persisting swap: {e}");
+    /// Persist `rec` durably; false (and logged) if that failed. Actions only run after a
+    /// successful save of the state that queued them.
+    fn save(&self, rec: &SwapRecord) -> bool {
+        match self.store.save(rec) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!(id = %rec.id, "persisting swap: {e}");
+                false
+            }
         }
     }
 
@@ -191,6 +229,11 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 rate_sat_per_zec: self.offer.rate_sat_per_zec,
                 min_zat: self.offer.min_zat,
                 max_zat: self.offer.max_zat,
+                fee_sat: self.offer.terms.btc_fee,
+                t1_blocks: self.offer.terms.t1,
+                t2_blocks: self.offer.terms.t2,
+                btc_lock_confs: self.offer.terms.btc_lock_confirmations,
+                zec_confs: self.offer.terms.zec_confirmations,
             },
         })
     }
@@ -271,8 +314,8 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             .terms
             .params(self.network(), zec_zat, offer.btc_for(zec_zat));
         params
-            .validate()
-            .map_err(|e| ApiError::bad(e.to_string()))?;
+            .check_policy(&self.policy)
+            .map_err(|e| ApiError::bad(format!("The maker's terms are not acceptable: {e}")))?;
         self.check_funds(&params).await?;
         let address = self
             .rpc
@@ -425,6 +468,23 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         if !self.offer.making {
             return Err(ApiError(403, "not making offers".into()));
         }
+        {
+            let mut recent = self.proposals.lock().expect("not poisoned");
+            let now = Instant::now();
+            while recent
+                .front()
+                .is_some_and(|t| now.duration_since(*t) > Duration::from_secs(60))
+            {
+                recent.pop_front();
+            }
+            if recent.len() >= PROPOSALS_PER_MINUTE {
+                return Err(ApiError(
+                    429,
+                    "Too many proposals; try again in a minute".into(),
+                ));
+            }
+            recent.push_back(now);
+        }
         let env = req.envelope;
         let Message::Propose { params, setup } = &env.message else {
             return Err(ApiError::bad("expected a Propose message"));
@@ -462,6 +522,9 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         if params.btc_amount != self.offer.btc_for(params.zec_amount) {
             return Err(ApiError::bad("BTC amount does not match the offer's rate"));
         }
+        params
+            .check_policy(&self.policy)
+            .map_err(|e| ApiError::bad(e.to_string()))?;
         self.check_funds(params).await?;
         let address = self
             .rpc
@@ -506,9 +569,26 @@ impl<L: ZecLeg + 'static> Daemon<L> {
 
     // ------------------------------------------------------------------ peer endpoints
 
-    pub async fn peer_deliver(&self, id: &str, env: Envelope) -> Result<Delivery, ApiError> {
+    /// The peer must present the channel token both sides derive from the ECDH secret.
+    fn check_peer_token(rec: &SwapRecord, presented: Option<&str>) -> Result<(), ApiError> {
+        match rec.swap.session().peer_token() {
+            None => Ok(()), // swaps from before the ECDH setup field
+            Some(t) if presented.is_some_and(|p| constant_time_eq(p.as_bytes(), t.as_bytes())) => {
+                Ok(())
+            }
+            Some(_) => Err(ApiError(401, "missing or wrong peer token".into())),
+        }
+    }
+
+    pub async fn peer_deliver(
+        &self,
+        id: &str,
+        env: Envelope,
+        token: Option<&str>,
+    ) -> Result<Delivery, ApiError> {
         let mut st = self.state.lock().await;
         let rec = st.swaps.get_mut(id).ok_or_else(ApiError::not_found)?;
+        Self::check_peer_token(rec, token)?;
         if rec.stalled {
             return Err(ApiError(503, "stalled".into()));
         }
@@ -521,11 +601,18 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 error: None,
             });
         }
+        if rec.rejected >= MAX_REJECTED || rec.received.len() >= MAX_RECEIVED {
+            return Err(ApiError(429, "too many messages for this swap".into()));
+        }
         let name = env.message.name();
         let result = self.process(rec, Event::Peer(env)).await;
-        rec.received.push(digest);
-        if let Err(e) = &result {
-            Self::log_rejected(rec, name, e);
+        match &result {
+            // Only accepted envelopes are remembered, so garbage cannot grow the record.
+            Ok(()) => rec.received.push(digest),
+            Err(e) => {
+                rec.rejected += 1;
+                Self::log_rejected(rec, name, e);
+            }
         }
         self.save(rec);
         self.publish(&mut st);
@@ -535,9 +622,15 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         })
     }
 
-    pub async fn peer_outbox(&self, id: &str, after: usize) -> Result<Vec<Envelope>, ApiError> {
+    pub async fn peer_outbox(
+        &self,
+        id: &str,
+        after: usize,
+        token: Option<&str>,
+    ) -> Result<Vec<Envelope>, ApiError> {
         let st = self.state.lock().await;
         let rec = st.swaps.get(id).ok_or_else(ApiError::not_found)?;
+        Self::check_peer_token(rec, token)?;
         if rec.stalled {
             return Err(ApiError(503, "stalled".into()));
         }
@@ -545,12 +638,25 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     }
 
     /// Demo fault injection.
-    pub async fn fault(&self, id: &str, fault: &str) -> Result<(), ApiError> {
-        if fault != "stall" {
+    pub async fn fault(&self, id: &str, fault: &str, count: Option<u32>) -> Result<(), ApiError> {
+        if fault != "stall" && fault != "drop_broadcasts" {
             return Err(ApiError::bad("unknown fault"));
         }
         let mut st = self.state.lock().await;
         let rec = st.swaps.get_mut(id).ok_or_else(ApiError::not_found)?;
+        if fault == "drop_broadcasts" {
+            let n = count.unwrap_or(1);
+            rec.drop_broadcasts += n;
+            rec.log(
+                "local",
+                "fault_drop_broadcasts",
+                format!("Demo fault: the node rejects this party's next {n} broadcast(s)"),
+                None,
+            );
+            self.save(rec);
+            self.publish(&mut st);
+            return Ok(());
+        }
         if rec.stalled {
             return Err(ApiError::conflict("already stalled"));
         }
@@ -646,7 +752,9 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     async fn run_pending(&self, rec: &mut SwapRecord) -> Vec<Event> {
         let mut follow = vec![];
         while let Some(p) = rec.pending.first().cloned() {
-            if rec.stalled {
+            // Never act on state that is not on disk: after a crash the action would be
+            // repeated or its effect forgotten.
+            if rec.stalled || !self.save(rec) {
                 break;
             }
             match self.execute(rec, p).await {
@@ -654,8 +762,8 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 Err(Retry) => break,
             }
             rec.pending.remove(0);
-            self.save(rec);
         }
+        self.save(rec);
         follow
     }
 
@@ -689,35 +797,52 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     }
                 }
             }
-            Pending::Broadcast { tx } => match self.rpc.broadcast(&tx).await {
-                Ok(txid) => {
-                    self.narrate_broadcast(rec, &tx, txid);
-                    Ok(None)
+            Pending::Broadcast { tx } => {
+                // The state machine has moved on; from here the transaction lives in the
+                // rebroadcast set until it (or a conflicting spend) is buried.
+                let mut r = Rebroadcast {
+                    tx,
+                    announced: false,
+                };
+                self.try_broadcast(rec, &mut r).await;
+                let txid = r.tx.compute_txid();
+                if !rec.rebroadcast.iter().any(|x| x.tx.compute_txid() == txid) {
+                    rec.rebroadcast.push(r);
                 }
-                // Rejected by the node (already known, already spent, not final): retrying
-                // the identical transaction cannot help; the chain watcher reports what happened.
-                Err(e @ RpcError::Rpc { .. }) => {
-                    tracing::info!(id = %rec.id, "broadcast {} not accepted: {e}", tx.compute_txid());
-                    Ok(None)
-                }
-                Err(e) => {
-                    tracing::warn!(id = %rec.id, "broadcast: {e}");
-                    Err(Retry)
-                }
-            },
+                Ok(None)
+            }
             Pending::SendZec { fvk, amount } => {
                 let fvk = fvk_from_hex(&fvk);
-                // Never send twice (e.g. after a crash between sending and persisting).
-                match self.leg.watch(&fvk).await {
-                    Ok(notes) if !notes.is_empty() => {
-                        rec.zec_lock_txid.get_or_insert(notes[0].txid.clone());
+                if rec.zec_send_intent {
+                    if rec.zec_lock_txid.is_some() {
                         return Ok(None);
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(id = %rec.id, "zec watch: {e}");
-                        return Err(Retry);
+                    // Interrupted between asking the wallet to send and recording the result:
+                    // only a note paying the full amount proves the send went out. Never send
+                    // a second time; without the note the swap times out into cancel + refund.
+                    match self.leg.watch(&fvk).await {
+                        Ok(notes) => {
+                            if let Some(n) = notes.iter().find(|n| n.value >= amount) {
+                                rec.zec_lock_txid = Some(n.txid.clone());
+                                return Ok(None);
+                            }
+                        }
+                        Err(e) => tracing::warn!(id = %rec.id, "zec watch: {e}"),
                     }
+                    if !rec.has("zec_send_uncertain") {
+                        rec.log(
+                            "local",
+                            "zec_send_uncertain",
+                            "The ZEC send may not have completed. Waiting for the lock note instead of sending again",
+                            None,
+                        );
+                    }
+                    return Err(Retry);
+                }
+                rec.zec_send_intent = true;
+                if !self.save(rec) {
+                    rec.zec_send_intent = false;
+                    return Err(Retry);
                 }
                 match self.leg.send(&fvk, amount).await {
                     Ok(txid) => {
@@ -734,6 +859,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                         Ok(None)
                     }
                     Err(e) => {
+                        // Whether it went out is unknown: the intent stays set (see above).
                         tracing::warn!(id = %rec.id, "zec send: {e}");
                         Err(Retry)
                     }
@@ -766,6 +892,72 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 }
             }
         }
+    }
+
+    /// One broadcast attempt; announces the transaction on its first acceptance.
+    async fn try_broadcast(&self, rec: &mut SwapRecord, r: &mut Rebroadcast) {
+        if rec.drop_broadcasts > 0 {
+            rec.drop_broadcasts -= 1;
+            tracing::info!(id = %rec.id, "demo fault: dropped broadcast of {}", r.tx.compute_txid());
+            return;
+        }
+        match self.rpc.broadcast(&r.tx).await {
+            Ok(txid) => {
+                if !r.announced {
+                    r.announced = true;
+                    self.narrate_broadcast(rec, &r.tx, txid);
+                }
+            }
+            Err(e) => {
+                tracing::info!(id = %rec.id, "broadcast {} not accepted (will retry): {e}", r.tx.compute_txid())
+            }
+        }
+    }
+
+    /// Rebroadcast our presigned spends until they, or a conflicting spend of the same output,
+    /// have k confirmations, while the timing rules still allow them.
+    async fn rebroadcast(&self, rec: &mut SwapRecord) {
+        if rec.rebroadcast.is_empty() {
+            return;
+        }
+        let Some(lock) = rec.swap.lock_outpoint() else {
+            return;
+        };
+        let Ok(txs) = rec.swap.session().txs(lock) else {
+            return;
+        };
+        let params = rec.swap.session().params.clone();
+        let mut confs: HashMap<Txid, u32> = HashMap::new();
+        let candidates =
+            [Spend::Cancel, Spend::Redeem, Spend::Refund, Spend::Punish].map(|s| txs.txid(s));
+        for txid in candidates.iter().chain([&lock.txid]) {
+            match self.rpc.confirmations(txid).await {
+                Ok(Some(c)) => {
+                    confs.insert(*txid, c);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(id = %rec.id, "rebroadcast check: {e}");
+                    return;
+                }
+            }
+        }
+        let decision = Rebroadcaster {
+            params: &params,
+            lock: lock.txid,
+            txs: &txs,
+            confs: &confs,
+        };
+        let mut keep = vec![];
+        for mut r in std::mem::take(&mut rec.rebroadcast) {
+            match decision.decide(&r.tx) {
+                RebroadcastDecision::Done => continue,
+                RebroadcastDecision::Wait => {}
+                RebroadcastDecision::Send => self.try_broadcast(rec, &mut r).await,
+            }
+            keep.push(r);
+        }
+        rec.rebroadcast = keep;
     }
 
     // ------------------------------------------------------------------ narration
@@ -1030,14 +1222,22 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         let mut st = self.state.lock().await;
         let ids: Vec<String> = st.swaps.keys().cloned().collect();
         for id in ids {
-            let mut rec = st.swaps.remove(&id).expect("listed");
-            if !rec.settled() {
-                if let Err(e) = self.tick_swap(&mut rec).await {
-                    tracing::warn!(%id, "tick: {e}");
-                }
-                self.save(&rec);
+            let Some(rec) = st.swaps.get_mut(&id) else {
+                continue;
+            };
+            if rec.settled() {
+                continue;
             }
-            st.swaps.insert(id, rec);
+            // One swap's failure (even a panic on bad peer data) must not stop the others,
+            // and the record stays in the map either way.
+            match AssertUnwindSafe(self.tick_swap(rec)).catch_unwind().await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(%id, "tick: {e}"),
+                Err(_) => {
+                    tracing::error!(%id, "tick panicked; the swap is kept and retried next tick")
+                }
+            }
+            self.save(rec);
         }
         self.publish(&mut st);
     }
@@ -1048,9 +1248,11 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             if rec.taker {
                 self.exchange(rec).await;
             }
+            self.rebroadcast(rec).await;
         }
+        self.maybe_timeout(rec).await;
         self.maybe_resume(rec).await?;
-        for ev in self.chain_events(rec).await? {
+        for ev in self.chain_events(rec).await {
             if rec.stalled {
                 self.observe(rec, ev);
             } else if let Err(e) = self.process(rec, ev).await {
@@ -1064,10 +1266,12 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     /// Taker: deliver our outbox to the maker, then fetch and apply its new messages.
     async fn exchange(&self, rec: &mut SwapRecord) {
         let base = format!("{}/peer/swaps/{}/messages", rec.counterparty, rec.id);
+        let token = rec.swap.session().peer_token().unwrap_or_default();
         while rec.sent < rec.outbox.len() {
             let resp = self
                 .http
                 .post(&base)
+                .bearer_auth(&token)
                 .json(&rec.outbox[rec.sent])
                 .send()
                 .await;
@@ -1088,6 +1292,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         let resp = self
             .http
             .get(format!("{base}?after={}", rec.peer_seen))
+            .bearer_auth(&token)
             .send()
             .await;
         let Ok(r) = resp.and_then(|r| r.error_for_status()) else {
@@ -1127,6 +1332,23 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         }
     }
 
+    /// Abort a negotiation that has locked nothing by its deadline (frees the maker's slot).
+    async fn maybe_timeout(&self, rec: &mut SwapRecord) {
+        let deadline = rec.created_ms + self.cli.negotiation_timeout_secs * 1000;
+        if rec.created_ms == 0 || now_ms() < deadline || rec.swap.is_final() {
+            return;
+        }
+        // Never while B's lock may be in flight: once the node knows it, the swap runs on.
+        if let Some(lock) = rec.swap.lock_outpoint() {
+            if !matches!(self.rpc.confirmations(&lock.txid).await, Ok(None)) {
+                return;
+            }
+        }
+        if let Err(e) = self.process(rec, Event::Timeout).await {
+            tracing::warn!(id = %rec.id, "timeout: {e}");
+        }
+    }
+
     async fn maybe_resume(&self, rec: &mut SwapRecord) -> anyhow::Result<()> {
         if !(rec.stalled && rec.resume_on_cancel) {
             return Ok(());
@@ -1152,24 +1374,52 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         Ok(())
     }
 
-    async fn chain_events(&self, rec: &mut SwapRecord) -> anyhow::Result<Vec<Event>> {
+    /// Chain observations for this tick. Bitcoin events are always delivered, even when the
+    /// Zcash backend fails: the BTC deadlines do not wait for it.
+    async fn chain_events(&self, rec: &mut SwapRecord) -> Vec<Event> {
         let mut out = vec![];
+        if let Err(e) = self.btc_events(rec, &mut out).await {
+            tracing::warn!(id = %rec.id, "bitcoin watch: {e}");
+        }
+        if let Err(e) = self.zec_events(rec, &mut out).await {
+            tracing::warn!(id = %rec.id, "zcash watch (skipped this tick): {e}");
+        }
+        self.zec_observer(rec).await;
+        out
+    }
+
+    async fn btc_events(&self, rec: &mut SwapRecord, out: &mut Vec<Event>) -> anyhow::Result<()> {
         let Some(lock) = rec.swap.lock_outpoint() else {
-            return Ok(out);
+            return Ok(());
         };
         let params = rec.swap.session().params.clone();
-
         if let Some(confs) = self.rpc.confirmations(&lock.txid).await? {
             if let Some(tx) = self.rpc.raw_transaction(&lock.txid).await? {
-                SwapRecord::set_observer(
-                    &mut rec.observer_btc,
-                    "lock",
-                    view::describe_lock(&tx, lock.vout),
-                );
-                if confs > 0 {
-                    rec.btc_lock_height = self.rpc.block_height(&lock.txid).await?;
-                    let txout = tx.output[lock.vout as usize].clone();
-                    out.push(Event::Chain(ChainEvent::BtcLockConfirmed { confs, txout }));
+                match tx.output.get(lock.vout as usize) {
+                    Some(txout) => {
+                        SwapRecord::set_observer(
+                            &mut rec.observer_btc,
+                            "lock",
+                            view::describe_lock(&tx, lock.vout),
+                        );
+                        if confs > 0 {
+                            rec.btc_lock_height = self.rpc.block_height(&lock.txid).await?;
+                            out.push(Event::Chain(ChainEvent::BtcLockConfirmed {
+                                confs,
+                                txout: txout.clone(),
+                            }));
+                        }
+                    }
+                    None if !rec.has("lock_output_missing") => rec.log(
+                        "btc",
+                        "lock_output_missing",
+                        format!(
+                            "tx_lock has no output {}: the lock template is invalid",
+                            lock.vout
+                        ),
+                        Some(lock.txid.to_string()),
+                    ),
+                    None => {}
                 }
             }
         }
@@ -1193,12 +1443,23 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             );
             out.push(Event::Chain(ChainEvent::BtcSpend { tx, confs }));
         }
+        Ok(())
+    }
 
+    async fn zec_events(&self, rec: &mut SwapRecord, out: &mut Vec<Event>) -> anyhow::Result<()> {
+        if rec.swap.lock_outpoint().is_none() {
+            return Ok(());
+        }
         let fvk = rec.swap.session().joint_fvk()?;
-        let mut spent_by = None;
+        let amount = rec.swap.session().params.zec_amount;
         for note in self.leg.watch(&fvk).await? {
-            rec.zec_lock_txid.get_or_insert(note.txid.clone());
-            spent_by = spent_by.or(note.spent_by);
+            // B tracks the qualifying lock note; Z's lock txid only ever comes from its own send.
+            if rec.role() == Role::B && note.value >= amount {
+                rec.zec_lock_txid.get_or_insert(note.txid.clone());
+            }
+            if let Some(by) = note.spent_by {
+                rec.zec_spent_by.get_or_insert(by);
+            }
             out.push(Event::Chain(ChainEvent::ZecNoteSeen {
                 value: note.value,
                 confs: note.confirmations,
@@ -1209,20 +1470,22 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 out.push(Event::Chain(ChainEvent::ZecSwept { confs }));
             }
         }
-        // Both parties describe the same public transactions: the lock and whoever's sweep.
-        for (key, txid) in [
-            ("lock", rec.zec_lock_txid.clone()),
-            ("sweep", spent_by.or(rec.zec_sweep_txid.clone())),
-        ] {
+        Ok(())
+    }
+
+    /// Both parties describe the same public transactions: the lock and whoever's sweep.
+    /// Best effort: a failing description never blocks anything.
+    async fn zec_observer(&self, rec: &mut SwapRecord) {
+        let sweep = rec.zec_spent_by.clone().or(rec.zec_sweep_txid.clone());
+        for (key, txid) in [("lock", rec.zec_lock_txid.clone()), ("sweep", sweep)] {
             let Some(txid) = txid else { continue };
             if rec.observer_zec.iter().any(|(k, _)| k == key) {
                 continue;
             }
-            if let Some(line) = self.leg.describe_tx(&txid).await? {
+            if let Ok(Some(line)) = self.leg.describe_tx(&txid).await {
                 SwapRecord::set_observer(&mut rec.observer_zec, key, line);
             }
         }
-        Ok(out)
     }
 
     /// Fill in the confirmation height of timeline entries whose transaction confirmed.
@@ -1234,7 +1497,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         {
             return Ok(());
         }
-        let zec_tip = self.leg.status().await?.height;
+        let zec_tip = self.leg.status().await.ok().map(|s| s.height);
         for e in rec.timeline.iter_mut().filter(|e| e.height.is_none()) {
             let Some(txid) = e.txid.clone() else { continue };
             e.height = match e.chain.as_str() {
@@ -1243,12 +1506,10 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     Err(_) => continue,
                 },
                 // The ZecLeg reports confirmations only; derive the height from the tip.
-                "zec" => self
-                    .leg
-                    .confirmations(&txid)
-                    .await?
-                    .filter(|c| *c > 0)
-                    .map(|c| zec_tip + 1 - u64::from(c)),
+                "zec" => match (zec_tip, self.leg.confirmations(&txid).await) {
+                    (Some(tip), Ok(Some(c))) if c > 0 => Some(tip + 1 - u64::from(c)),
+                    _ => None,
+                },
                 _ => continue,
             };
         }

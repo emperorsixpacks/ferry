@@ -15,6 +15,8 @@ pub enum Error {
     },
     #[error("invalid parameters: {0}")]
     InvalidParams(&'static str),
+    #[error("terms outside our policy: {0}")]
+    Policy(String),
     #[error("invalid setup from {role:?}: {reason}")]
     InvalidSetup { role: Role, reason: &'static str },
     #[error("DLEQ proof from {0:?} rejected: {1:?}")]

@@ -49,6 +49,12 @@ pub struct OfferView {
     pub rate_sat_per_zec: u64,
     pub min_zat: u64,
     pub max_zat: u64,
+    /// Fixed fee of each presigned BTC transaction (sats).
+    pub fee_sat: u64,
+    pub t1_blocks: u16,
+    pub t2_blocks: u16,
+    pub btc_lock_confs: u32,
+    pub zec_confs: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -191,7 +197,9 @@ fn short(tx: &Transaction) -> String {
 
 /// The lock transaction as it appears on chain.
 pub fn describe_lock(tx: &Transaction, vout: u32) -> String {
-    let lock = &tx.output[vout as usize];
+    let Some(lock) = tx.output.get(vout as usize) else {
+        return format!("tx_lock: has no output {vout} (txid {}…)", short(tx));
+    };
     let others = tx.output.len() - 1;
     format!(
         "tx_lock: {} input(s) → a P2TR output of {}{}, vsize {} (txid {}…). Until it is spent it looks like \
@@ -278,4 +286,25 @@ pub fn describe_spend(spend: Spend, tx: &Transaction, prev_value: Amount) -> Str
         fee.to_sat(),
         short(tx),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferry_btc::bitcoin::{absolute::LockTime, transaction::Version, ScriptBuf, TxOut};
+
+    #[test]
+    fn describe_lock_survives_a_bad_vout() {
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        assert!(describe_lock(&tx, 0).starts_with("tx_lock: 0 input(s)"));
+        assert!(describe_lock(&tx, 99).contains("has no output 99"));
+    }
 }

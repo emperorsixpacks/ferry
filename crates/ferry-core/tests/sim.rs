@@ -381,6 +381,30 @@ fn happy_path() {
 }
 
 #[test]
+fn joint_viewing_key_needs_the_ecdh_secret() {
+    let sim = Sim::new(Faults::default());
+    let (zs, bs) = (sim.z.session(), sim.b.session());
+    assert_eq!(zs.joint_fvk().unwrap(), bs.joint_fvk().unwrap());
+    assert_eq!(zs.peer_token(), bs.peer_token());
+    assert!(zs.peer_token().is_some());
+    // Everything an observer of the plaintext peer channel has: not enough.
+    let (z_p, b_p) = zs.pallas_pubs();
+    let (nz, nb) = (zs.me.setup.nonce, bs.me.setup.nonce);
+    let public_only =
+        ferry_core::joint::joint_fvk_bytes(&zs.session_id, &z_p, &b_p, &nz, &nb, None).unwrap();
+    assert_eq!(
+        public_only[..32],
+        zs.joint_fvk().unwrap()[..32],
+        "ak is public by design"
+    );
+    assert_ne!(
+        public_only[32..],
+        zs.joint_fvk().unwrap()[32..],
+        "nk/rivk depend on the ECDH secret"
+    );
+}
+
+#[test]
 fn happy_path_script_path() {
     let mut sim = Sim::new(Faults {
         script_path: true,

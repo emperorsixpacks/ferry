@@ -4,6 +4,7 @@ use ferry_btc::{EncryptionKey, SwapScripts, SwapTxs};
 use ferry_dleq::k256::elliptic_curve::PrimeField;
 use ferry_dleq::{PallasPoint, PallasScalar};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -98,7 +99,20 @@ impl Session {
             &b_p,
             self.by_role(mine, theirs, Role::Z),
             self.by_role(mine, theirs, Role::B),
+            self.me.ecdh_shared(&self.peer.setup).as_ref(),
         )
+    }
+
+    /// Bearer token both parties derive for the peer channel (None for swaps predating ECDH).
+    pub fn peer_token(&self) -> Option<String> {
+        let shared = self.me.ecdh_shared(&self.peer.setup)?;
+        let h: [u8; 32] = Sha256::new()
+            .chain_update(b"ferry/v1/peer-token")
+            .chain_update(self.session_id)
+            .chain_update(shared)
+            .finalize()
+            .into();
+        Some(hex::encode(h))
     }
 
     /// Joint `ask` from our share and the peer's recovered share.

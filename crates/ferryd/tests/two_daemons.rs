@@ -141,6 +141,7 @@ fn party_args(
         "1",
         "--poll-ms",
         "250",
+        "--dev-policy",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -151,6 +152,11 @@ fn party_args(
 
 impl World {
     async fn start(zec_confs: u32) -> World {
+        Self::start_with(zec_confs, &[]).await
+    }
+
+    /// `b_extra`: more flags for the maker.
+    async fn start_with(zec_confs: u32, b_extra: &[&str]) -> World {
         let dir = tempfile::tempdir().unwrap();
         let zec_file = dir.path().join("zec-chain.json");
         let tag = format!("{:08x}", OsRng.next_u32());
@@ -197,7 +203,7 @@ impl World {
             &zec_file,
             &b.wallet,
             zec_confs,
-            &["--maker-offer", "410000"],
+            &[&["--maker-offer", "410000"], b_extra].concat(),
         );
         z.spawn();
         b.spawn();
@@ -231,6 +237,10 @@ impl World {
             .unwrap();
         w.mine().await;
         w
+    }
+
+    fn zec_file(&self) -> PathBuf {
+        self._dir.path().join("zec-chain.json")
     }
 
     async fn wait_ready(&self, url: &str) {
@@ -411,6 +421,23 @@ async fn happy_swap_over_http_with_restart() {
     let mut w = World::start(2).await;
     check_api_guard(&w).await;
     let id = w.start_swap(100_000_000).await;
+    // The maker's outbox is only readable with the ECDH-derived peer token.
+    let outbox = format!("{}/peer/swaps/{id}/messages?after=0", w.b.peer_url());
+    let bare = reqwest::Client::new();
+    assert_eq!(
+        bare.get(&outbox).send().await.unwrap().status().as_u16(),
+        401
+    );
+    assert_eq!(
+        bare.get(&outbox)
+            .bearer_auth("guess")
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        401
+    );
 
     // Restart Z mid-swap, once its ZEC is locked: it must resume from its swap file.
     w.run_until(&id, 700, 20, |z, _| {
@@ -549,12 +576,24 @@ async fn refund_swap_when_z_stalls() {
         )
         .await;
     assert_eq!(code, 409);
+    // The node "rejects" B's next two broadcasts (tx_cancel, then tx_refund). With Z stalled
+    // until tx_cancel confirms, only B's rebroadcasting can finish the swap.
+    let (code, body) = w
+        .post(
+            &w.b.url,
+            &format!("/api/swaps/{id}/fault"),
+            json!({"fault": "drop_broadcasts", "count": 2}),
+        )
+        .await;
+    assert_eq!(code, 200, "{body}");
 
     let (z, b) = w
         .run_until(&id, 300, 60, |z, b| {
             z["outcome"] == "refunded" && b["outcome"] == "refunded"
         })
         .await;
+    entry(&b, "fault_drop_broadcasts");
+    assert!(entry(&b, "refund_broadcast")["height"].is_u64());
     assert_eq!((state(&z), state(&b)), ("ZecReclaimed", "Refunded"));
     for k in [
         "fault_injected",
@@ -625,6 +664,11 @@ async fn punish_swap_when_b_stalls() {
         )
         .await;
     assert_eq!(code, 200, "{body}");
+    // Once Z has locked its ZEC, the Zcash backend breaks for good: the Bitcoin deadlines
+    // must still be met (cancel at T1, punish at T2).
+    w.run_until(&id, 300, 20, |z, _| state(z) == "ZecLocked")
+        .await;
+    std::fs::write(w.zec_file(), b"not json").unwrap();
 
     let (z, b) = w
         .run_until(&id, 300, 60, |z, b| {
@@ -636,4 +680,190 @@ async fn punish_swap_when_b_stalls() {
     entry(&b, "punish_seen");
     assert!(!kinds(&b).contains("refund_broadcast"));
     println!("Z: {}\nB: {}", kinds(&z), kinds(&b));
+}
+
+/// A maker whose offer is outside the taker's policy (zero fee, zero margins).
+#[tokio::test]
+#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+async fn taker_refuses_out_of_policy_terms() {
+    let w = World::start(2).await;
+    let offer = json!({
+        "role": "B", "network": "regtest", "making": true,
+        "rate_sat_per_zec": 410000, "min_zat": 1, "max_zat": 100000000000u64,
+        "terms": {
+            "t1": 16, "t2": 10, "btc_fee": 0, "btc_lock_confirmations": 1,
+            "zec_confirmations": 2, "cancel_confirmations": 1,
+            "redeem_margin": 0, "refund_margin": 0, "keypath": true
+        }
+    });
+    let app = axum::Router::new().route(
+        "/peer/offer",
+        axum::routing::get(move || async move { axum::Json(offer) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let (code, body) = w
+        .post(
+            &w.z.url,
+            "/api/swaps",
+            json!({"maker": fake, "zec_zat": 50_000_000}),
+        )
+        .await;
+    assert_eq!(code, 400, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("not acceptable"),
+        "{body}"
+    );
+}
+
+fn propose(sid: [u8; 32]) -> (ferry_core::Proposal, Value) {
+    use ferry_btc::bitcoin::{key::Secp256k1, Address};
+    let params = ferry_core::SwapParams {
+        network: Network::Regtest,
+        btc_amount: 205_000,
+        zec_amount: 50_000_000,
+        t1: T1,
+        t2: T2,
+        btc_fee: 2_000,
+        btc_lock_confirmations: 1,
+        zec_confirmations: 2,
+        cancel_confirmations: 1,
+        redeem_margin: 3,
+        refund_margin: 3,
+        keypath: true,
+    };
+    let address = Address::p2tr(
+        &Secp256k1::new(),
+        ferry_btc::BtcKey::random().xonly(),
+        None,
+        Network::Regtest,
+    );
+    let (p, env) =
+        ferry_core::Proposal::new(&mut OsRng, sid, ferry_core::Role::Z, params, address).unwrap();
+    (
+        p,
+        json!({"envelope": env, "taker_url": "http://silent.invalid"}),
+    )
+}
+
+/// A taker that proposes and goes silent must not hold the maker's only slot forever, and
+/// neither proposals nor garbage envelopes are unbounded.
+#[tokio::test]
+#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+async fn silent_taker_times_out_and_peer_input_is_bounded() {
+    let w = World::start_with(2, &["--negotiation-timeout-secs", "3"]).await;
+    let peer = w.b.peer_url();
+    let http = reqwest::Client::new();
+    let post = |path: String, body: Value, token: Option<String>| {
+        let mut r = http.post(format!("{peer}{path}")).json(&body);
+        if let Some(t) = token {
+            r = r.bearer_auth(t);
+        }
+        async move {
+            let r = r.send().await.unwrap();
+            (
+                r.status().as_u16(),
+                r.json::<Value>().await.unwrap_or_default(),
+            )
+        }
+    };
+
+    let (p1, req1) = propose([1; 32]);
+    let (code, accept) = post("/peer/swaps".into(), req1.clone(), None).await;
+    assert_eq!(code, 201, "{accept}");
+    let accept: ferry_core::Envelope = serde_json::from_value(accept).unwrap();
+    let (swap1, _) = p1.on_accept(&mut OsRng, &accept).unwrap();
+    let token = swap1.session().peer_token().unwrap();
+    let id1 = hex::encode([1u8; 32]);
+    assert_eq!(
+        post("/peer/swaps".into(), propose([2; 32]).1, None).await.0,
+        409,
+        "slot taken"
+    );
+
+    // Garbage envelopes: refused, not remembered, and capped.
+    let mut env = req1["envelope"].clone();
+    let path = format!("/peer/swaps/{id1}/messages");
+    assert_eq!(
+        post(path.clone(), env.clone(), None).await.0,
+        401,
+        "peer token required"
+    );
+    let mut last = 0;
+    for i in 0..20u8 {
+        env["transcript"] = json!(hex::encode([i; 32]));
+        last = post(path.clone(), env.clone(), Some(token.clone())).await.0;
+    }
+    assert_eq!(last, 429);
+
+    // The silent swap times out (B had funded but not broadcast its lock) and frees the slot.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while state(&w.swap(&w.b.url, &id1).await) != "Aborted" {
+        assert!(Instant::now() < deadline, "never aborted\n{}", w.b.logs());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let b = w.swap(&w.b.url, &id1).await;
+    assert!(kinds(&b).matches("peer_message_rejected").count() <= 16);
+    assert_eq!(
+        post("/peer/swaps".into(), propose([3; 32]).1, None).await.0,
+        201,
+        "slot free again"
+    );
+
+    // Proposals are rate limited (6 a minute; four so far).
+    let codes: Vec<u16> = futures_util::future::join_all(
+        (4..8u8).map(|i| post("/peer/swaps".into(), propose([i; 32]).1, None)),
+    )
+    .await
+    .into_iter()
+    .map(|(c, _)| c)
+    .collect();
+    assert!(codes.contains(&429), "{codes:?}");
+}
+
+/// A 1-zat note at the joint address before Z locks must not make Z skip its own ZEC lock.
+#[tokio::test]
+#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+async fn dust_note_does_not_stop_z_locking() {
+    let w = World::start(2).await;
+    let id = w.start_swap(100_000_000).await;
+    // B's lock is broadcast but not mined, so Z has not sent anything yet.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while state(&w.swap(&w.b.url, &id).await) != "CancelSigned" {
+        assert!(Instant::now() < deadline, "{}", w.b.logs());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let rec: Value = serde_json::from_slice(
+        &std::fs::read(w._dir.path().join(format!("zoe/swaps/{id}.json"))).unwrap(),
+    )
+    .unwrap();
+    let swap: ferry_core::Swap = serde_json::from_value(rec["swap"].clone()).unwrap();
+    let fvk = hex::encode(swap.session().joint_fvk().unwrap());
+    let dust = "d".repeat(64);
+    {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(w.zec_file())
+            .unwrap();
+        file.lock().unwrap();
+        let mut chain: Value =
+            serde_json::from_slice(&std::fs::read(w.zec_file()).unwrap()).unwrap();
+        chain["txs"].as_array_mut().unwrap().push(json!({
+            "txid": dust, "kind": "send", "fvk": fvk, "value": 1, "owner": "bram", "height": 1
+        }));
+        std::fs::write(w.zec_file(), serde_json::to_vec(&chain).unwrap()).unwrap();
+        file.unlock().unwrap();
+    }
+    let (z, _) = w
+        .run_until(&id, 700, 30, |z, b| {
+            z["outcome"] == "swapped" && b["outcome"] == "swapped"
+        })
+        .await;
+    assert_ne!(
+        entry(&z, "zec_lock_broadcast")["txid"].as_str().unwrap(),
+        dust
+    );
 }

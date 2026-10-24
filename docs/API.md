@@ -40,7 +40,10 @@ from index n). A stalled party answers `503`.
     "btc": { "network": "regtest", "height": 412 },
     "zec": { "network": "regtest", "height": 233, "pool": "ironwood" }
   },
-  "offer": { "pair": "ZEC/BTC", "rate_sat_per_zec": 410000, "min_zat": 10000000, "max_zat": 1000000000 }
+  "offer": { "pair": "ZEC/BTC", "rate_sat_per_zec": 410000, "min_zat": 10000000, "max_zat": 1000000000,
+             "fee_sat": 2000, "t1_blocks": 12, "t2_blocks": 24, "btc_lock_confs": 2, "zec_confs": 3 }
+  // fee_sat: the fixed fee of each presigned BTC transaction (the redeem pays one; the refund
+  // path pays two: cancel + refund). t1/t2 in BTC blocks; confirmations Z/B wait for.
 }
 ```
 
