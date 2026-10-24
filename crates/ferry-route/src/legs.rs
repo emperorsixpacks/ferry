@@ -12,7 +12,9 @@
 //!   - `max_counter` (role B) / `min_counter` (role Z): refuse to start if the maker's rate means
 //!     paying more / receiving fewer counter units for `zec_zat`.
 //!
-//!   An error status means no swap was created; `201 {id}` means it was.
+//!   An error status means no swap was created; `201 {id}` means it was. The exception is a
+//!   409 with `"code": "route_label_in_use"`: a swap with that label exists, or a start with it
+//!   is still being handled, so the router treats it like a lost answer ([`start_answer`]).
 //! - `GET /api/swaps` and `GET /api/swaps/:id` return `route` and `sweep_to`.
 //! - `GET /api/status` lists [`ROUTE_FEATURE`] in `features`. Today's ferryd silently ignores
 //!   unknown body fields (`crates/ferryd/src/http.rs:144-148` has no `deny_unknown_fields`), so
@@ -453,24 +455,42 @@ impl Ferryd for HttpFerryd {
             .send()
             .await
             .map_err(|e| StartError::Unknown(e.without_url().to_string()))?;
-        let status = resp.status();
+        let status = resp.status().as_u16();
         // Read as text first: an unreadable 201 still means a swap exists.
         let text = resp
             .text()
             .await
             .map_err(|e| StartError::Unknown(e.without_url().to_string()))?;
-        let body: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-        if status.is_success() {
-            return body["id"]
-                .as_str()
-                .map(str::to_string)
-                .ok_or_else(|| StartError::Unknown(format!("{status} without an id")));
-        }
-        Err(StartError::Refused {
-            status: status.as_u16(),
-            message: error_text(&body),
-        })
+        start_answer(status, &text)
     }
+}
+
+/// The `code` ferryd puts on a 409 when the route label is taken: a swap carries it, or a start
+/// with it is still in progress (crates/ferryd/src/route.rs).
+pub const LABEL_IN_USE: &str = "route_label_in_use";
+
+/// What a `POST /api/swaps` answer means. A 2xx is the new swap. A 409 for a label already in
+/// use is no refusal: a swap with that label exists, or is being created by an earlier start
+/// whose answer was lost, so only a lookup by label can tell what happened. Every other error
+/// status means no swap was created.
+pub fn start_answer(status: u16, text: &str) -> Result<String, StartError> {
+    let body: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+    if (200..300).contains(&status) {
+        return body["id"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| StartError::Unknown(format!("{status} without an id")));
+    }
+    if status == 409 && body["code"] == LABEL_IN_USE {
+        return Err(StartError::Unknown(format!(
+            "the route label is already in use ({})",
+            error_text(&body)
+        )));
+    }
+    Err(StartError::Refused {
+        status,
+        message: error_text(&body),
+    })
 }
 
 #[cfg(test)]
@@ -602,6 +622,47 @@ mod tests {
             s("c", Some("r/2"), None),
         ];
         assert_eq!(find_labelled(list, "r/1").unwrap().id, "b");
+    }
+
+    /// A 409 for a label in use means "a swap with this label exists or is being created": the
+    /// start stays in flight and the next lookup decides. Leg 1 would otherwise read it as a
+    /// definite refusal once its busy window is over and fail a route whose swap runs on.
+    #[test]
+    fn start_answers() {
+        assert_eq!(start_answer(201, r#"{"id":"ab01"}"#), Ok("ab01".into()));
+        assert!(matches!(
+            start_answer(201, "garbage"),
+            Err(StartError::Unknown(_))
+        ));
+        let in_use = start_answer(
+            409,
+            r#"{"error":"Route label in use: a swap with the route label r1/1 is being started","code":"route_label_in_use"}"#,
+        );
+        assert!(
+            matches!(&in_use, Err(StartError::Unknown(m)) if m.contains("already in use")),
+            "{in_use:?}"
+        );
+        assert_eq!(
+            start_answer(409, r#"{"error":"A swap is already in progress"}"#),
+            Err(StartError::Refused {
+                status: 409,
+                message: "A swap is already in progress".into()
+            })
+        );
+        assert_eq!(
+            start_answer(400, r#"{"error":"The maker asks too much (max_counter)"}"#),
+            Err(StartError::Refused {
+                status: 400,
+                message: "The maker asks too much (max_counter)".into()
+            })
+        );
+        assert_eq!(
+            start_answer(500, ""),
+            Err(StartError::Refused {
+                status: 500,
+                message: "error".into()
+            })
+        );
     }
 
     #[test]
