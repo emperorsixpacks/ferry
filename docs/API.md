@@ -258,22 +258,147 @@ per pair, the router idle); quotes are limited to `DEMO_NEAR_QUOTES_PER_MIN` (40
              "fee_sat": 2000, "t1_blocks": 12, "t2_blocks": 24, "btc_lock_confs": 2, "zec_confs": 3 },
   // fee_sat: the fixed fee of each presigned BTC transaction (the redeem pays one; the refund
   // path pays two: cancel + refund). t1/t2 in BTC blocks; confirmations Z/B wait for.
-  "features": ["route", "payout"]
+  "features": ["route", "payout", "withdraw"]
   // What this ferryd supports beyond the base API. "route": POST /api/swaps takes the route
   // fields (see "Route legs"). ferry-route starts a leg only on a daemon that lists it: an older
   // ferryd would silently ignore those fields. "payout": POST /api/swaps takes payout_to (see
   // "Payout address"); send it only to a daemon that lists this, since an older one would ignore
-  // it and pay its own wallet.
+  // it and pay its own wallet. "withdraw": POST /api/withdraw and GET /api/withdrawals exist
+  // (see "Withdraw"); an older ferryd answers 404.
 }
 ```
 
 ## GET /api/addresses
 
-Where to fund this party: `{"role", "name", "btc": {"coin", "network", "address"}, "zec":
-{"address"}}`. `btc.address` is a fresh address of the daemon's wallet (EVM: its account, with
-`token` and `symbol`). `zec.address` is the wallet's own shielded address (a unified address; the
-mock chain's is `u<network>1mockwallet<hex name>`), or null if the backend has none. ferry-route
-reads it from the user's Z daemon and gives it to leg 1 as `sweep_to`.
+Every receive address the node has, the same shape on both daemon types:
+
+```json
+{ "role": "Z", "name": "zoe",
+  "btc": { "coin": "btc", "ticker": "BTC", "network": "regtest",
+           "address": "bcrt1p…" },
+  "zec": { "address": "uregtest1…", "network": "regtest" } }
+```
+
+- **`zec.address`**: the node's own shielded address, where the ZEC to swap is sent. Always a
+  unified address with a shielded receiver, never a transparent one (null if the Zcash backend
+  has none). The real backend shows an address with an Orchard receiver only (no transparent or
+  Sapling one, so whatever a wallet sends there arrives shielded; Ironwood notes go to the
+  Orchard receiver), made once with `zcash-devtool wallet generate-address --pool orchard` and
+  kept in `<wallet>/ferry-deposit-address`; the mock chain's is `u<network>1mockwallet<hex name>`.
+  ferry-route reads it from the user's Z daemon and gives it to leg 1 as `sweep_to`.
+- **Bitcoin / Litecoin `btc.address`**: a receiving address of the node's wallet, **stable**: the
+  same one every time (labeled `ferry-funding` in the node's wallet), so a page, a script or NEAR
+  Intents' `refundTo` can rely on it. Everything sent there is the owner's, so reuse links only the
+  owner's own deposits. `GET /api/addresses?fresh=1` returns a new address each time instead
+  (labeled `ferry-deposit`) for an owner who prefers one per deposit; both kinds are the wallet's.
+  `coin` is `"btc"` or `"ltc"`, `ticker` `"BTC"` or `"LTC"`; addresses are the coin's own encoding.
+- **EVM `btc`**: the node's one account, which receives both the token and the chain's gas coin
+  (`fresh` changes nothing):
+  ```json
+  "btc": { "coin": "usdc", "ticker": "USDC", "network": "base-sepolia", "chain_id": 84532,
+           "address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",   // EIP-55 checksummed
+           "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "symbol": "USDC", "decimals": 6 }
+  ```
+
+## Withdraw ("Send to my wallet")
+
+The node's owner takes coins out of the wallets this ferryd holds, to an address of their own:
+shielded ZEC on every daemon, and the counter coin (BTC or LTC; or the EVM token and the chain's
+gas coin). Same bearer token, `Origin` rule and loopback listener as the rest of the control API;
+there is no extra flag: it is on wherever the control API is. **The public demo must never expose
+it** (its daemons hold the operator's coins); the UI server forwards it only on the owner's own
+node ([THREAT-MODEL.md](THREAT-MODEL.md#taking-coins-out-of-your-ferry-send-to-my-wallet)).
+
+### POST /api/withdraw
+
+```json
+{ "asset": "zec", "amount": "150000000", "to": "u1…" }
+```
+→ `201`
+```json
+{ "id": "3c6bbe87e4f9b7d06a8f71b671d211b7", "asset": "zec", "coin": "zec",
+  "amount": "150000000", "to": "u1…", "fee": "10000", "fee_coin": "zec",
+  "txid": "a876…c2b3", "status": "pending", "confirmations": 0, "error": null,
+  "created_at": "2026-10-20T21:24:04Z", "updated_at": "2026-10-20T21:24:04Z" }
+```
+
+- **`asset`**: `"zec"` (shielded ZEC, any daemon); `"btc"` (a Bitcoin or Litecoin daemon's coin;
+  `"ltc"` is taken too on a Litecoin daemon); `"token"` (an EVM daemon's ERC-20; its symbol in
+  lowercase, e.g. `"usdc"`, is taken too); `"eth"` (an EVM daemon's gas coin). Another asset is a
+  `400`.
+- **`amount`**: base units (zatoshi; satoshi or litoshi; token base units; wei), a JSON integer
+  or a string of digits (use a string above 2^53, e.g. wei). What `to` receives; the fee is paid
+  on top. `amount`, `fee` come back as decimal strings.
+- **`to`**:
+  - ZEC: a unified address of the node's Zcash network with an Orchard receiver (checked by
+    `ferry-zec-signer address`; the mock chain takes only its own wallet addresses). A
+    transparent address (`t1…`, `t3…`, `tm…`, `t2…`, `tex…`) is refused with
+    `400 {"error": "to: Ferry only sends shielded ZEC; use a shielded address"}`; Sapling and
+    Sprout addresses are refused too, as is the node's own `zec.address`.
+  - BTC/LTC: an address of the daemon's coin and network that only its owner can spend (P2TR,
+    P2WPKH, P2WSH, P2PKH, P2SH), as for `payout_to`.
+  - EVM: `0x` and 40 hex digits, lowercase, uppercase, or mixed case with a valid EIP-55
+    checksum; not the zero address, the FerryLock contract, the token contract or the node's own
+    account.
+- **`fee`**, in base units of **`fee_coin`**: ZEC: the transaction's fee (ZIP 317). BTC/LTC: what
+  the transaction pays, at the node's `estimatesmartfee` (6 blocks) rate, never below the
+  mempool's minimum, and refused (`409`) above 500 sat/vB; with no estimate (regtest, a fresh
+  node) 2 sat/vB (Litecoin 10 lit/vB). EVM: wei, the most its gas can cost until it is mined, then
+  what it cost.
+- The call returns once the transaction is broadcast (`status: "pending"`). ZEC takes as long as
+  the wallet needs to build and prove it (seconds to a minute).
+
+**Only free funds.** A withdrawal never takes what a live swap still needs, and a refusal says how
+much is free:
+
+```json
+{ "error": "Only 0.9999 ZEC is free to withdraw: 3.9999 ZEC is in the wallet and 3 ZEC is held for a swap in progress (swap 9f3a0c2d's ZEC lock). This needs 0.9999 ZEC plus up to 0.0001 ZEC in fees" }
+```
+
+Held: a Z swap's ZEC lock (amount plus the wallet's fee reserve) until the lock is sent; a B
+swap's BTC/token lock (BTC: plus a 10000 sat fee reserve) until it is made; on EVM, the gas of
+the actions a live swap may still send (B: lock and refund; Z: claim and penalty), priced at
+twice the node's current max fee per gas. ZEC notes are spent whole and change takes
+confirmations, so a ZEC withdrawal whose notes would leave a pending lock short until its change
+confirms is refused (`409`) before anything is broadcast. A BTC withdrawal waits (`409`) while a
+B swap's lock is funded but not yet broadcast. Withdrawals and swap starts never run together:
+one waits (`409`) for the other, and a maker takes no proposal meanwhile.
+
+**Recorded before broadcast, never sent twice.** Each withdrawal is built and signed first, so its
+txid is fixed, and saved to `<data-dir>/withdrawals/<id>.json` (with the signed transaction for
+BTC/LTC and EVM) before anything is broadcast. After a crash or restart the daemon follows that
+same transaction and never builds another: BTC/LTC and EVM send the same signed transaction again
+until it confirms; ZEC: the wallet stores a transaction before broadcasting it, so one it never
+stored was never sent. A withdrawal is `failed` only once it can never confirm.
+
+### GET /api/withdrawals → `[Withdrawal]`
+
+Every withdrawal, newest first, in the shape above. `status`:
+
+| status | meaning |
+|---|---|
+| `sending` | recorded and signed, not yet known to be out (a node that did not answer, or a restart); followed until it resolves |
+| `pending` | broadcast, not yet confirmed |
+| `confirmed` | mined; `confirmations` counts up to 6 |
+| `failed` | never paid and never will; `error` says why (refused by the node, its coins or nonce used by another transaction, expired unmined, reverted, or interrupted before it was broadcast) |
+
+`GET /api/events` also sends `event: withdrawal` with a withdrawal's body whenever it changes.
+
+### Errors
+
+`{"error": "<plain sentence>"}`:
+
+- `400`: a bad body, asset, amount or address (`to: …`), dust, a fee above the amount, or more
+  than is free
+- `409`: a swap is being started, another withdrawal is being sent, a B swap's lock is funded but
+  not out, fees above the cap, ZEC still waiting for confirmations or a withdrawal that would tie
+  up a pending lock's notes, or the node refused the transaction (nothing was sent)
+- `500 could not save the withdrawal; nothing was sent`; `503`: a node or wallet did not answer
+  (nothing was sent)
+
+`POST /api/withdraw/fault {"crash": "after_save" | "after_broadcast"}` (only with
+`--demo-faults`) makes the process exit at that point of the next withdrawal, to show that a
+restart neither loses nor repeats it.
 
 **Litecoin.** A daemon started with `--chain ltc` swaps ZEC against LTC (docs/LITECOIN.md). Then
 `chains.btc` is `{ "coin": "ltc", "ticker": "LTC", … }`, `offer.pair` is `"ZEC/LTC"` and every
@@ -404,9 +529,12 @@ all optional:
   `409 {"error": "Route label in use: …", "code": "route_label_in_use"}`. A router reads that as
   "the swap may exist" and looks it up by label; every other error status means no swap was
   created.
-- **`sweep_to`** is checked before the maker is contacted (`400 sweep_to: …`): it must be a
-  unified address of our Zcash network with an Orchard receiver (Ironwood shares it), checked by
-  `ferry-zec-signer address`; the mock chain takes only its own wallet addresses. It is never part
+- **`sweep_to`** is a normal option of any B swap (buying ZEC), route or not, on both daemon
+  types: where the ZEC goes, e.g. the user's own shielded wallet. It is checked before the maker
+  is contacted (`400 sweep_to: …`) exactly as a ZEC withdrawal's `to`: a unified address of our
+  Zcash network with an Orchard receiver (Ironwood shares it), checked by `ferry-zec-signer
+  address`; a transparent one gets `400 sweep_to: Ferry only sends shielded ZEC; use a shielded
+  address`; the mock chain takes only its own wallet addresses. It is never part
   of the peer protocol, so the maker never learns it, and the sweep is still built with
   `--discard-ovk`. B's sweep pays it; Z's reclaim always goes to Z's own wallet. The token that
   can set it is the token that controls the funds already; the demo UI server never forwards it.
