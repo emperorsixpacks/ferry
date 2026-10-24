@@ -301,7 +301,7 @@ test("on a public demo, or a test network, quotes only", async () => {
   assert.equal(off.one.calls.some((c) => c.body && c.body.dry === false), false);
   assert.equal(off.d.swaps.length, 0);
   const info = await off.n.info();
-  assert.deepEqual(info.execution, { sell: false, buy: false });
+  assert.deepEqual(info.execution, { sell: false, buy: false, direct: false });
   assert.equal(info.reason, "demo");
   assert.equal(info.tokens.some((t) => t.blockchain === "zec"), false);
   assert.equal(info.tokens.find((t) => t.symbol === "BTC").ferry, "btc");
@@ -789,6 +789,45 @@ test("NEAR asset → NEAR asset: the second quote once the coin arrived, the rou
   assert.equal(again.status, 200);
   assert.equal(again.body.state, "route");
   assert.equal(late.router.posts.length, 1);
+});
+
+test("the opt-out: NEAR Intents alone, from the person's own wallet to their own address", async () => {
+  const { n, one, router } = comboDesk();
+  const BTC_ADDR = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
+  const USDC = FERRY_ASSETS["usdc-base"].assetId;
+  // priced alone: 0.005 BTC is $500, 500 USDC
+  let q = await n.hop({ side: "direct", asset_in: FERRY_ASSETS.btc.assetId, asset_out: USDC, amount: "500000" });
+  assert.equal(q.status, 200, JSON.stringify(q.body));
+  assert.equal(q.body.amount_out, "500000000");
+  assert.equal(one.calls.at(-1).body.swapType, "EXACT_INPUT");
+  q = await n.hop({ side: "direct", asset_in: FERRY_ASSETS.btc.assetId, asset_out: USDC, amount: "500000", address: SOL });
+  assert.equal(q.body.field, "address");
+  const body = { kind: "near-only", asset_in: FERRY_ASSETS.btc.assetId, amount_in: "500000", refund_address: BTC_ADDR, asset_out: USDC, address: "0x2527D02599Ba641c19FEa793cD0F167589a0f10D", min_asset_out: "490000000" };
+  let gated = null;
+  const r = await n.startCombo(body, { admit: async (w) => ((gated = w), null) });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(gated.kind, "near-only");
+  assert.equal(r.body.state, "deposit");
+  assert.equal(r.body.from, "btc");
+  assert.equal(r.body.to, "usdc-base");
+  // the person's own addresses at both ends; no Ferry swap, no route, no node of the operator's
+  const [real] = realOf(one);
+  assert.equal(real.recipient, "0x2527D02599Ba641c19FEa793cD0F167589a0f10D");
+  assert.equal(real.refundTo, BTC_ADDR);
+  assert.equal(router.posts.length, 0);
+  one.deposits.get(r.body.front.deposit_address).status = "SUCCESS";
+  await n.tick();
+  assert.equal(n.combo(r.body.id).state, "done");
+  assert.equal(router.posts.length, 0);
+  // refused: the same coin, a demo, a moved price
+  assert.equal((await n.startCombo({ ...body, asset_out: FERRY_ASSETS.btc.assetId, address: BTC_ADDR })).status, 400);
+  assert.equal((await comboDesk({ execution: false }).n.startCombo(body)).status, 403);
+  assert.equal((await comboDesk({ mainnet: false }).n.startCombo(body)).status, 409);
+  const moved = await n.startCombo({ ...body, min_asset_out: "999000000" });
+  assert.equal(moved.body.code, "price_moved");
+  // it needs no router
+  assert.equal((await comboDesk({ router: null }).n.startCombo(body)).status, 201);
+  assert.equal((await comboDesk({ router: null }).n.info()).execution.direct, true);
 });
 
 test("HTTP: the private swaps' routes", async () => {

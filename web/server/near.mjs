@@ -19,7 +19,9 @@
 //   near-route  the user sends asset X to a 1Click deposit address → NEAR Intents → coin A into their
 //               own B node → (the route, started here once A arrived) A → ZEC → C
 //   near-near   both: the second 1Click quote is asked once A has arrived, with the route's amounts
-// The ZEC between the two Ferry swaps stays shielded; the NEAR legs are public and trusted.
+// The ZEC between the two Ferry swaps stays shielded; the NEAR legs are public and trusted. A person
+// can opt out of the private swap for NEAR Intents alone (near-only): asset X from their own wallet
+// to asset Y at their address, faster, but public end to end; Ferry only asks for the quote.
 // NEAR Intents is mainnet only: on test networks a quote is informational, unless a mock 1Click on
 // this machine (FERRY_NEAR_URL on loopback, FERRY_NEAR_TESTNET=1) stands in for it.
 //
@@ -590,7 +592,9 @@ export const NEAR_DONE = ["SUCCESS", "REFUNDED", "FAILED"];
 
 const JOB_ID = /^n[0-9a-f]{16}$/;
 const COMBO_ID = /^c[0-9a-f]{16}$/;
-export const COMBO_KINDS = ["route-near", "near-route", "near-near"];
+// near-only: the opt-out from a private swap, NEAR Intents alone (asset X from the person's own
+// wallet → asset Y to their address): faster, public, and no Ferry swap in it
+export const COMBO_KINDS = ["route-near", "near-route", "near-near", "near-only"];
 const ISO = (t) => new Date(t).toISOString();
 const isoSecs = (t) => new Date(t).toISOString().replace(/\.\d+Z$/, "Z");
 const digits = (v) => (typeof v === "string" && INT.test(v) ? v : null);
@@ -1292,7 +1296,8 @@ export function nearDesk({
   async function hop(body) {
     const bad = (error, field) => ({ status: 400, body: { error, ...(field ? { field } : {}) } });
     const side = body?.side;
-    if (side !== "in" && side !== "out") return bad('side must be "in" or "out"');
+    if (side === "direct") return direct(body);
+    if (side !== "in" && side !== "out") return bad('side must be "in", "out" or "direct"');
     const pair = body?.pair;
     const via = typeof pair === "string" && Object.hasOwn(FERRY_ASSETS, pair) ? await viaToken(pair) : null;
     if (!via) return (await tokenList()) ? bad("NEAR Intents doesn't take that coin here") : { status: 503, body: { error: "Couldn't reach NEAR Intents. Try again in a moment." } };
@@ -1327,6 +1332,61 @@ export function nearDesk({
         time_s: Number.isFinite(got.quote.timeEstimate) ? Math.max(0, Math.round(got.quote.timeEstimate)) : 60,
         approximate: ask !== want || !address,
         address: address ? "ok" : null,
+        verified: verifySignatures,
+      },
+    };
+  }
+
+  // NEAR Intents alone, X → Y (the opt-out from a private swap): EXACT_INPUT, the person's own
+  // addresses at both ends (dry placeholders while they haven't typed them)
+  function directBody(from, to, amount, { address = null, refund = null } = {}) {
+    const [r, rt] = address ? [address, "DESTINATION_CHAIN"] : dryAddress(to.blockchain, "DESTINATION_CHAIN");
+    const [b, bt] = refund ? [refund, "ORIGIN_CHAIN"] : dryAddress(from.blockchain, "ORIGIN_CHAIN");
+    return { swapType: "EXACT_INPUT", slippageTolerance: slippageBps, originAsset: from.assetId, depositType: "ORIGIN_CHAIN", destinationAsset: to.assetId, amount: amount.toString(), refundTo: b, refundType: bt, recipient: r, recipientType: rt };
+  }
+  // NEAR swaps of the person's own coins run here: the operator turned them on, against 1Click on
+  // mainnet (or the mock on test networks)
+  const directRuns = async () => execution && (testOk || (await Promise.all([daemons.list("sell"), daemons.list("buy")])).flat().some((d) => mainnet(d.status)));
+
+  // {side: "direct", asset_in: X, asset_out: Y, amount, address?, refund?}: what sending `amount`
+  // of X through NEAR Intents alone delivers of Y
+  async function direct(body) {
+    const bad = (error, field) => ({ status: 400, body: { error, ...(field ? { field } : {}) } });
+    const from = typeof body?.asset_in === "string" ? await tokenOf(body.asset_in) : null;
+    const to = typeof body?.asset_out === "string" ? await tokenOf(body.asset_out) : null;
+    if (!from || !to) return (await tokenList()) ? bad("NEAR Intents doesn't list that token") : { status: 503, body: { error: "Couldn't reach NEAR Intents. Try again in a moment." } };
+    if (from.assetId === to.assetId) return bad("Pick two different coins");
+    const want = big(body?.amount);
+    if (want == null || want <= 0n) return bad("amount must be a whole number of the coin's smallest units");
+    const addr = (v, chain, field) => {
+      if (v == null || v === "") return { value: null };
+      const p = addressProblem(chain, v);
+      return p ? { error: bad(p, field) } : { value: String(v).trim() };
+    };
+    const a = addr(body?.address, to.blockchain, "address");
+    if (a.error) return a.error;
+    const r = addr(body?.refund, from.blockchain, "refund");
+    if (r.error) return r.error;
+    const exact = body?.exact === true;
+    const ask = exact ? want : roundSig(want);
+    const got = await dry(directBody(from, to, ask, { address: a.value, refund: r.value }));
+    if (!got.ok) return { status: got.field ? 400 : 502, body: { error: got.error, ...(got.field ? { field: got.field } : {}) } };
+    const amountOut = big(got.quote.amountOut);
+    const minOut = big(got.quote.minAmountOut);
+    if (amountOut == null || minOut == null) return { status: 502, body: { error: "NEAR Intents' answer was incomplete." } };
+    const s = (x) => (ask === want ? x : scale(x, want, ask));
+    return {
+      status: 200,
+      body: {
+        side: "direct",
+        pair: null,
+        asset: to.assetId,
+        amount_in: want.toString(),
+        amount_out: s(amountOut).toString(),
+        min_amount_out: s(minOut).toString(),
+        time_s: Number.isFinite(got.quote.timeEstimate) ? Math.max(0, Math.round(got.quote.timeEstimate)) : 60,
+        approximate: ask !== want || !a.value,
+        address: a.value || r.value ? "ok" : null,
         verified: verifySignatures,
       },
     };
@@ -1440,9 +1500,10 @@ export function nearDesk({
   async function startCombo(body, { admit: gate = admit, refused = () => {} } = {}) {
     const bad = (error, field) => ({ status: 400, body: { error, ...(field ? { field } : {}) } });
     if (!execution) return { status: 403, body: { error: "Private swaps with NEAR Intents run on your own Ferry node: they pay out to an address you choose, which this public demo can't allow." } };
-    if (!router) return { status: 503, body: { error: "Private swaps aren't available on this server." } };
     const kind = body?.kind;
-    if (!COMBO_KINDS.includes(kind)) return bad('kind must be "route-near", "near-route" or "near-near"');
+    if (!COMBO_KINDS.includes(kind)) return bad('kind must be "route-near", "near-route", "near-near" or "near-only"');
+    if (kind === "near-only") return startDirect(body, { gate, refused });
+    if (!router) return { status: 503, body: { error: "Private swaps aren't available on this server." } };
     const front = kind !== "route-near";
     const back = kind !== "near-route";
     const legs = await router.legs();
@@ -1554,6 +1615,72 @@ export function nearDesk({
       const r = await createRoute(j, built.body, got.part.deposit_address);
       if (r) return fail(r);
     }
+    combos.unshift(j);
+    if (combos.length > 200) combos = combos.filter((x, i) => i < 200 || comboActive(x));
+    save();
+    return { status: 201, body: comboView(j) };
+  }
+
+  // near-only {kind, asset_in, amount_in, refund_address, asset_out, address, min_asset_out}: a real
+  // 1Click quote from the person's own wallet to their own address; nothing of the operator's moves
+  async function startDirect(body, { gate, refused }) {
+    const bad = (error, field) => ({ status: 400, body: { error, ...(field ? { field } : {}) } });
+    const from = typeof body?.asset_in === "string" ? await tokenOf(body.asset_in) : null;
+    const to = typeof body?.asset_out === "string" ? await tokenOf(body.asset_out) : null;
+    if (!from || !to) return bad("NEAR Intents doesn't list that token");
+    if (from.assetId === to.assetId || symbolFamily(from.symbol) === symbolFamily(to.symbol)) return bad("Pick two different coins.");
+    let p = addressProblem(to.blockchain, body?.address);
+    if (p) return bad(p, "address");
+    p = addressProblem(from.blockchain, body?.refund_address);
+    if (p) return bad(p, "refund_address");
+    const address = String(body.address).trim();
+    const refund = String(body.refund_address).trim();
+    const amountIn = big(body?.amount_in);
+    const minAssetOut = big(body?.min_asset_out);
+    if (amountIn == null || amountIn <= 0n || minAssetOut == null || minAssetOut <= 0n) return bad("amount_in and min_asset_out must be whole numbers of the tokens' smallest units");
+    if (!(await directRuns())) return { status: 409, body: { error: "NEAR Intents runs on mainnet, and this Ferry node is on a test network." } };
+    const blocked = await gate({ key: null, pair: null, kind: "near-only" });
+    if (blocked) return blocked;
+    const now = Date.now();
+    const req = { ...directBody(from, to, amountIn, { address, refund }), deadline: ISO(now + buyDeadlineSecs * 1000) };
+    const got = await realQuote(req, { memoOk: true });
+    if (!got.ok) {
+      refused();
+      return got;
+    }
+    if (BigInt(got.part.min_amount_out) < minAssetOut) {
+      refused();
+      return { status: 409, body: { error: "The price moved: NEAR Intents now promises less than you agreed to. Check the new quote and try again.", code: "price_moved" } };
+    }
+    const j = {
+      id: `c${randomBytes(8).toString("hex")}`,
+      kind: "near-only",
+      state: "deposit",
+      outcome: null,
+      created_at: Math.floor(now / 1000),
+      updated_at: Math.floor(now / 1000),
+      from: pairOfAsset(from.assetId),
+      to: pairOfAsset(to.assetId),
+      pause: null,
+      asset_in: tokenView(from),
+      asset_out: tokenView(to),
+      via_in: null,
+      via_out: null,
+      address,
+      refund_address: refund,
+      own_in: null,
+      own_out: null,
+      daemon_in: null,
+      daemon_out: null,
+      agreed: { zec_zat: 0, min_out: "0", min_asset_out: minAssetOut.toString() },
+      route: { id: null, state: null, outcome: null, zec_zat: null, in_max: null, out_min: null, held_zat: null, paid: null, out: null, swaps: [] },
+      front: got.part,
+      back: null,
+      problem: null,
+      timeline: [],
+    };
+    note(j, "near_quote", `NEAR Intents quoted at least ${unitsText(got.part.min_amount_out, to)} for ${unitsText(amountIn, from)} (signed by 1Click; ${verifySignatures ? "signature checked" : "signature not checked"})`);
+    note(j, "deposit_waiting", `Waiting for your ${from.symbol} at NEAR Intents' deposit address`);
     combos.unshift(j);
     if (combos.length > 200) combos = combos.filter((x, i) => i < 200 || comboActive(x));
     save();
@@ -1694,20 +1821,24 @@ export function nearDesk({
 
   async function comboStep(j) {
     const inSym = j.asset_in?.symbol;
-    const midIn = j.via_in?.symbol;
+    const alone = j.kind === "near-only";
+    const midIn = alone ? j.asset_out?.symbol : j.via_in?.symbol;
     if (j.state === "deposit" || j.state === "near_in") {
       await partStatus(j, j.front, {
         KNOWN_DEPOSIT_TX: "NEAR Intents sees your deposit",
         PENDING_DEPOSIT: "NEAR Intents is waiting for the deposit",
         INCOMPLETE_DEPOSIT: "NEAR Intents got less than the quote needs",
         PROCESSING: `NEAR Intents is swapping your ${inSym} for ${midIn}`,
-        SUCCESS: `NEAR Intents delivered ${midIn} to your Ferry node`,
+        SUCCESS: alone ? `NEAR Intents delivered ${midIn} to your address` : `NEAR Intents delivered ${midIn} to your Ferry node`,
         REFUNDED: "NEAR Intents refunded the deposit",
         FAILED: "NEAR Intents reported a failure",
       });
       const s = j.front.status;
       if (["KNOWN_DEPOSIT_TX", "PROCESSING", "INCOMPLETE_DEPOSIT"].includes(s)) j.state = "near_in";
-      if (s === "SUCCESS") {
+      if (s === "SUCCESS" && alone) {
+        j.state = "done";
+        j.outcome = "swapped";
+      } else if (s === "SUCCESS") {
         j.state = "funding";
         j.funding_since = Date.now();
       } else if (s === "REFUNDED" || s === "FAILED") {
@@ -1807,11 +1938,13 @@ export function nearDesk({
         return out;
       };
       const compose = tokens ? await composeInfo(sell, buy) : null;
+      const alone = await directRuns();
       return {
         available: !!tokens,
-        execution: { sell: runs(sell), buy: runs(buy) },
+        // direct: NEAR Intents alone, the opt-out from a private swap
+        execution: { sell: runs(sell), buy: runs(buy), direct: alone },
         // why not: "demo" (this server doesn't run NEAR swaps) or "mainnet" (its nodes are on test networks)
-        reason: runs(sell) || runs(buy) || compose?.runs ? null : reason() ?? "mainnet",
+        reason: runs(sell) || runs(buy) || compose?.runs || alone ? null : reason() ?? "mainnet",
         tokens: tokens ?? [],
         explorer: EXPLORER_URL,
         // the coins a NEAR sell / buy can go through here (the user's nodes whose coin 1Click lists)

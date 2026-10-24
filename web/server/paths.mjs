@@ -13,8 +13,9 @@
 //   pair → near   route-near a private swap whose second swap pays into a NEAR Intents deposit
 //   near → pair   near-route NEAR Intents delivers coin A to your node, then a private swap A → C
 //   near → near   near-near  both
-// and the same coin on both sides is refused. Coin to coin always goes through shielded ZEC: Ferry's
-// promise is a cross-chain swap that leaves no trail, so the private route is the default.
+// and the same coin on both sides is refused. Coin to coin goes through shielded ZEC: Ferry's promise
+// is a cross-chain swap that leaves no trail, so the private route is the default. A person may opt
+// out of it for two coins (near-only: NEAR Intents alone, faster, public), never by default.
 //
 // What this server runs (`ctx`):
 //   ready     the server said which daemons it has and the page probed them; until then nothing
@@ -102,9 +103,26 @@ function privacyOf(kind, a, c) {
     case "near-route":
     case "near-near":
       return `No transaction links your two Ferry swaps: the ZEC between is shielded, though amounts and timing could hint at a link. ${NEAR_TRUST}`;
+    case "near-only":
+      return "Faster, but public: anyone can link what you sold to what you got, and you trust NEAR Intents for all of it.";
     default:
       return "";
   }
+}
+
+// The opt-out from a private swap, for two coins: NEAR Intents alone, from your own wallet to your
+// own address. Faster, and public end to end; never the default.
+function nearAlone(sell, buy, ctx) {
+  const near = ctx?.near;
+  const path = { kind: "near-only", steps: [NEAR], minutes: [NEAR_MIN, NEAR_MIN * 3], private: false };
+  if (near === undefined) return { ...path, available: null };
+  if (!near) return { ...path, reason: "NEAR Intents isn't available on this server." };
+  const idOf = (t) => (isNear(t) ? (near.tokens[assetIdOf(t)] ? assetIdOf(t) : null) : (Object.entries(near.tokens).find(([, v]) => v.ferry === t)?.[0] ?? null));
+  const asset_in = idOf(sell);
+  const asset_out = idOf(buy);
+  if (!asset_in || !asset_out) return { ...path, reason: `NEAR Intents doesn't take ${tickerOf(asset_in ? buy : sell, ctx)} here.` };
+  const runs = !!near.runs?.direct;
+  return { ...path, asset_in, asset_out, available: true, runs, reason: runs ? null : (QUOTE_ONLY[near.reason] ?? QUOTE_ONLY.demo) };
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -117,7 +135,7 @@ const HOP = { coin: ZEC };
 const coinStep = (pair) => ({ coin: pair ?? null });
 
 // One path for selling `sell` and getting `buy`. `opts.pause` ("off" | "standard" | "long") times a
-// private swap.
+// private swap; `opts.public` is the person's opt-out from it, for two coins: NEAR Intents alone.
 export function resolvePath(sell, buy, ctx, opts = {}) {
   const pause = opts.pause && ROUTE_MIN[opts.pause] ? opts.pause : "standard";
   const a = tickerOf(sell, ctx);
@@ -195,6 +213,8 @@ export function resolvePath(sell, buy, ctx, opts = {}) {
   if (p === "loading") return done({ ...path, available: null });
   if (p) return done({ ...path, reason: p });
   if (familyOf(sell, ctx) === familyOf(buy, ctx)) return done({ ...path, reason: sameFamily(a, c) });
+  // the person opted out of the private swap, for these two coins
+  if (opts.public) return done(nearAlone(sell, buy, ctx));
   if (!routes) return done({ ...path, reason: NO_ROUTER });
   if (!front && !routes.from.includes(sell)) return done({ ...path, reason: `Private swaps can't start from ${a} on this server.` });
   if (!back && !routes.to.includes(buy)) return done({ ...path, reason: `Private swaps can't end in ${c} on this server.` });
@@ -231,6 +251,8 @@ function buttonOf(kind, ctx, sell, buy) {
     case "near-route":
     case "near-near":
       return "Swap privately";
+    case "near-only":
+      return "Swap through NEAR Intents";
     default:
       return "Swap";
   }

@@ -6,7 +6,7 @@ export type Token = "zec" | Pair | `near:${string}`;
 export type Side = "sell" | "buy";
 export type Pause = "off" | "standard" | "long";
 
-export type PathKind = "sell" | "buy" | "near-sell" | "near-buy" | "route" | "route-near" | "near-route" | "near-near" | "same" | "none";
+export type PathKind = "sell" | "buy" | "near-sell" | "near-buy" | "route" | "route-near" | "near-route" | "near-near" | "near-only" | "same" | "none";
 
 export interface NearTokenInfo {
   symbol: string;
@@ -24,7 +24,8 @@ export interface PathCtx {
     | null
     | {
         tokens: Record<string, NearTokenInfo>;
-        runs: { sell: boolean; buy: boolean };
+        // direct: NEAR Intents alone (the opt-out from a private swap) runs here
+        runs: { sell: boolean; buy: boolean; direct?: boolean };
         reason: "demo" | "mainnet" | null;
         vias?: { sell: string[]; buy: string[] };
         compose?: { to: string[]; from: string[]; runs: boolean } | null;
@@ -77,7 +78,7 @@ export function familyOf(t: string, ctx?: PathCtx | null): string;
 export function symbolFamily(symbol: string): string;
 export function ferryMinutes(pair: string): number;
 export function aboutText(minutes: [number, number]): string;
-export function resolvePath(sell: string, buy: string, ctx: PathCtx | null, opts?: { pause?: Pause }): Path;
+export function resolvePath(sell: string, buy: string, ctx: PathCtx | null, opts?: { pause?: Pause; public?: boolean }): Path;
 export function stepWords(steps: Step[], ctx?: PathCtx | null): string;
 export function present(ctx: PathCtx | null, pair: string): boolean;
 export function defaultPick(ctx: PathCtx | null): { sell: Token; buy: Token };

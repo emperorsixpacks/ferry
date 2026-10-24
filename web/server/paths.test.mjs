@@ -123,7 +123,7 @@ test("a Ferry coin and a NEAR Intents asset: a private swap with NEAR Intents at
   assert.equal(p.button, "Swap privately");
   assert.equal(p.time, "about 40–80 min");
   assert.match(p.privacy, /No transaction links your two Ferry swaps.*public, and you trust NEAR Intents/);
-  // BTC → SOL: the router can't end in a coin NEAR Intents takes other than BTC itself... but LTC
+  // BTC → SOL: BTC can't hand BTC to NEAR Intents (the same asset at both Ferry ends), so through LTC
   const b = resolvePath("btc", sol, full);
   assert.deepEqual(b.via, [["btc", "ltc"]]);
   // without a coin to hand over
@@ -151,6 +151,29 @@ test("a NEAR Intents asset to a Ferry coin, and NEAR to NEAR: NEAR Intents first
   assert.equal(stepWords(n.steps), "NEAR Intents → BTC → Ferry → shielded ZEC → Ferry → LTC → NEAR Intents");
   assert.equal(n.time, "about 45–85 min");
   assert.equal(resolvePath(sol, usdt, { ...full, near: { ...full.near, compose: { to: ["btc"], from: ["btc"], runs: true } } }).reason, "No private swap here can take SOL from NEAR Intents and hand USDT back to it.");
+});
+
+test("the opt-out for two coins: NEAR Intents alone, faster and public, never the default", () => {
+  const withBtc = { ...full, near: { ...full.near, tokens: { ...tokens, "nep141:btc.omft.near": { symbol: "BTC", blockchain: "btc", ferry: "btc" }, usdcBase: { symbol: "USDC", blockchain: "base", ferry: "usdc-base" } }, runs: { sell: true, buy: true, direct: true } } };
+  assert.equal(resolvePath("btc", "usdc-base", withBtc).kind, "route", "private by default");
+  const p = resolvePath("btc", "usdc-base", withBtc, { public: true });
+  assert.equal(p.kind, "near-only");
+  assert.equal(p.available, true);
+  assert.equal(p.runs, true);
+  assert.equal(p.private, false);
+  assert.equal(p.asset_in, "nep141:btc.omft.near");
+  assert.equal(p.asset_out, "usdcBase");
+  assert.equal(stepWords(p.steps), "NEAR Intents");
+  assert.equal(p.time, "about 5–15 min");
+  assert.equal(p.button, "Swap through NEAR Intents");
+  assert.match(p.privacy, /^Faster, but public: anyone can link what you sold to what you got/);
+  // it needs no router, but NEAR Intents must take both coins
+  assert.equal(resolvePath(sol, usdt, { ...withBtc, routes: null }, { public: true }).available, true);
+  assert.equal(resolvePath("ltc", sol, withBtc, { public: true }).reason, "NEAR Intents doesn't take LTC here.");
+  // quotes only where NEAR swaps don't run; ZEC paths never opt out
+  assert.match(resolvePath(sol, usdt, demo, { public: true }).reason, /^Quote only/);
+  assert.equal(resolvePath("zec", "btc", withBtc, { public: true }).kind, "sell");
+  assert.match(resolvePath("usdc-base", usdcSol, withBtc, { public: true }).reason, /USDC for USDC/);
 });
 
 test("every combination resolves to one path, with words for each", () => {
