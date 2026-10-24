@@ -300,6 +300,42 @@ Every receive address the node has, the same shape on both daemon types:
            "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "symbol": "USDC", "decimals": 6 }
   ```
 
+**Litecoin.** A daemon started with `--chain ltc` swaps ZEC against LTC (docs/LITECOIN.md). Then
+`chains.btc` is `{ "coin": "ltc", "ticker": "LTC", … }`, `offer.pair` is `"ZEC/LTC"` and every
+`btc_*`/`*_sat` field holds litoshis (1e-8 LTC): the field names stay the same for either coin.
+Swap views carry `"coin": "ltc"`, addresses are Litecoin-encoded (`rltc1…`), and timeline labels
+and observer lines name the coin ("0.5 LTC", "fee 2000 lit", "the Litecoin transaction").
+A taker refuses a maker whose offer is for another coin, and a maker refuses a Propose for
+another coin; the coin is part of `SwapParams` and so of the transcript.
+
+**USDC or WETH on an EVM chain.** A daemon started with `--counter evm` swaps ZEC against an
+ERC-20 in FerryLock (docs/EVM.md). The same paths answer, in the same shape:
+- `chains.btc` is `{ "coin": "usdc" | "weth", "ticker": "USDC" | "WETH", "decimals": 6 | 18,
+  "network", "height", "time" }`, where `coin` is the configured token's symbol in lowercase,
+  `time` is the latest block's unix time and `network` is one of `anvil`, `ethereum`,
+  `optimism`, `base`, `arbitrum`, `sepolia`, `op-sepolia`, `base-sepolia`, `arbitrum-sepolia`,
+  or `evm-<chain id>` for an unlisted chain (`--evm-testnet-policy`).
+- `btc_sat` fields hold token base units (WETH: wei, so they pass 2^53 and lose precision as JS
+  numbers; fine for display). Swap amounts are u64. `balances.btc_sat` saturates at
+  18446744073709551615 (2^64 − 1; 100 WETH is 10^20 wei), and `balances.token_units` is the
+  exact balance as a decimal string.
+- `balances.eth_wei` is gas money.
+- `offer` has `pair: "ZEC/USDC"` (or `"ZEC/WETH"`), `rate_sat_per_zec` in token units per ZEC,
+  and `t1_secs`, `refund_secs` and `delta_secs` instead of block counts.
+- A `counter` block names the chain id, contract, token and our account.
+
+Swap views add `deadlines.t1_unix`, `t2_unix` and `now_unix` (block time) and a `counter` block
+(swap id, claimer, refunder, the share commitments `z_addr`/`b_addr`, `ready_signed`). The
+timeline reuses the Bitcoin kinds where the step is the same:
+- `btc_lock_broadcast` / `btc_lock_seen`: the FerryLock lock.
+- `redeem_adaptor_sent` / `redeem_adaptor_received`: B's Ready signature.
+- `btc_redeem_broadcast`: the claim.
+- `cancel_seen`: t1 passed without a claim.
+- `refund_broadcast` / `punish_broadcast`: the refund and the punish.
+
+It also adds `terms_agreed`, `claim_seen` and `refund_seen`. `GET /peer/offer` is an `EvmOffer`
+(`counter: "evm"`, `token_symbol`…), and the peer messages are EVM envelopes.
+
 ## Withdraw ("Send to my wallet")
 
 The node's owner takes coins out of the wallets this ferryd holds, to an address of their own:
@@ -399,42 +435,6 @@ Every withdrawal, newest first, in the shape above. `status`:
 `POST /api/withdraw/fault {"crash": "after_save" | "after_broadcast"}` (only with
 `--demo-faults`) makes the process exit at that point of the next withdrawal, to show that a
 restart neither loses nor repeats it.
-
-**Litecoin.** A daemon started with `--chain ltc` swaps ZEC against LTC (docs/LITECOIN.md). Then
-`chains.btc` is `{ "coin": "ltc", "ticker": "LTC", … }`, `offer.pair` is `"ZEC/LTC"` and every
-`btc_*`/`*_sat` field holds litoshis (1e-8 LTC): the field names stay the same for either coin.
-Swap views carry `"coin": "ltc"`, addresses are Litecoin-encoded (`rltc1…`), and timeline labels
-and observer lines name the coin ("0.5 LTC", "fee 2000 lit", "the Litecoin transaction").
-A taker refuses a maker whose offer is for another coin, and a maker refuses a Propose for
-another coin; the coin is part of `SwapParams` and so of the transcript.
-
-**USDC or WETH on an EVM chain.** A daemon started with `--counter evm` swaps ZEC against an
-ERC-20 in FerryLock (docs/EVM.md). The same paths answer, in the same shape:
-- `chains.btc` is `{ "coin": "usdc" | "weth", "ticker": "USDC" | "WETH", "decimals": 6 | 18,
-  "network", "height", "time" }`, where `coin` is the configured token's symbol in lowercase,
-  `time` is the latest block's unix time and `network` is one of `anvil`, `ethereum`,
-  `optimism`, `base`, `arbitrum`, `sepolia`, `op-sepolia`, `base-sepolia`, `arbitrum-sepolia`,
-  or `evm-<chain id>` for an unlisted chain (`--evm-testnet-policy`).
-- `btc_sat` fields hold token base units (WETH: wei, so they pass 2^53 and lose precision as JS
-  numbers; fine for display). Swap amounts are u64. `balances.btc_sat` saturates at
-  18446744073709551615 (2^64 − 1; 100 WETH is 10^20 wei), and `balances.token_units` is the
-  exact balance as a decimal string.
-- `balances.eth_wei` is gas money.
-- `offer` has `pair: "ZEC/USDC"` (or `"ZEC/WETH"`), `rate_sat_per_zec` in token units per ZEC,
-  and `t1_secs`, `refund_secs` and `delta_secs` instead of block counts.
-- A `counter` block names the chain id, contract, token and our account.
-
-Swap views add `deadlines.t1_unix`, `t2_unix` and `now_unix` (block time) and a `counter` block
-(swap id, claimer, refunder, the share commitments `z_addr`/`b_addr`, `ready_signed`). The
-timeline reuses the Bitcoin kinds where the step is the same:
-- `btc_lock_broadcast` / `btc_lock_seen`: the FerryLock lock.
-- `redeem_adaptor_sent` / `redeem_adaptor_received`: B's Ready signature.
-- `btc_redeem_broadcast`: the claim.
-- `cancel_seen`: t1 passed without a claim.
-- `refund_broadcast` / `punish_broadcast`: the refund and the punish.
-
-It also adds `terms_agreed`, `claim_seen` and `refund_seen`. `GET /peer/offer` is an `EvmOffer`
-(`counter: "evm"`, `token_symbol`…), and the peer messages are EVM envelopes.
 
 ## POST /api/swaps
 
