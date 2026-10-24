@@ -5,8 +5,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REMOTE_DIR="${FERRY_REMOTE_DIR:-ferry}"
-COMPOSE="docker compose -f infra/deploy/docker-compose.yml --env-file infra/deploy/.env"
-PROJECT=ferry
+PROJECT="${FERRY_COMPOSE_PROJECT:-ferry}"
+COMPOSE="docker compose -p $PROJECT -f infra/deploy/docker-compose.yml --env-file infra/deploy/.env"
 LOCAL_TESTNET="${FERRY_TESTNET_DIR:-$ROOT/.testnet}"
 LOCAL_SIGNET_RPC="${LOCAL_SIGNET_RPC:-http://127.0.0.1:38332}"
 
@@ -69,7 +69,7 @@ ensure_env() {
     for k in BTC_RPC_PASS FERRY_Z_TOKEN FERRY_B_TOKEN; do
       if grep -q "^$k=$" "$f"; then
         v=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d " \n")
-        sed -i "s/^$k=$/$k=$v/" "$f"
+        umask 077; sed "s/^$k=$/$k=$v/" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
       fi
     done'
   if remote 'grep -q "^DOMAIN=ferry.example.com$" infra/deploy/.env'; then
@@ -188,6 +188,11 @@ bad = [r for r in res if not r.get("success")]
 print("  %d imported, %d failed%s" % (len(res) - len(bad), len(bad), (": " + json.dumps(bad[0].get("error"))) if bad else ""))'
     rm -f "$tmp"
     if [ -n "$label_addr" ]; then
+      # ferryd shows the wallet's "ferry-funding" address: make it the migrated one only.
+      for other in $(btc_cli "-rpcwallet=$wallet getaddressesbylabel ferry-funding" 2>/dev/null \
+        | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)))' 2>/dev/null); do
+        [ "$other" = "$label_addr" ] || btc_cli "-rpcwallet=$wallet setlabel $other \"\"" >/dev/null
+      done
       btc_cli "-rpcwallet=$wallet setlabel $label_addr ferry-funding" >/dev/null && log "  funding address $label_addr kept"
     fi
   done

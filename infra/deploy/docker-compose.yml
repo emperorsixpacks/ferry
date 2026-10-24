@@ -146,6 +146,7 @@ services:
       TRUST_PROXY: "1"
       DEMO_MAX_ZAT: ${DEMO_MAX_ZAT:-50000000}
       DEMO_RATE_PER_HOUR: ${DEMO_RATE_PER_HOUR:-3}
+      DEMO_SWAPS_PER_HOUR: ${DEMO_SWAPS_PER_HOUR:-12}
       DEMO_FAULTS: ${DEMO_FAULTS:-0}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]

@@ -129,8 +129,8 @@ T2 = 6 blocks after the cancel. If something stalls, the swap refunds by itself,
 protocol working.
 
 The public UI is guarded by `web/server/prod.mjs`: visitors can only read status and start a swap
-on Z. Starts are capped at `DEMO_MAX_ZAT` (0.5 ZEC), one active swap at a time and
-`DEMO_RATE_PER_HOUR` per IP.
+on Z. Starts are capped at `DEMO_MAX_ZAT` (0.5 ZEC), one active swap at a time,
+`DEMO_RATE_PER_HOUR` per IP and `DEMO_SWAPS_PER_HOUR` across all visitors.
 
 ## 7. Operations
 
