@@ -8,6 +8,7 @@ import { roughDuration, typicalSeconds } from "@/swap/timing";
 import { Layout } from "../components/Layout";
 import { PairLogo, TokenLogo } from "../components/Logos";
 import { PartnerList } from "../components/MakerList";
+import { NearCard } from "../components/NearCard";
 import { RouteCard } from "../components/RouteCard";
 import { CoinPill, Fact, Panel, Section, amountSize, capital } from "../components/SwapParts";
 import { RoutePicker, TokenPicker, tokenSubtitle, type Token } from "../components/TokenPicker";
@@ -15,6 +16,7 @@ import { Sheet } from "../components/ui/sheet";
 import { cn } from "../lib/utils";
 import { useLocal } from "../lib/daemon";
 import { capacity, counterFor, liveQuote, quoteOf, useMakers, type Makers, type Quote } from "../lib/makers";
+import { isActive as nearActive, nearSummary, storeNear, storedNear, useNear } from "../lib/near";
 import { pairName, storeRoute, storedRoute } from "../lib/pairs";
 import { plainSummary } from "../lib/progress";
 import { secondsLeft, useQuotes, withFirm } from "../lib/quotes";
@@ -32,6 +34,10 @@ import { canRoute, isRunning, legSwapIds, routeSummary, useRoutes } from "../lib
 // too, with shielded ZEC on top and the coins that can go through it below. Picking one turns the
 // card into a private swap (RouteCard), coin → shielded ZEC → coin; picking ZEC again turns it back.
 // Without a router none of this shows: the ZEC pill stays a plain label.
+//
+// With NEAR Intents on the server, the coin picker also lists its assets ("More via NEAR Intents").
+// Picking one turns the card into a NEAR swap (NearCard): Ferry swaps the ZEC for a coin it supports
+// and NEAR Intents carries it on, or the other way round; picking one of Ferry's coins turns it back.
 
 // what the ZEC lock's network fee needs on top of the amount (ferry-zec's SEND_FEE_RESERVE)
 const ZEC_FEE_RESERVE = 50_000;
@@ -50,21 +56,62 @@ function useRouteChoice(legs: RouteLegs | null): [Route | null, (r: Route | null
   return [choice && canRoute(legs, choice.from, choice.to) ? choice : null, set];
 }
 
+// The NEAR Intents asset on the card, if any: the viewer's pick, while the server lists it.
+function useNearChoice(): [string | null, (asset: string | null) => void] {
+  const near = useNear();
+  const [choice, setChoice] = useState<string | null>(storedNear);
+  const set = (a: string | null) => {
+    setChoice(a);
+    storeNear(a);
+  };
+  // while the list loads, keep the pick; once it's there, only what it lists
+  const ok = !!choice && (near.info === undefined || (!!near.info && !!near.byId[choice]));
+  return [ok ? choice : null, set];
+}
+
 export function AppHome() {
   const d = useLocal();
   const routes = useRoutes();
-  const [route, setRoute] = useRouteChoice(routes.legs);
-  // a private swap's two swaps are the private swap's: its banner, not theirs
+  const near = useNear();
+  const [route, setRouteChoice] = useRouteChoice(routes.legs);
+  const [nearAsset, setNearAsset] = useNearChoice();
+  // one kind of card at a time: a private swap, a NEAR swap, or a plain one
+  const setRoute = (r: Route | null) => {
+    setRouteChoice(r);
+    if (r) setNearAsset(null);
+  };
+  const setNear = (a: string | null) => {
+    setNearAsset(a);
+    if (a) setRouteChoice(null);
+  };
+  // a private swap's two swaps are the private swap's: its banner, not theirs; a NEAR swap's Ferry
+  // swap likewise
   const legs = legSwapIds(routes.list);
+  for (const j of near.jobs) for (const id of [j.ferry.swap_id, ...j.ferry.earlier]) if (id) legs.add(id);
   const live = d.list.find((s) => !s.outcome && !s.route && !legs.has(s.id));
   const moving = routes.list.find(isRunning);
   const holding = routes.list.find((v) => v.state === "holding");
+  const nearLive = near.jobs.find(nearActive);
   const blocked = moving ? "Finish your private swap first." : live ? "Finish the swap in progress first." : null;
   return (
     <Layout>
       <div className="mx-auto w-full max-w-[480px]">
-        {moving ? <RouteBanner route={moving} /> : live ? <LiveBanner swap={live} status={d.status} /> : holding ? <RouteBanner route={holding} /> : null}
-        {route ? <RouteCard from={route.from} to={route.to} onChange={setRoute} blocked={blocked} /> : <SwapCard status={d.status} blocked={blocked} onRoute={routes.legs ? setRoute : null} />}
+        {moving ? (
+          <RouteBanner route={moving} />
+        ) : live ? (
+          <LiveBanner swap={live} status={d.status} />
+        ) : nearLive ? (
+          <Banner to={`/app/near/${nearLive.id}`} title={nearLive.state === "deposit" ? "A swap is waiting for your deposit" : nearLive.state === "holding" ? "Your NEAR Intents swap is waiting for you" : "You have a swap in progress"} line={nearSummary(nearLive)} pulse={nearLive.state !== "holding"} />
+        ) : holding ? (
+          <RouteBanner route={holding} />
+        ) : null}
+        {route ? (
+          <RouteCard from={route.from} to={route.to} onChange={setRoute} blocked={blocked} />
+        ) : nearAsset ? (
+          <NearCard asset={nearAsset} onChange={setNear} blocked={blocked} />
+        ) : (
+          <SwapCard status={d.status} blocked={blocked} onRoute={routes.legs ? setRoute : null} onNear={near.info?.available ? setNear : null} />
+        )}
       </div>
     </Layout>
   );
@@ -101,7 +148,7 @@ function RouteBanner({ route }: { route: RouteView }) {
   return <Banner to={`/app/route/${route.id}`} title={running ? "You have a private swap in progress" : "Your private swap is waiting for you"} line={routeSummary(route)} pulse={running} />;
 }
 
-function SwapCard({ status, blocked: elsewhere, onRoute }: { status: Status | null; blocked: string | null; onRoute: ((r: Route) => void) | null }) {
+function SwapCard({ status, blocked: elsewhere, onRoute, onNear }: { status: Status | null; blocked: string | null; onRoute: ((r: Route) => void) | null; onNear: ((asset: string) => void) | null }) {
   const { role, dir, bt, daemon, pair, canFlip, chooseDirection } = useLocal();
   const buying = dir === "buy";
   const makers = useMakers();
@@ -366,7 +413,7 @@ function SwapCard({ status, blocked: elsewhere, onRoute }: { status: Status | nu
         <span>{buying ? `Your ZEC arrives shielded. If the swap stops, your ${ticker} comes back.` : "Your ZEC stays shielded. If the swap stops, your coins come back."}</span>
       </p>
 
-      <TokenPicker open={picker} onClose={() => setPicker(false)} makers={makers} role={role} />
+      <TokenPicker open={picker} onClose={() => setPicker(false)} makers={makers} role={role} zat={valid ? zat : 1e8} onNear={onNear ?? undefined} />
       {onRoute ? (
         <RoutePicker
           open={zecPicker}

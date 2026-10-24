@@ -158,6 +158,84 @@ export const ChainLogo = ({ id, size = 16, className, label }: { id: ChainMarkId
   <Svg mark={CHAINS[id]} size={size} className={className} label={label} />
 );
 
+// ------------------------------------------------------------------------------------------------
+// NEAR Intents' assets: Ferry's own marks where there is one (BTC, LTC, USDC, ETH, WETH, ZEC), else
+// a monogram in the coin's own colour; the chain's mark as a badge when the token lives on a chain
+// other than its home one (USDC on Solana, ETH on Base).
+
+const OWN: Record<string, TokenId> = { BTC: "btc", LTC: "ltc", USDC: "usdc", ETH: "eth", WETH: "weth", ZEC: "zec" };
+const BRAND: Record<string, string> = {
+  SOL: "#9945FF",
+  USDT: "#26A17B",
+  wNEAR: "#111111",
+  NEAR: "#111111",
+  XRP: "#23292F",
+  DOGE: "#C2A633",
+  TRX: "#EB0029",
+  BNB: "#F0B90B",
+  TON: "#0098EA",
+  SUI: "#4DA2FF",
+  ADA: "#0033AD",
+  AVAX: "#E84142",
+  POL: "#8247E5",
+  XLM: "#14182B",
+  APT: "#111111",
+  DAI: "#F5AC37",
+  ARB: "#213147",
+  OP: "#FF0420",
+  BCH: "#0AC18E",
+  DASH: "#008CE7",
+  cbBTC: "#0052FF",
+  WBTC: "#F09242",
+};
+// a token's home chain: no badge there
+const HOME: Record<string, string> = { BTC: "btc", LTC: "ltc", ETH: "eth", SOL: "sol", wNEAR: "near", NEAR: "near", XRP: "xrp", DOGE: "doge", TRX: "tron", TON: "ton", SUI: "sui", ADA: "cardano", APT: "aptos", XLM: "stellar", AVAX: "avax", POL: "pol", BNB: "bsc", BCH: "bch", DASH: "dash", ZEC: "zec" };
+const CHAIN_MARK: Record<string, ChainMarkId> = { btc: "bitcoin", ltc: "litecoin", eth: "ethereum", base: "base", arb: "arbitrum", op: "optimism" };
+const CHAIN_SYMBOL: Record<string, string> = { sol: "SOL", near: "NEAR", bsc: "BNB", tron: "TRX", xrp: "XRP", doge: "DOGE", ton: "TON", sui: "SUI", aptos: "APT", cardano: "ADA", stellar: "XLM", avax: "AVAX", pol: "POL", bch: "BCH", dash: "DASH" };
+
+function hue(s: string): number {
+  let h = 0;
+  for (const c of s) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return h;
+}
+
+// a disc with up to three letters of the symbol
+export function Monogram({ symbol, size = 32, className }: { symbol: string; size?: number; className?: string }) {
+  const text = symbol.replace(/^w(?=[A-Z])/, "").slice(0, symbol.length > 4 ? 3 : 4);
+  const fill = BRAND[symbol] ?? `hsl(${hue(symbol)} 45% 42%)`;
+  const font = text.length >= 4 ? 8.5 : text.length === 3 ? 10.5 : 13;
+  return (
+    <svg viewBox="0 0 32 32" width={size} height={size} className={cn("shrink-0", className)} aria-hidden>
+      <circle cx="16" cy="16" r="16" fill={fill} />
+      <text x="16" y="16.5" textAnchor="middle" dominantBaseline="middle" fill="#fff" fontSize={font} fontWeight={700} fontFamily="Inter, system-ui, sans-serif" letterSpacing="-0.02em">
+        {text}
+      </text>
+    </svg>
+  );
+}
+
+function ChainBadge({ chain, size }: { chain: string; size: number }) {
+  const mark = CHAIN_MARK[chain];
+  if (mark) return <ChainLogo id={mark} size={size} />;
+  return <Monogram symbol={CHAIN_SYMBOL[chain] ?? chain.toUpperCase()} size={size} />;
+}
+
+export function NearTokenLogo({ symbol, chain, size = 32, className }: { symbol: string; chain: string; size?: number; className?: string }) {
+  const own = OWN[symbol];
+  const badge = Math.round(size * 0.46);
+  const showBadge = HOME[symbol] !== chain;
+  return (
+    <span className={cn("relative inline-flex shrink-0", className)} style={{ width: size, height: size }}>
+      {own ? <TokenLogo id={own} size={size} /> : <Monogram symbol={symbol} size={size} />}
+      {showBadge ? (
+        <span className="absolute -right-1 -bottom-1 inline-flex rounded-full bg-white p-[1.5px]" aria-hidden>
+          <ChainBadge chain={chain} size={badge} />
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 // What a pair pays out, with its chain's badge for a token: USDC on Base, ETH on Arbitrum.
 export function PairLogo({ pair, size = 32, className }: { pair: PairId | "zec"; size?: number; className?: string }) {
   if (pair === "zec") return <TokenLogo id="zec" size={size} className={className} />;

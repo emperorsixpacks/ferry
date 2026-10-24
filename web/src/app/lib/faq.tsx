@@ -115,8 +115,41 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
         a: "The swap contract works with tokens, so ETH comes as WETH: ETH in token form, always worth exactly 1 ETH, which most wallets unwrap in one step. One swap can carry up to about 18.4 WETH.",
       },
       {
+        q: "What about Solana, USDT, NEAR and the rest?",
+        a: "The coin list ends with “More via NEAR Intents”: about two hundred assets on over thirty chains, reached through NEAR Intents. Ferry swaps your shielded ZEC for a coin it supports, and NEAR Intents carries that on to the asset you picked, or the other way round. See NEAR Intents below.",
+      },
+      {
         q: "Can I buy ZEC instead?",
         a: "Yes. Press the arrow between Sell and Buy on the swap page. You pay with the Bitcoin, Litecoin or tokens in your Ferry node, and the ZEC arrives shielded in its wallet. You lock your coins first; if your partner never locks the ZEC, your coins come back after the deadline. Ferry remembers which way you last swapped.",
+      },
+    ],
+  },
+  {
+    title: "NEAR Intents",
+    items: [
+      {
+        q: "What does “via NEAR Intents” mean?",
+        a: "NEAR Intents is a cross-chain swap network that reaches assets Ferry doesn't swap itself. A swap marked “via NEAR Intents” has two parts. Selling ZEC: Ferry swaps your shielded ZEC for a coin it supports (USDC on Base, say) and pays it straight into a NEAR Intents deposit address; NEAR Intents swaps that for the asset you picked and sends it to the address you gave. Buying ZEC: you send your asset to a NEAR Intents deposit address, NEAR Intents delivers the coin to your Ferry node, and Ferry buys the ZEC with it. The swap card picks the route that gives you the most.",
+      },
+      {
+        q: "Does my ZEC go to NEAR Intents?",
+        a: "No. Ferry never sends ZEC to NEAR Intents (its ZEC deposit addresses are transparent, which would undo the privacy). Your ZEC moves only inside Zcash's shielded pool, in an atomic swap with a Ferry partner, exactly as in any other Ferry swap. Only the other coin goes through NEAR Intents.",
+      },
+      {
+        q: "Who do I trust for the NEAR part?",
+        a: "NEAR Intents. The Ferry part is atomic: nobody can take your coins. The NEAR part runs on NEAR Intents' bridges and solvers, on public chains: the deposit address, the amounts and your destination address are visible to anyone, and you rely on NEAR Intents to deliver or refund. Ferry's server checks that every NEAR Intents quote is signed by NEAR Intents before it uses it, and keeps the signed quote, which is your record if you ever need to dispute a swap. Ferry's privacy story covers the ZEC side; the NEAR side is as private as any public swap.",
+      },
+      {
+        q: "What if the NEAR part fails?",
+        a: "You get coins back either way. Selling: if the Ferry swap stops, your ZEC comes back to your shielded wallet and nothing reaches NEAR Intents; if NEAR Intents can't fill the swap at the quoted price, it refunds the coin to your own Ferry node. Buying: if NEAR Intents can't fill it, it refunds your asset to the refund address you gave; if the Ferry swap then stops, the coin stays in your Ferry node, and you can try the ZEC again or keep it.",
+      },
+      {
+        q: "Why only on my own node, and only on mainnet?",
+        a: "A NEAR swap pays out to an address you type, so it has to run on a Ferry node with your own coins, never on someone else's demo. And NEAR Intents runs on the main networks only. On the public demo, which runs on test networks, you can see NEAR Intents' assets and live quotes, but not swap them.",
+      },
+      {
+        q: "What does the NEAR part cost?",
+        a: "NEAR Intents' own fees, already counted in the quote: what the swap card shows is what you get. A server without a NEAR Intents partner key pays about 0.25% more. Ferry adds nothing on top.",
       },
     ],
   },
