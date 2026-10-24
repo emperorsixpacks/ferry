@@ -187,6 +187,9 @@ impl ApiError {
 
     /// A machine-readable `code` for the error body, where callers must tell errors apart.
     pub fn code(&self) -> Option<&'static str> {
+        if self.is_busy() {
+            return Some(crate::capacity::BUSY);
+        }
         (self.0 == 409 && self.1.starts_with(LABEL_IN_USE_PREFIX)).then_some(LABEL_IN_USE)
     }
 }
@@ -195,31 +198,38 @@ impl ApiError {
 pub struct Held<'a> {
     pub id: &'a str,
     pub route: Option<&'a str>,
-    pub finished: bool,
 }
 
-/// The swap a `POST /api/swaps` is starting, if any: one at a time, like the swaps themselves.
-/// Starting takes a while (the maker is asked, our wallet is checked), and until the record is
-/// in memory nothing else shows that a swap is on its way. A withdrawal (crate::withdraw) takes
-/// the same slot: its free-balance check must not race a swap's funds check, so neither starts
-/// while the other runs (and a maker takes no proposal meanwhile).
+/// The swaps being started (`POST /api/swaps`) and taken (a maker's Propose), and the
+/// withdrawal being sent. Several swaps run at once (crate::capacity), but each one's funds
+/// check and the moment its record lands in memory belong together: two checks that ran side by
+/// side would both count the same free coins. So one **turn** at a time:
+/// - a start waits for its turn (several starts queue, each takes a few seconds); its funds are
+///   checked in its turn and held by its record from then on;
+/// - a maker's Propose takes the turn only if it is free, and is otherwise refused as busy (its
+///   taker gets an answer right away and tries again);
+/// - a withdrawal and a start exclude each other (its free-balance check must not race a swap's
+///   funds check), and a maker takes no proposal while a withdrawal is being sent.
+///
+/// Swaps that are already running stop none of these: their funds are held instead.
 #[derive(Default)]
 pub struct Starts {
     slot: Mutex<Slot>,
+    turn: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
 struct Slot {
-    /// `Some(label)` while a start runs (`Some(None)`: one without a route label).
-    start: Option<Option<String>>,
+    /// The starts waiting or running, by route label (None: one without a label).
+    starts: Vec<Option<String>>,
     /// A withdrawal is being sent.
     withdrawing: bool,
 }
 
 impl Starts {
-    /// Claim the slot for a start with `label`. Called with the daemon's state locked, `held`
-    /// being every swap in it. 409 when the label is taken (by a swap or by the start in
-    /// progress), when another start is in progress, or when a swap is running.
+    /// Register a start with `label`, before its turn (see [`StartGuard::turn`]). Called with
+    /// the daemon's state locked, `held` being every swap in it. 409 when the label is taken (by
+    /// a swap or by a start in progress), or while a withdrawal is being sent.
     pub fn begin<'s, 'a>(
         &'s self,
         label: Option<&str>,
@@ -234,18 +244,11 @@ impl Starts {
                     h.id
                 )));
             }
-            if slot
-                .start
-                .as_ref()
-                .is_some_and(|s| s.as_deref() == Some(label))
-            {
+            if slot.starts.iter().any(|s| s.as_deref() == Some(label)) {
                 return Err(ApiError::label_in_use(format!(
                     "a swap with the route label {label} is being started"
                 )));
             }
-        }
-        if slot.start.is_some() {
-            return Err(ApiError(409, "Another swap is being started".into()));
         }
         if slot.withdrawing {
             return Err(ApiError(
@@ -253,11 +256,20 @@ impl Starts {
                 "A withdrawal is being sent; try again in a moment".into(),
             ));
         }
-        if held.iter().any(|h| !h.finished) {
-            return Err(ApiError(409, "A swap is already in progress".into()));
+        slot.starts.push(label.map(str::to_string));
+        Ok(StartGuard {
+            starts: self,
+            label: label.map(str::to_string),
+        })
+    }
+
+    /// A maker's turn, for one Propose: None (busy) while a start or another Propose has it, or
+    /// while a withdrawal is being sent.
+    pub fn try_turn(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        if self.slot.lock().expect("not poisoned").withdrawing {
+            return None;
         }
-        slot.start = Some(label.map(str::to_string));
-        Ok(StartGuard(self))
+        self.turn.try_lock().ok()
     }
 
     /// Claim the slot for a withdrawal: 409 while a swap is being started or another
@@ -265,7 +277,7 @@ impl Starts {
     /// are held instead, crate::withdraw).
     pub fn begin_withdrawal(&self) -> Result<WithdrawGuard<'_>, ApiError> {
         let mut slot = self.slot.lock().expect("not poisoned");
-        if slot.start.is_some() {
+        if !slot.starts.is_empty() {
             return Err(ApiError(
                 409,
                 "A swap is being started; try again once it has started".into(),
@@ -281,20 +293,34 @@ impl Starts {
         Ok(WithdrawGuard(self))
     }
 
-    /// A start or a withdrawal is in progress (a maker must not take a proposal meanwhile).
+    /// A start or a withdrawal is in progress.
+    #[cfg(test)]
     pub fn busy(&self) -> bool {
         let slot = self.slot.lock().expect("not poisoned");
-        slot.start.is_some() || slot.withdrawing
+        !slot.starts.is_empty() || slot.withdrawing
     }
 }
 
-/// Frees the slot when the start ends, however it ends (an error, or the request dropped).
-pub struct StartGuard<'s>(&'s Starts);
+/// A registered start. Its label stays taken until the request ends, however it ends (an
+/// error, or the request dropped).
+pub struct StartGuard<'s> {
+    starts: &'s Starts,
+    label: Option<String>,
+}
+
+impl<'s> StartGuard<'s> {
+    /// Wait for this start's turn: starts queue in order (tokio's mutex is fair).
+    pub async fn turn(&self) -> tokio::sync::MutexGuard<'s, ()> {
+        self.starts.turn.lock().await
+    }
+}
 
 impl Drop for StartGuard<'_> {
     fn drop(&mut self) {
-        if let Ok(mut slot) = self.0.slot.lock() {
-            slot.start = None;
+        if let Ok(mut slot) = self.starts.slot.lock() {
+            if let Some(i) = slot.starts.iter().position(|s| *s == self.label) {
+                slot.starts.remove(i);
+            }
         }
     }
 }
@@ -399,12 +425,16 @@ mod tests {
     }
 
     /// A withdrawal and a swap start never run together: each refuses while the other runs,
-    /// and a maker is busy for both. Running swaps do not stop a withdrawal.
+    /// and a maker gets no turn while a withdrawal is sent. Running swaps stop neither.
     #[test]
     fn withdrawals_and_starts_exclude_each_other() {
         let starts = Starts::default();
         let w = starts.begin_withdrawal().unwrap();
         assert!(starts.busy());
+        assert!(
+            starts.try_turn().is_none(),
+            "no Propose while a withdrawal is sent"
+        );
         let e = starts.begin(None, []).err().unwrap();
         assert_eq!(e.0, 409);
         assert!(e.1.contains("withdrawal is being sent"), "{}", e.1);
@@ -470,50 +500,52 @@ mod tests {
         assert!(none.check_price(Role::Z, 0, "x", show).is_ok());
     }
 
-    fn held<'a>(id: &'a str, route: Option<&'a str>, finished: bool) -> Held<'a> {
-        Held {
-            id,
-            route,
-            finished,
-        }
+    fn held<'a>(id: &'a str, route: Option<&'a str>) -> Held<'a> {
+        Held { id, route }
     }
 
-    /// One label, one swap: a label carried by any swap (even a finished one), or by the start
-    /// in progress, is a 409 with the label code; so is any other start meanwhile (plainly).
-    #[test]
-    fn one_start_at_a_time_and_one_swap_per_label() {
+    /// One label, one swap: a label carried by any swap (running or finished), or by a start in
+    /// progress, is a 409 with the label code. Other starts are not refused: they wait for their
+    /// turn, in order. A maker's Propose takes the turn only when it is free.
+    #[tokio::test]
+    async fn starts_queue_and_one_swap_per_label() {
+        use std::time::Duration;
         let starts = Starts::default();
         let g = starts.begin(Some("r1/1"), []).unwrap();
         assert!(starts.busy());
         let again = starts.begin(Some("r1/1"), []).err().unwrap();
         assert_eq!((again.0, again.code()), (409, Some(LABEL_IN_USE)));
-        let other = starts.begin(Some("r2/1"), []).err().unwrap();
-        assert_eq!((other.0, other.code()), (409, None));
-        assert!(starts.begin(None, []).is_err());
-        drop(g);
+        let other = starts.begin(Some("r2/1"), []).unwrap();
+        let plain = starts.begin(None, []).unwrap();
+        let first = g.turn().await;
+        assert!(starts.try_turn().is_none(), "a Propose meanwhile is busy");
+        let waits = tokio::time::timeout(Duration::from_millis(50), other.turn()).await;
+        assert!(waits.is_err(), "the second start waits for the first");
+        drop(first);
+        drop(other.turn().await);
+        drop((g, other));
+        assert!(starts.busy(), "the plain start is still registered");
+        drop(plain);
         assert!(!starts.busy());
+        let propose = starts.try_turn().expect("free");
+        let waits = tokio::time::timeout(Duration::from_millis(50), async {
+            let s = starts.begin(None, []).unwrap();
+            drop(s.turn().await);
+        })
+        .await;
+        assert!(waits.is_err(), "a start waits for a Propose's turn");
+        drop(propose);
 
-        // The swap now exists (finished or not): its label stays taken.
-        for finished in [false, true] {
-            let e = starts
-                .begin(Some("r1/1"), [held("ab", Some("r1/1"), finished)])
-                .err()
-                .unwrap();
-            assert_eq!(e.code(), Some(LABEL_IN_USE));
-            assert!(e.1.contains("swap ab"), "{}", e.1);
-        }
-        // A running swap without the label: busy, not a label conflict.
+        // The swap now exists: its label stays taken, whatever its state.
         let e = starts
-            .begin(Some("r1/2"), [held("ab", Some("r1/1"), false)])
+            .begin(Some("r1/1"), [held("ab", Some("r1/1"))])
             .err()
             .unwrap();
-        assert_eq!((e.0, e.code()), (409, None));
-        // Finished swaps with other labels are no obstacle.
+        assert_eq!(e.code(), Some(LABEL_IN_USE));
+        assert!(e.1.contains("swap ab"), "{}", e.1);
+        // Swaps with other labels, running or not, are no obstacle.
         assert!(starts
-            .begin(
-                Some("r1/2"),
-                [held("ab", Some("r1/1"), true), held("cd", None, true)]
-            )
+            .begin(Some("r1/2"), [held("ab", Some("r1/1")), held("cd", None)])
             .is_ok());
         assert!(
             !starts.busy(),

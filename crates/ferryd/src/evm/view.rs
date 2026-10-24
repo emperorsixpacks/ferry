@@ -16,6 +16,11 @@ pub struct EvmStatusView {
     pub role: Role,
     pub name: String,
     pub balances: Balances,
+    /// What new swaps (and withdrawals) may use: the balances less what live swaps hold
+    /// (tokens, gas, and for ZEC the notes their locks may take; crate::capacity).
+    pub free: Balances,
+    /// Several swaps at once: the cap, what is live, how many more the node takes now.
+    pub capacity: crate::capacity::CapacityView,
     pub chains: Chains,
     pub offer: OfferView,
     pub counter: CounterInfo,
@@ -88,6 +93,9 @@ pub struct OfferView {
     pub rate_updated_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liquidity_zat: Option<u64>,
+    /// As maker: how many more swaps we take right now (crate::capacity); 0: busy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub free_slots: Option<u32>,
     pub paused: bool,
     /// Started with --maker-offer: it answers proposals, paused or not. A UI need not offer a
     /// maker as one of the user's own daemons to start swaps on.
@@ -110,6 +118,7 @@ impl OfferView {
             rate_source: o.rate_source.clone(),
             rate_updated_at: o.rate_updated_at,
             liquidity_zat: o.liquidity.map(|l| l.zec_zat),
+            free_slots: o.free_slots,
             paused: o.paused,
             maker: o.making || o.paused,
         }

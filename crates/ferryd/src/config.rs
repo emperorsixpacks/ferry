@@ -78,9 +78,16 @@ pub struct Cli {
     /// confirmation minimums drop to 1.
     #[arg(long)]
     pub dev_policy: bool,
-    /// A swap that has locked nothing after this long is aborted, freeing the maker's slot.
+    /// A swap that has locked nothing after this long is aborted, freeing the maker's slot. A
+    /// swap whose counterparty has locked nothing by then no longer counts against
+    /// --max-swaps (crate::capacity).
     #[arg(long, default_value_t = 1800)]
     pub negotiation_timeout_secs: u64,
+    /// How many swaps this node runs at once, as maker and taker together (default: 4 on test
+    /// networks, 2 on a main network). A Propose or a start beyond it, or one whose funds are
+    /// held by swaps in progress, is refused as busy (409, "code": "busy").
+    #[arg(long, env = "FERRY_MAX_SWAPS", value_parser = crate::capacity::parse_max_swaps)]
+    pub max_swaps: Option<u32>,
     /// URL the counterparty uses to reach our peer listener (default http://<listen>).
     #[arg(long)]
     pub public_url: Option<String>,
@@ -340,6 +347,7 @@ impl Cli {
             rate_source: None,
             rate_updated_at: None,
             liquidity: None,
+            free_slots: None,
             paused: false,
             quote_key: None,
             features: vec![crate::route::PAYOUT_FEATURE.into()],
@@ -447,9 +455,13 @@ pub struct Offer {
     /// Unix seconds of the price a live rate comes from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_updated_at: Option<u64>,
-    /// How much the maker can fill right now, from its balance (capped at `max_zat`).
+    /// How much the maker can fill right now, from its free balance (what its swaps in
+    /// progress don't hold), capped at `max_zat`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liquidity: Option<Liquidity>,
+    /// How many more swaps the maker takes right now (crate::capacity); 0: busy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_slots: Option<u32>,
     /// The live rate went stale: `making` is false until a feed answers again.
     #[serde(default)]
     pub paused: bool,

@@ -135,8 +135,12 @@ pub struct EvmOffer {
     pub rate_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_updated_at: Option<u64>,
+    /// What the maker's free balance fills right now (crate::capacity).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liquidity: Option<crate::config::Liquidity>,
+    /// How many more swaps the maker takes right now (crate::capacity); 0: busy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_slots: Option<u32>,
     #[serde(default)]
     pub paused: bool,
     /// The key this maker signs firm quotes with (crate::quote; compressed secp256k1, hex).
@@ -540,6 +544,7 @@ mod tests {
             rate_source: None,
             rate_updated_at: None,
             liquidity: None,
+            free_slots: None,
             paused: false,
             quote_key: None,
         }
