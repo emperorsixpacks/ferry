@@ -24,6 +24,10 @@
 // Z takes payout_to (features: "payout"; MOCK_PAYOUT=0 leaves it out, as an older ferryd): its
 // redeem then pays into a 1Click deposit address, and the mock 1Click sees the deposit. What the
 // mock 1Click delivers to a party's own address (GET /api/addresses) is credited to it in BTC.
+// A route's second swap can pay into a deposit address too (the router's payout_to).
+//
+// MOCK_Z_LTC_PORT (unset: none) serves Z again as a Litecoin daemon (status and a regtest LTC
+// address), for a UI server that fronts it as the user's LTC node.
 
 import http from "node:http";
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
@@ -487,7 +491,7 @@ const near = NEAR_PORT
 
 // the mock router (mock/router.mjs), when MOCK_ROUTE_PORT is set
 const ROUTE_PORT = process.env.MOCK_ROUTE_PORT ? Number(process.env.MOCK_ROUTE_PORT) : null;
-const router = ROUTE_PORT ? mockRouter({ swaps, newSwap: (...a) => newSwap(...a), chains, parties, inject: (s, role) => inject(s, role), makerOf, ms, speed: SPEED }) : null;
+const router = ROUTE_PORT ? mockRouter({ swaps, newSwap: (...a) => newSwap(...a), chains, parties, inject: (s, role) => inject(s, role), makerOf, ms, speed: SPEED, payout: PAYOUT }) : null;
 
 function inject(s, role) {
   const v = s.views[role];
@@ -539,25 +543,27 @@ function swapView(s, role) {
   };
 }
 
-function statusView(role) {
+// `coin` "ltc": the same party, as a Litecoin daemon would describe itself (MOCK_Z_LTC_PORT)
+function statusView(role, coin = null) {
   const p = parties[role];
   return {
     role,
     name: p.name,
     balances: { ...p.balances },
     chains: {
-      btc: { network: chains.btc.network, height: chains.btc.height },
+      btc: { network: chains.btc.network, height: chains.btc.height, ...(coin === "ltc" ? { coin: "ltc", ticker: "LTC" } : {}) },
       zec: { network: chains.zec.network, height: chains.zec.height, pool: chains.zec.pool },
     },
-    offer: { pair: "ZEC/BTC", rate_sat_per_zec: RATE, min_zat: 10000000, max_zat: 1000000000, fee_sat: FEE_SAT, t1_blocks: T1, t2_blocks: T2, btc_lock_confs: BTC_CONFS, zec_confs: ZEC_CONFS },
+    offer: { pair: coin === "ltc" ? "ZEC/LTC" : "ZEC/BTC", rate_sat_per_zec: RATE, min_zat: 10000000, max_zat: 1000000000, fee_sat: FEE_SAT, t1_blocks: T1, t2_blocks: T2, btc_lock_confs: BTC_CONFS, zec_confs: ZEC_CONFS },
     features: PAYOUT ? ["route", "payout"] : ["route"],
   };
 }
 
 // GET /api/addresses: where to fund this party (its BTC address is fixed for the mock's lifetime)
-function addressesView(role) {
+function addressesView(role, coin = null) {
   const p = parties[role];
-  return { role, name: p.name, btc: { coin: "btc", network: chains.btc.network, address: p.address }, zec: { address: `u${chains.zec.network}1mockwallet${Buffer.from(p.name).toString("hex")}` } };
+  const counter = coin === "ltc" ? { coin: "ltc", network: chains.btc.network, address: (p.ltcAddress ??= "rltc1q" + bech(38)) } : { coin: "btc", network: chains.btc.network, address: p.address };
+  return { role, name: p.name, btc: counter, zec: { address: `u${chains.zec.network}1mockwallet${Buffer.from(p.name).toString("hex")}` } };
 }
 
 const STARTED = now();
@@ -696,7 +702,7 @@ const clients = { Z: new Set(), B: new Set() };
 
 function pushEvents(role) {
   for (const c of clients[role]) {
-    const status = JSON.stringify(statusView(role));
+    const status = JSON.stringify(statusView(role, c.coin));
     if (status !== c.last.status) {
       c.last.status = status;
       c.res.write(`event: status\ndata: ${status}\n\n`);
@@ -735,14 +741,14 @@ function readBody(req) {
   });
 }
 
-function handler(role) {
+function handler(role, coin = null) {
   return async (req, res) => {
     const url = new URL(req.url, "http://x");
     const path = url.pathname;
     if (req.method === "OPTIONS") return send(res, 204, {});
 
-    if (req.method === "GET" && path === "/api/status") return send(res, 200, statusView(role));
-    if (req.method === "GET" && path === "/api/addresses") return send(res, 200, addressesView(role));
+    if (req.method === "GET" && path === "/api/status") return send(res, 200, statusView(role, coin));
+    if (req.method === "GET" && path === "/api/addresses") return send(res, 200, addressesView(role, coin));
 
     // the mock makers' public offers (ferryd's GET /peer/offer): B makers on B, Z makers on Z
     const maker = req.method === "GET" ? mockMakerAt(path, role) : undefined;
@@ -760,6 +766,13 @@ function handler(role) {
     // balances, so each story starts from the same wallet. Chains keep their heights.
     if (req.method === "POST" && path === "/api/_mock/refuse-next-lock") {
       refuseNextLock = true;
+      return send(res, 200, { ok: true });
+    }
+
+    // mock only: the starting balances again, every swap kept (one script running many swaps through
+    // the mock's one Z party, which is every partner's Z side too)
+    if (req.method === "POST" && path === "/api/_mock/balances") {
+      for (const r of ["Z", "B"]) parties[r].balances = { ...START[r] };
       return send(res, 200, { ok: true });
     }
 
@@ -833,7 +846,7 @@ function handler(role) {
         "access-control-allow-origin": "*",
       });
       res.write(": connected\n\n");
-      const c = { res, last: {} };
+      const c = { res, last: {}, coin };
       clients[role].add(c);
       pushEvents(role);
       const ping = setInterval(() => res.write(": ping\n\n"), 15000);
@@ -853,6 +866,14 @@ for (const role of ["Z", "B"]) {
   http.createServer(handler(role)).listen(port, "127.0.0.1", () => {
     console.log(`mock ferryd ${role} (${parties[role].name}) on http://127.0.0.1:${port}  speed x${SPEED}`);
   });
+}
+
+// MOCK_Z_LTC_PORT: Z again, describing itself as a Litecoin daemon (its status, a regtest LTC
+// address), so a UI server can front it as the user's LTC node (FERRY_LTC_URL): a private swap can
+// then hand LTC to NEAR Intents (its refunds come back to that address)
+if (process.env.MOCK_Z_LTC_PORT) {
+  const port = Number(process.env.MOCK_Z_LTC_PORT);
+  http.createServer(handler("Z", "ltc")).listen(port, "127.0.0.1", () => console.log(`mock ferryd Z as LTC on http://127.0.0.1:${port}`));
 }
 
 if (NEAR_PORT) {

@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ArrowRight, ArrowsLeftRight } from "@phosphor-icons/react";
-import { directionOf, getSwaps, isMine, pairChain, pairCoin, type Direction, type NearJob, type PairId, type RouteView, type Status, type SwapView } from "@/api";
+import { directionOf, getSwaps, isMine, pairChain, pairCoin, type ComboJob, type Direction, type NearJob, type PairId, type RouteView, type Status, type SwapView } from "@/api";
 import { coin, coinOf } from "@/format";
 import { navigate } from "@/router";
 import { phaseOf } from "@/swap/steps";
@@ -9,10 +9,10 @@ import { NearTokenLogo, PairLogo, TokenLogo } from "../components/Logos";
 import { NearMark } from "../components/TokenPicker";
 import { ToneBadge } from "../components/ui/badge";
 import { useLocal } from "../lib/daemon";
-import { chainName, jobIn, jobOut, nearWord, useNear } from "../lib/near";
+import { chainName, comboGot, comboIn, comboOut, comboWord, jobIn, jobOut, nearText, nearWord, useNear } from "../lib/near";
 import { pairName } from "../lib/pairs";
 import { STATUS_WORD, swapAmounts, wordsFor, type Words } from "../lib/progress";
-import { ROUTE_WORD, legSwapIds, routeAmounts, tickerOf, useRoutes, zecText } from "../lib/routes";
+import { ROUTE_WORD, legSwapIds, routeAmounts, tickerOf, unitsText, useRoutes, zecText } from "../lib/routes";
 
 // /app/activity: every swap the person started on their Ferry nodes, newest first, both ways
 // round (selling ZEC on their Z nodes, buying it on their B nodes) and across the coins this
@@ -38,7 +38,18 @@ interface Source {
   status: Status | null;
 }
 
-export function Activity() {
+export interface ActivityRow {
+  at: number;
+  key: string;
+  // still moving (or waiting for the person)
+  live: boolean;
+  row: ReactNode;
+}
+
+// Every swap of the person's, newest first, as rows: this page lists them all, the swap card's
+// "Recent activity" panel the latest few. Live: the followed daemon streams, the others are polled,
+// and private swaps and NEAR swaps come from their own providers.
+export function useActivityRows(): ActivityRow[] {
   const d = useLocal();
   // every daemon this server fronts, each once: the followed one included (it may not be probed yet)
   const sources: Source[] = [];
@@ -70,9 +81,12 @@ export function Activity() {
 
   const routes = useRoutes();
   const near = useNear();
-  // a private swap's own two swaps are in its row, and a NEAR swap's Ferry swap in its own
+  // a private swap's own two swaps are in its row, and a NEAR swap's Ferry swap in its own; a
+  // private swap with NEAR Intents at an end is one row, its route and swaps in it
   const seen = legSwapIds(routes.list);
   for (const j of near.jobs) for (const id of [j.ferry.swap_id, ...j.ferry.earlier]) if (id) seen.add(id);
+  const comboRoutes = new Set(near.combos.map((c) => c.route.id).filter(Boolean));
+  for (const c of near.combos) for (const id of c.route.swaps) seen.add(id);
   const items: Item[] = sources
     .flatMap((x) => {
       const followed = x.daemon === d.daemon;
@@ -82,19 +96,24 @@ export function Activity() {
       return swaps.filter((s) => isMine(s) && !s.route).map((swap) => ({ swap, pair: x.pair, dir: directionOf(swap.role), status: followed ? d.status : x.status, words }));
     })
     .filter((it) => !seen.has(it.swap.id) && !!seen.add(it.swap.id));
-  // swaps and private swaps together, newest first
-  const rows = [
-    ...items.map((it) => ({ at: Date.parse(it.swap.timeline[0]?.at ?? "") || 0, key: `${it.pair}:${it.swap.id}`, row: <Row item={it} onOpen={() => open(it)} /> })),
-    ...routes.list.map((v) => ({ at: v.created_at * 1000, key: v.id, row: <RouteRow route={v} /> })),
-    ...near.jobs.map((j) => ({ at: j.created_at * 1000, key: j.id, row: <NearRow job={j} /> })),
-  ].sort((x, y) => y.at - x.at);
-
   const open = (it: Item) => {
     if (it.pair !== d.pair) d.choosePair(it.pair, it.dir);
     if (it.dir !== d.dir) d.chooseDirection(it.dir);
     navigate(`/app/swap/${it.swap.id}`);
   };
+  const ended = (s: string) => ["done", "failed", "refunded", "expired"].includes(s);
 
+  // swaps and private swaps together, newest first
+  return [
+    ...items.map((it) => ({ at: Date.parse(it.swap.timeline[0]?.at ?? "") || 0, key: `${it.pair}:${it.swap.id}`, live: !it.swap.outcome, row: <Row item={it} onOpen={() => open(it)} /> })),
+    ...routes.list.filter((v) => !comboRoutes.has(v.id)).map((v) => ({ at: v.created_at * 1000, key: v.id, live: !ended(v.state), row: <RouteRow route={v} /> })),
+    ...near.jobs.map((j) => ({ at: j.created_at * 1000, key: j.id, live: !ended(j.state), row: <NearRow job={j} /> })),
+    ...near.combos.map((j) => ({ at: j.created_at * 1000, key: j.id, live: !ended(j.state), row: <ComboRow job={j} /> })),
+  ].sort((x, y) => y.at - x.at);
+}
+
+export function Activity() {
+  const rows = useActivityRows();
   return (
     <Layout>
       <div className="mx-auto w-full max-w-[640px]">
@@ -203,6 +222,48 @@ function RouteRow({ route: v }: { route: RouteView }) {
             {" "}
             · {tickerOf(v.from)} → shielded ZEC → {tickerOf(v.to)}
           </span>
+        </span>
+      </span>
+      <ToneBadge tone={st.tone}>{st.label}</ToneBadge>
+      <ArrowRight size={14} weight="bold" className="hidden shrink-0 text-slate-400 transition-colors group-hover:text-slate-900 sm:block" aria-hidden />
+    </a>
+  );
+}
+
+// A private swap with NEAR Intents at an end: what went in, what came out, "Private swap · via NEAR
+// Intents", its status.
+function ComboRow({ job: j }: { job: ComboJob }) {
+  const st = comboWord(j);
+  const started = new Date(j.created_at * 1000);
+  const logo = (side: "in" | "out", size: number) => {
+    const a = side === "in" ? j.asset_in : j.asset_out;
+    return a ? <NearTokenLogo symbol={a.symbol} chain={a.blockchain} size={size} /> : <PairLogo pair={(side === "in" ? j.from : j.to)!} size={size} />;
+  };
+  const inText = j.front && j.asset_in ? nearText(j.front.amount_in, j.asset_in) : j.route.paid != null ? unitsText(j.route.paid, j.from!) : j.route.in_max != null ? unitsText(j.route.in_max, j.from!) : comboIn(j);
+  return (
+    <a
+      href={`/app/combo/${j.id}`}
+      onClick={(e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+        e.preventDefault();
+        navigate(`/app/combo/${j.id}`);
+      }}
+      className="group flex items-center gap-4 px-4 py-4 transition-colors hover:bg-slate-50 sm:px-5"
+    >
+      <span className="relative flex h-10 w-[52px] shrink-0 items-center" aria-hidden>
+        <span className="absolute left-0">{logo("in", 32)}</span>
+        <span className="absolute left-5 rounded-full bg-white p-[2px]">{logo("out", 30)}</span>
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block font-medium break-words text-slate-900 tabular-nums">
+          {inText} <span className="text-slate-400">→</span> <span className="whitespace-nowrap">{comboGot(j) ?? comboOut(j)}</span>
+        </span>
+        <span className="mt-0.5 flex min-w-0 items-center gap-1 truncate text-[13px] text-slate-500">
+          <span className="font-medium text-slate-700">{j.kind === "near-only" ? "Public swap" : "Private swap"}</span>
+          <span aria-hidden>·</span>
+          <NearMark size={12} />
+          <span>{j.kind === "near-only" ? "NEAR Intents only" : "via NEAR Intents"}</span>
+          <span className="hidden sm:inline"> · {started.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>
         </span>
       </span>
       <ToneBadge tone={st.tone}>{st.label}</ToneBadge>

@@ -13,6 +13,9 @@
 //           the partner refuses or pays less than the minimum, else the route holds the ZEC
 // Coins other than BTC run on the mock's one chain in that coin's units and move no balances.
 //
+// A route may name payout_to (a NEAR Intents deposit address, which the UI server makes): swap 2 then
+// pays its coin there, and the mock 1Click sees the deposit, as with ferryd's payout_to.
+//
 // Env: MOCK_ROUTE_LEGS ["btc:b,usdc-base:b,btc:z,usdc-base:z,ltc:z"] the daemons it has (pair:role),
 // MOCK_ROUTE_PAUSE_SCALE [1/60], MOCK_ROUTE_WINDOW_SECS [120] how long leg 2 is tried (at speed 1).
 // Mock only: POST /api/_mock/fault {"leg2": "refund"} makes the next second swap stall once its
@@ -27,7 +30,7 @@ const assetOf = (pair) => pair.split("-")[0];
 const NEEDED_CONFS = 10;
 const SWEEP_FEE = 10_000;
 const LOCK_RESERVE = 50_000;
-const FIELDS = ["from", "to", "zec_zat", "maker1", "maker2", "max_in", "min_out", "delay_secs", "keep_bps"];
+const FIELDS = ["from", "to", "zec_zat", "maker1", "maker2", "max_in", "min_out", "delay_secs", "keep_bps", "payout_to"];
 
 export function unitsStr(n, u) {
   const s = (n / 10 ** u.decimals).toFixed(Math.min(u.decimals, 8)).replace(/0+$/, "").replace(/\.$/, "");
@@ -154,7 +157,8 @@ export function mockRouter(world, env = process.env) {
       r.starting.maker_idx += 1;
       return;
     }
-    const s = newSwap(leg.role, maker.url, zat, m.rate, { route: leg.label, coin: assetOf(leg.pair), sweepTo: n === 1 ? "Z" : undefined });
+    // swap 2 of a route that ends on NEAR Intents pays its coin into the deposit address (payout_to)
+    const s = newSwap(leg.role, maker.url, zat, m.rate, { route: leg.label, coin: assetOf(leg.pair), sweepTo: n === 1 ? "Z" : undefined, payoutTo: n === 2 ? r.payout_to : null });
     r.problem = null;
     leg.swap_id = s.id;
     r.phase = n === 1 ? "leg1" : "leg2";
@@ -303,6 +307,7 @@ export function mockRouter(world, env = process.env) {
         watchtower: null,
         earlier_swaps: l.earlier,
       })),
+      payout_to: r.payout_to ?? null,
       timeline: r.timeline,
       note: note(r),
       problem: r.problem,
@@ -337,6 +342,10 @@ export function mockRouter(world, env = process.env) {
     if (same) return [400, { error: `${display(same)} can't take both swaps: the same partner on both legs could link them` }];
     const pos = (v) => Number.isInteger(v) && v > 0;
     if (!pos(body.zec_zat) || !pos(body.max_in) || !pos(body.min_out)) return [400, { error: "zec_zat, max_in and min_out must be positive" }];
+    // ferry-route's checks: an address of letters and digits, and swap 2's daemon must take it
+    const payoutTo = body.payout_to == null ? null : String(body.payout_to).trim();
+    if (payoutTo != null && (!payoutTo || payoutTo.length > 128 || !/^[A-Za-z0-9]+$/.test(payoutTo))) return [400, { error: "payout_to must be an address (ASCII letters and digits)" }];
+    if (payoutTo != null && world.payout === false) return [400, { error: `the ${to} daemon does not take payout_to (its /api/status lacks features: ["payout"]); it would pay its own wallet instead` }];
     const delay = body.delay_secs ?? [300, 1800];
     if (!Array.isArray(delay) || delay.length !== 2 || !(delay[0] <= delay[1]) || delay[1] > 86_400) return [400, { error: "delay_secs must be [min, max] with min ≤ max ≤ 86400" }];
     if ([...routes.values()].some((r) => isActive(r) && (r.from === from || r.to === to))) return [409, { error: "Another route is already using one of these daemons" }];
@@ -357,6 +366,7 @@ export function mockRouter(world, env = process.env) {
       min_out: body.min_out,
       min_out_basis_zat: zec2,
       delay_secs: delay,
+      payout_to: payoutTo,
       not_before: null,
       maker1,
       maker2,

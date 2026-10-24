@@ -96,6 +96,12 @@ test("what a browser can't do", () => {
   assert.deepEqual(extra.body.delay_secs, [300, 1800]);
 });
 
+test("a browser never chooses where a route pays: payout_to and sweep_to are dropped", () => {
+  const r = buildRoute({ ...ok, payout_to: "bc1qattacker0000000000000000000000000000", sweep_to: "uregtest1attacker", keep_bps: 9999 }, { list, resolve, legs: LEGS });
+  assert.equal(r.error, undefined);
+  assert.deepEqual(Object.keys(r.body).sort(), ["delay_secs", "from", "maker1", "maker2", "max_in", "min_out", "to", "zec_zat"]);
+});
+
 test("a browser never sees a partner's URL in a route", () => {
   const v = { id: "r1", legs: [{ n: 1, maker: "Sandpiper", maker_url: "http://x" }, { n: 2, maker: null, maker_url: null }] };
   assert.deepEqual(publicRoute([v])[0].legs, [{ n: 1, maker: "Sandpiper" }, { n: 2, maker: null }]);

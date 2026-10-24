@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, ArrowRight, ArrowsDownUp, Check, CircleNotch, Eye, GearSix, HandCoins, Info, ShieldCheck } from "@phosphor-icons/react";
+import { Check, CircleNotch, Eye, GearSix, HandCoins, Info, ShieldCheck } from "@phosphor-icons/react";
 import { NearError, startNear, type Direction, type NearQuote, type NearToken } from "@/api";
 import { zec } from "@/format";
 import { navigate } from "@/router";
@@ -7,10 +7,11 @@ import { useLocal } from "../lib/daemon";
 import { useMakers } from "../lib/makers";
 import { aboutTime, chainName, nearAmount, nearText, numText, shade, useNear, useNearQuote, whole } from "../lib/near";
 import { pairName } from "../lib/pairs";
+import { nearToken, type CardProps, type Side } from "../lib/paths";
 import { cn } from "../lib/utils";
-import { NearTokenLogo, PairLogo, TokenLogo } from "./Logos";
-import { CoinPill, Fact, Panel, Section, amountSize } from "./SwapParts";
-import { NearMark, TokenPicker } from "./TokenPicker";
+import { NearMark } from "./Logos";
+import { Fact, FlipButton, Panel, PathLine, PrivacyLine, Section, SidePill, amountSize } from "./SwapParts";
+import { CoinPicker } from "./TokenPicker";
 import { Sheet } from "./ui/sheet";
 
 // The swap card with a NEAR Intents asset on the coin side. Selling: shielded ZEC on top, the asset
@@ -26,15 +27,15 @@ const ZEC_FEE_RESERVE = 50_000;
 // the room between the quote shown and what the person agrees to: the real quote comes a moment later
 const ROOM_BPS = 50;
 
-export function NearCard({ asset, onChange, blocked }: { asset: string; onChange: (asset: string | null) => void; blocked: string | null }) {
+export function NearCard({ asset, pick, path, ctx, onPick, onFlip, blocked }: CardProps & { asset: string }) {
   const d = useLocal();
   const near = useNear();
   const makers = useMakers();
   const token = near.byId[asset] ?? null;
-  const dir: Direction = d.dir;
+  const dir: Direction = path.dir ?? d.dir;
   const selling = dir === "sell";
   const [amount, setAmount] = useState("1.00");
-  const [picker, setPicker] = useState(false);
+  const [picker, setPicker] = useState<Side | null>(null);
   const [settings, setSettings] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const input = useRef<HTMLInputElement>(null);
@@ -71,11 +72,6 @@ export function NearCard({ asset, onChange, blocked }: { asset: string; onChange
       <div className="rounded-3xl border border-slate-200 px-6 py-14 text-center">
         {near.info === undefined ? <CircleNotch size={24} weight="bold" className="mx-auto animate-spin text-slate-400 motion-reduce:animate-none" aria-hidden /> : null}
         <p className="mt-3 text-slate-600">{near.info === undefined ? "Loading NEAR Intents' tokens…" : "NEAR Intents doesn't list this token right now."}</p>
-        {near.info !== undefined ? (
-          <button type="button" onClick={() => onChange(null)} className="mt-4 text-sm font-medium text-slate-900 underline underline-offset-4">
-            Pick another coin
-          </button>
-        ) : null}
       </div>
     );
 
@@ -91,7 +87,7 @@ export function NearCard({ asset, onChange, blocked }: { asset: string; onChange
       key="zec"
       label={selling ? "Sell" : "Buy"}
       onClick={() => input.current?.focus()}
-      pill={<CoinPill logo={<TokenLogo id="zec" size={28} />} label="ZEC" title={selling ? "Your shielded ZEC" : "Arrives shielded"} />}
+      pill={<SidePill token="zec" side={selling ? "sell" : "buy"} onOpen={() => setPicker(selling ? "sell" : "buy")} />}
       foot={
         selling ? (
           <>
@@ -126,7 +122,7 @@ export function NearCard({ asset, onChange, blocked }: { asset: string; onChange
     <Panel
       key="token"
       label={selling ? "Buy" : "Sell"}
-      pill={<CoinPill logo={<NearTokenLogo symbol={sym} chain={token.blockchain} size={28} />} label={sym} onClick={() => setPicker(true)} ariaLabel={`${selling ? "You get" : "You pay with"} ${sym} on ${chainName(token.blockchain)}, via NEAR Intents. Choose another coin`} />}
+      pill={<SidePill token={nearToken(asset)} side={selling ? "buy" : "sell"} onOpen={() => setPicker(selling ? "buy" : "sell")} name={`${sym} on ${chainName(token.blockchain)}, via NEAR Intents`} />}
       foot={
         <span className="flex min-w-0 items-center gap-1.5 truncate">
           {chainName(token.blockchain)}
@@ -141,21 +137,7 @@ export function NearCard({ asset, onChange, blocked }: { asset: string; onChange
       </output>
     </Panel>
   );
-  const flip = (
-    <div key="flip" className="relative z-10 -my-[18px] flex justify-center">
-      <button
-        type="button"
-        onClick={() => d.chooseDirection(selling ? "buy" : "sell")}
-        disabled={!d.canFlip}
-        aria-label="Switch direction"
-        title={d.canFlip ? (selling ? `Buy ZEC with ${sym} instead` : `Sell ZEC for ${sym} instead`) : `${selling ? "Buying" : "Selling"} ZEC isn't available here`}
-        className="group flex h-10 w-10 items-center justify-center rounded-2xl border-4 border-white bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-slate-100"
-      >
-        <ArrowDown size={16} weight="bold" className="group-hover:hidden group-focus-visible:hidden group-disabled:block" aria-hidden />
-        <ArrowsDownUp size={16} weight="bold" className="hidden group-hover:block group-focus-visible:block group-disabled:hidden" aria-hidden />
-      </button>
-    </div>
-  );
+  const flip = <FlipButton key="flip" onFlip={onFlip} title={selling ? `Buy ZEC with ${sym} instead` : `Sell ZEC for ${sym} instead`} />;
 
   return (
     <>
@@ -217,42 +199,16 @@ export function NearCard({ asset, onChange, blocked }: { asset: string; onChange
 
         <div className="mt-3 min-h-5 space-y-0.5 px-1 text-[13px] text-slate-500">
           {quote && via ? (
-            <>
-              <p className="flex flex-wrap items-center gap-x-1.5">
-                <span className="text-slate-700 tabular-nums">
-                  1 ZEC ≈ {perZec != null ? numText(perZec, token.decimals) : "–"} {sym}
-                </span>
-                {selling ? <span className="tabular-nums">· at least {nearText(shade(quote.near.min_amount_out, ROOM_BPS), token)}</span> : null}
-              </p>
-              <p className="flex flex-wrap items-center gap-1.5" data-near-route>
-                {selling ? (
-                  <>
-                    <TokenLogo id="zec" size={14} />
-                    <span>Ferry</span>
-                    <ArrowRight size={11} weight="bold" aria-hidden />
-                    <PairLogo pair={quote.via} size={14} />
-                    <span>{via.ticker}</span>
-                    <ArrowRight size={11} weight="bold" aria-hidden />
-                    <NearMark size={14} />
-                    <span>NEAR Intents · {aboutTime(quote.time_s)}</span>
-                  </>
-                ) : (
-                  <>
-                    <NearMark size={14} />
-                    <span>NEAR Intents</span>
-                    <ArrowRight size={11} weight="bold" aria-hidden />
-                    <PairLogo pair={quote.via} size={14} />
-                    <span>{via.ticker}</span>
-                    <ArrowRight size={11} weight="bold" aria-hidden />
-                    <TokenLogo id="zec" size={14} />
-                    <span>Ferry · {aboutTime(quote.time_s)}</span>
-                  </>
-                )}
-              </p>
-            </>
+            <p className="flex flex-wrap items-center gap-x-1.5">
+              <span className="text-slate-700 tabular-nums">
+                1 ZEC ≈ {perZec != null ? numText(perZec, token.decimals) : "–"} {sym}
+              </span>
+              {selling ? <span className="tabular-nums">· at least {nearText(shade(quote.near.min_amount_out, ROOM_BPS), token)}</span> : null}
+            </p>
           ) : q.loading ? (
             <p>Finding the best route…</p>
           ) : null}
+          <PathLine path={path} via={quote ? [quote.via] : []} time={quote ? aboutTime(quote.time_s) : undefined} />
         </div>
 
         {runs ? null : (
@@ -271,19 +227,16 @@ export function NearCard({ asset, onChange, blocked }: { asset: string; onChange
           disabled={!runs || !quote || !!problem || !!blocked}
           className="mt-3 flex h-14 w-full items-center justify-center rounded-2xl bg-slate-900 text-base font-semibold text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
         >
-          {!runs ? "Swap on your own node" : selling ? `Sell ZEC for ${sym}` : `Buy ZEC with ${sym}`}
+          {!runs ? "Swap on your own node" : path.button}
         </button>
         <p id="near-message" role={message ? "alert" : undefined} className={cn("mt-3 text-center text-sm", !message ? "sr-only" : message === blocked ? "text-slate-600" : "text-rose-600")}>
           {message ?? ""}
         </p>
       </form>
 
-      <p className="mt-6 flex items-start justify-center gap-2 text-center text-[13px] text-slate-500">
-        <ShieldCheck size={16} weight="regular" className="mt-px shrink-0" aria-hidden />
-        <span>Your ZEC stays shielded. The NEAR Intents part is public, and you trust NEAR Intents for it.</span>
-      </p>
+      <PrivacyLine text={path.privacy} />
 
-      <TokenPicker open={picker} onClose={() => setPicker(false)} makers={makers} role={d.role} zat={valid ? zat : 1e8} nearSelected={asset} onNear={(id) => onChange(id)} onPair={() => onChange(null)} />
+      <CoinPicker open={picker !== null} onClose={() => setPicker(null)} side={picker ?? "sell"} pick={pick} ctx={ctx} makers={makers} zat={valid ? zat : 1e8} onPick={(t) => onPick(picker ?? "sell", t)} />
       {quote && confirm ? <NearConfirm open onClose={() => setConfirm(false)} token={token} dir={dir} zat={zat} first={quote} /> : null}
     </>
   );
@@ -437,7 +390,7 @@ function NearConfirm({ open, onClose, token, dir, zat, first }: { open: boolean;
   );
 }
 
-function Line({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
+export function Line({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
   return (
     <div className="flex items-baseline justify-between gap-4">
       <dt className="shrink-0 text-slate-500">{label}</dt>
@@ -446,7 +399,7 @@ function Line({ label, value, strong }: { label: string; value: string; strong?:
   );
 }
 
-function Point({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
+export function Point({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
   return (
     <li className="flex gap-3">
       <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-700" aria-hidden>

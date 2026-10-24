@@ -127,6 +127,8 @@ function makers(): Plugin {
         pubkey: process.env.FERRY_NEAR_PUBKEY || ONE_CLICK_PUBKEY,
         tickMs: Number(process.env.FERRY_NEAR_TICK_MS ?? 4000),
         statusEveryMs: Number(process.env.FERRY_NEAR_STATUS_MS ?? 5000),
+        // private swaps with NEAR Intents at an end run through the router
+        router: ROUTER,
       })
     : null;
   const readBody = (req: Connect.IncomingMessage, limit = 4096) =>

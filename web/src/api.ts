@@ -297,11 +297,17 @@ export interface NearToken {
 export interface NearInfo {
   available: boolean;
   // whether NEAR swaps run here, each way (the operator's own node, on mainnet)
-  execution: { sell: boolean; buy: boolean };
+  // direct: NEAR Intents alone, the opt-out from a private swap
+  execution: { sell: boolean; buy: boolean; direct?: boolean };
   // why not: "demo" (a public demo: quotes only) or "mainnet" (the nodes are on test networks)
   reason: "demo" | "mainnet" | null;
   tokens: NearToken[];
   explorer: string;
+  // the coins a NEAR sell / buy can go through here
+  vias?: { sell: PairId[]; buy: PairId[] };
+  // private swaps with NEAR Intents at an end: the coins a route can hand to it (to) or take from it
+  // (from), and whether those run here; null without a router
+  compose?: { to: PairId[]; from: PairId[]; runs: boolean } | null;
 }
 
 export interface NearQuote {
@@ -411,3 +417,91 @@ export const getNearQuote = (body: { direction: Direction; zec_zat: number; asse
 export const startNear = (body: { direction: Direction; zec_zat: number; asset: string; address: string; via: PairId; min_out?: string; max_in?: string }) => near<NearJob>("/swap", body);
 export const getNearJobs = () => near<NearJob[]>("/jobs");
 export const retryNear = (id: string) => near<NearJob>(`/jobs/${id}/retry`, {});
+
+// ------------------------------------------------------------------------------------------------
+// Private swaps with NEAR Intents at an end (server/near.mjs "combos"): coin → shielded ZEC → coin,
+// the router's route, with NEAR Intents carrying the last coin on (route-near), bringing the first
+// one in (near-route), or both (near-near).
+
+// NEAR Intents' part alone: "out" what `amount` of coin C (a route's payout) comes to in the asset;
+// "in" what sending `amount` of the asset delivers of coin A into the user's B node
+export interface NearHop {
+  side: "in" | "out" | "direct";
+  pair: PairId | null;
+  asset: string;
+  amount_in: string;
+  amount_out: string;
+  min_amount_out: string;
+  time_s: number;
+  approximate: boolean;
+  address: "ok" | null;
+  verified: boolean;
+}
+export const getNearHop = (body: { side: "in" | "out"; pair: PairId; asset: string; amount: string; address?: string; exact?: boolean } | { side: "direct"; asset_in: string; asset_out: string; amount: string; address?: string; refund?: string; exact?: boolean }) =>
+  near<NearHop>("/hop", body);
+
+// near-only: the opt-out from a private swap, NEAR Intents alone (from your own wallet to your address)
+export type ComboKind = "route-near" | "near-route" | "near-near" | "near-only";
+export type ComboState = "deposit" | "near_in" | "funding" | "route" | "near_out" | "holding" | "done" | "refunded" | "failed" | "expired";
+export type NearAsset = { id: string; symbol: string; blockchain: string; decimals: number };
+
+export interface NearPart {
+  deposit_address: string;
+  deposit_memo: string | null;
+  amount_in: string;
+  min_amount_in: string;
+  amount_out: string | null;
+  min_amount_out: string;
+  deadline: string;
+  time_s: number | null;
+  status: string;
+  details: NearJob["near"]["details"];
+  correlation_id: string | null;
+  verified: boolean;
+  signature: string | null;
+  timestamp: string | null;
+}
+
+export interface ComboJob {
+  id: string;
+  kind: ComboKind;
+  state: ComboState;
+  outcome: string | null;
+  created_at: number;
+  updated_at: number;
+  // the route's two Ferry coins
+  // (near-only: the Ferry coin each end is, if it is one)
+  from: PairId | null;
+  to: PairId | null;
+  pause: Pause | null;
+  asset_in: NearAsset | null;
+  asset_out: NearAsset | null;
+  via_in: { id: string; symbol: string; decimals: number } | null;
+  via_out: { id: string; symbol: string; decimals: number } | null;
+  // where the last asset goes; where a refund of the first goes
+  address: string | null;
+  refund_address: string | null;
+  own_in: string | null;
+  own_out: string | null;
+  agreed: { zec_zat: number; min_out: string; min_asset_out: string | null };
+  route: { id: string | null; state: RouteState | null; outcome: RouteOutcome | string | null; zec_zat: number | null; in_max: number | null; out_min: number | null; held_zat: number | null; paid: number | null; out: number | null; swaps: string[] };
+  front: NearPart | null;
+  back: NearPart | null;
+  problem: string | null;
+  timeline: { at: string; kind: string; label: string }[];
+  explorer: string;
+}
+
+export const startCombo = (body: {
+  kind: ComboKind;
+  route?: { from: PairId; to: PairId; zec_zat: number; min_out: number; pause: Pause; maker1?: string; maker2?: string[]; max_in?: number };
+  asset_in?: string;
+  amount_in?: string;
+  refund_address?: string;
+  min_mid?: string;
+  asset_out?: string;
+  address?: string;
+  min_asset_out?: string;
+}) => near<ComboJob>("/combo", body);
+export const getCombos = () => near<ComboJob[]>("/combos");
+export const retryCombo = (id: string) => near<ComboJob>(`/combos/${id}/retry`, {});

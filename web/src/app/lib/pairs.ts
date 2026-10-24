@@ -43,6 +43,8 @@ export interface Pair {
 export interface Pairs {
   // GET /api/pairs has answered (an older server: its own side of the main pair only)
   ready: boolean;
+  // ... and every daemon it named was asked once: which pair each side swaps is known
+  probed: boolean;
   info: PairsInfo;
   list: Pair[];
 }
@@ -72,6 +74,7 @@ export const canSwap = (info: PairsInfo, dir: Direction): boolean =>
 export function usePairs(): Pairs {
   const [info, setInfo] = useState<PairsInfo | null>(null);
   const [probes, setProbes] = useState<Record<string, Status | null>>({});
+  const [probedKey, setProbedKey] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -97,7 +100,9 @@ export function usePairs(): Pairs {
     let alive = true;
     const probe = async () => {
       const got = await Promise.all(bases.map((b) => getStatus(b).catch(() => null)));
-      if (alive) setProbes(Object.fromEntries(bases.map((b, i) => [b, got[i]])));
+      if (!alive) return;
+      setProbes(Object.fromEntries(bases.map((b, i) => [b, got[i]])));
+      setProbedKey(key);
     };
     probe();
     const id = setInterval(probe, PROBE_MS);
@@ -127,7 +132,7 @@ export function usePairs(): Pairs {
       buy: side(id, i.buy.includes(id), pairBuyDaemon(id), i.main.buy !== false, DAEMONS.B, mainB),
     }),
   );
-  return { ready: info !== null, info: i, list };
+  return { ready: info !== null, probed: info !== null && (!bases.length || probedKey === key), info: i, list };
 }
 
 // How a pair is named to people. title: the picker row ("Bitcoin · BTC", "USDC on Base",

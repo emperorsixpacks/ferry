@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { NearError, getNearInfo, getNearJobs, getNearQuote, type Direction, type NearInfo, type NearJob, type NearQuote, type NearToken } from "@/api";
+import { NearError, getCombos, getNearHop, getNearInfo, getNearJobs, getNearQuote, type ComboJob, type Direction, type NearHop, type NearInfo, type NearJob, type NearQuote, type NearToken, type PairId } from "@/api";
 import type { Tone } from "./progress";
 
 // NEAR Intents on the swap card: its assets (GET /api/near/tokens), composed quotes (Ferry's leg ×
@@ -18,16 +18,22 @@ interface Near {
   jobs: NearJob[];
   job: (id: string) => NearJob | undefined;
   put: (j: NearJob) => void;
+  // private swaps with NEAR Intents at an end, newest first
+  combos: ComboJob[];
+  combo: (id: string) => ComboJob | undefined;
+  putCombo: (j: ComboJob) => void;
 }
 
 const Ctx = createContext<Near | null>(null);
 
-export const isActive = (j: NearJob) => !["done", "refunded", "failed", "expired"].includes(j.state);
+export const isActive = (j: NearJob | ComboJob) => !["done", "refunded", "failed", "expired"].includes(j.state);
 
 export function NearProvider({ children }: { children: ReactNode }) {
   const [info, setInfo] = useState<NearInfo | null | undefined>(undefined);
   const [byJob, setByJob] = useState<Record<string, NearJob>>({});
+  const [byCombo, setByCombo] = useState<Record<string, ComboJob>>({});
   const put = (j: NearJob) => setByJob((m) => (m[j.id] && m[j.id].updated_at > j.updated_at ? m : { ...m, [j.id]: j }));
+  const putCombo = (j: ComboJob) => setByCombo((m) => (m[j.id] && m[j.id].updated_at > j.updated_at ? m : { ...m, [j.id]: j }));
 
   useEffect(() => {
     let alive = true;
@@ -46,17 +52,18 @@ export function NearProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const runsAny = !!info && (info.execution.sell || info.execution.buy);
-  const active = Object.values(byJob).some(isActive);
+  const runsAny = !!info && (info.execution.sell || info.execution.buy || !!info.compose?.runs);
+  const active = Object.values(byJob).some(isActive) || Object.values(byCombo).some(isActive);
   useEffect(() => {
     if (!runsAny) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {
-      const list = await getNearJobs().catch(() => null);
+      const [list, combos] = await Promise.all([getNearJobs().catch(() => null), getCombos().catch(() => null)]);
       if (!alive) return;
       if (list) setByJob(Object.fromEntries(list.map((j) => [j.id, j])));
-      timer = setTimeout(load, list?.some(isActive) ? 2500 : 15_000);
+      if (combos) setByCombo(Object.fromEntries(combos.map((j) => [j.id, j])));
+      timer = setTimeout(load, list?.some(isActive) || combos?.some(isActive) ? 2500 : 15_000);
     };
     load();
     return () => {
@@ -68,6 +75,7 @@ export function NearProvider({ children }: { children: ReactNode }) {
   const value = useMemo<Near>(() => {
     const tokens = info?.tokens ?? [];
     const jobs = Object.values(byJob).sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? 1 : -1));
+    const combos = Object.values(byCombo).sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? 1 : -1));
     return {
       info,
       tokens,
@@ -76,8 +84,11 @@ export function NearProvider({ children }: { children: ReactNode }) {
       jobs,
       job: (id) => byJob[id],
       put,
+      combos,
+      combo: (id) => byCombo[id],
+      putCombo,
     };
-  }, [info, byJob]);
+  }, [info, byJob, byCombo]);
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
@@ -225,6 +236,76 @@ export function useNearQuote(dir: Direction, zat: number, asset: string | null, 
   return { quote: mine ? got.quote : null, error: mine ? got.error : null, field: mine ? got.field : null, loading: !mine && !!asset && zat > 0, refresh: () => setNonce((n) => n + 1) };
 }
 
+export interface HopQuoted {
+  hop: NearHop | null;
+  error: string | null;
+  field: string | null;
+  loading: boolean;
+  refresh: () => void;
+}
+
+// NEAR Intents' part of a private swap (POST /api/near/hop): `amount` of coin `pair` into `asset`
+// ("out"), or of `asset` into `pair` ("in"). Debounced, kept fresh every 20 s.
+export function useHop(side: "in" | "out", pair: PairId | null, asset: string | null, amount: string | null, address: string | null = null): HopQuoted {
+  const [got, setGot] = useState<{ key: string; hop: NearHop | null; error: string | null; field: string | null }>({ key: "", hop: null, error: null, field: null });
+  const [nonce, setNonce] = useState(0);
+  const on = !!pair && !!asset && !!amount && /^[1-9]\d*$/.test(amount);
+  const key = `${side}|${pair}|${asset}|${amount}|${address ?? ""}`;
+  useEffect(() => {
+    if (!on) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = async () => {
+      try {
+        const hop = await getNearHop({ side, pair: pair!, asset: asset!, amount: amount!, exact: true, ...(address ? { address } : {}) });
+        if (alive) setGot({ key, hop, error: null, field: null });
+      } catch (e) {
+        if (alive) setGot({ key, hop: null, error: (e as Error).message, field: e instanceof NearError ? e.field : null });
+      }
+      if (alive) timer = setTimeout(load, 20_000);
+    };
+    timer = setTimeout(load, address ? 500 : 350);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, nonce]);
+  const mine = got.key === key;
+  return { hop: mine ? got.hop : null, error: mine ? got.error : null, field: mine ? got.field : null, loading: on && !mine, refresh: () => setNonce((n) => n + 1) };
+}
+
+// NEAR Intents alone (the opt-out from a private swap): sending `amount` of `from`, for `to`, with
+// the person's addresses checked once given. Debounced, kept fresh every 20 s.
+export function useDirect(from: string | null, to: string | null, amount: string | null, address: string | null = null, refund: string | null = null): HopQuoted {
+  const [got, setGot] = useState<{ key: string; hop: NearHop | null; error: string | null; field: string | null }>({ key: "", hop: null, error: null, field: null });
+  const [nonce, setNonce] = useState(0);
+  const on = !!from && !!to && !!amount && /^[1-9]\d*$/.test(amount);
+  const key = `${from}|${to}|${amount}|${address ?? ""}|${refund ?? ""}`;
+  useEffect(() => {
+    if (!on) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = async () => {
+      try {
+        const hop = await getNearHop({ side: "direct", asset_in: from!, asset_out: to!, amount: amount!, exact: true, ...(address ? { address } : {}), ...(refund ? { refund } : {}) });
+        if (alive) setGot({ key, hop, error: null, field: null });
+      } catch (e) {
+        if (alive) setGot({ key, hop: null, error: (e as Error).message, field: e instanceof NearError ? e.field : null });
+      }
+      if (alive) timer = setTimeout(load, 20_000);
+    };
+    timer = setTimeout(load, address || refund ? 500 : 350);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, nonce]);
+  const mine = got.key === key;
+  return { hop: mine ? got.hop : null, error: mine ? got.error : null, field: mine ? got.field : null, loading: on && !mine, refresh: () => setNonce((n) => n + 1) };
+}
+
 // A picker row's quote, asked once the row is on screen: a rounded amount, the server's best route,
 // at most three at a time, each kept 30 s.
 const rows = new Map<string, { at: number; quote: NearQuote | null; error: string | null; pending: Promise<void> | null }>();
@@ -333,5 +414,68 @@ export function nearSummary(j: NearJob): string {
       return "No deposit arrived. Nothing moved";
     default:
       return j.outcome === "punished" ? "The deadline passed while your Ferry node was offline" : "Your ZEC is back in your shielded wallet";
+  }
+}
+
+// ------------------------------------------------------------------------------------------------
+// a private swap with NEAR Intents at an end, in plain words
+
+const TICKERS: Record<string, string> = { btc: "BTC", ltc: "LTC", usdc: "USDC", weth: "WETH" };
+const pairTicker = (p: string | null) => (p ? (TICKERS[p.split("-")[0]] ?? p.toUpperCase()) : "");
+// what goes in and what comes out, by name: the NEAR asset at a NEAR end, else the Ferry coin
+export const comboIn = (j: ComboJob) => j.asset_in?.symbol ?? pairTicker(j.from);
+export const comboOut = (j: ComboJob) => j.asset_out?.symbol ?? pairTicker(j.to);
+// the Ferry coins NEAR Intents hands over (near-only has none: its ends)
+export const comboMidIn = (j: ComboJob) => j.via_in?.symbol ?? (j.kind === "near-only" ? comboOut(j) : pairTicker(j.from));
+export const comboMidOut = (j: ComboJob) => j.via_out?.symbol ?? (j.kind === "near-only" ? comboOut(j) : pairTicker(j.to));
+// the opt-out: NEAR Intents alone, public
+export const isAlone = (j: ComboJob) => j.kind === "near-only";
+
+export function comboWord(j: ComboJob): { label: string; tone: Tone } {
+  if (j.state === "holding") return { label: j.route.id ? "Holding ZEC" : "Holding coins", tone: "warn" };
+  if (j.state === "deposit") return { label: "Waiting for you", tone: "live" };
+  if (isActive(j)) return { label: "In progress", tone: "live" };
+  if (j.state === "done") return { label: "Done", tone: "good" };
+  if (j.state === "refunded") return { label: "Refunded", tone: "neutral" };
+  if (j.outcome === "punished") return { label: "Expired", tone: "bad" };
+  if (j.outcome === "route_refunded") return { label: "Cancelled", tone: "neutral" };
+  return { label: "Didn't start", tone: "neutral" };
+}
+
+// what the person gets, as it stands: delivered, or promised at least
+export function comboGot(j: ComboJob): string | null {
+  const part = j.back ?? (isAlone(j) ? j.front : null);
+  if (part) {
+    const got = j.state === "done" ? part.details?.amount_out : null;
+    return got && j.asset_out ? nearText(got, j.asset_out) : null;
+  }
+  return j.state === "done" && j.route.out != null ? `${numText(whole(String(j.route.out), j.via_out?.decimals ?? decimalsOf(j.to)))} ${pairTicker(j.to)}` : null;
+}
+const decimalsOf = (p: string | null) => (p?.startsWith("usdc") ? 6 : p?.startsWith("weth") ? 18 : 8);
+
+export function comboSummary(j: ComboJob): string {
+  const a = comboIn(j);
+  const c = comboOut(j);
+  switch (j.state) {
+    case "deposit":
+      return j.front && j.asset_in ? `Send ${nearText(j.front.amount_in, j.asset_in)} to start` : "Waiting for your deposit";
+    case "near_in":
+      return isAlone(j) ? `NEAR Intents is swapping your ${a} for ${c}` : `NEAR Intents is swapping your ${a} for ${comboMidIn(j)}`;
+    case "funding":
+      return `Your ${comboMidIn(j)} arrived. Starting the private swap`;
+    case "route":
+      return j.route.state === "leg1" ? `Swap 1 of 2: buying shielded ZEC with ${comboMidIn(j)}` : j.route.state === "leg2" ? `Swap 2 of 2: selling the ZEC for ${comboMidOut(j)}` : "Your ZEC rests, shielded, between the two swaps";
+    case "holding":
+      return j.route.id ? "You hold shielded ZEC. Finish the swap, or keep it" : `Your ${comboMidIn(j)} is in your Ferry node. Swap now, or keep it`;
+    case "near_out":
+      return `NEAR Intents is sending your ${c}`;
+    case "done":
+      return `You received ${comboGot(j) ?? c}`;
+    case "refunded":
+      return j.back && (j.back.status === "REFUNDED" || j.back.status === "FAILED") ? `NEAR Intents refunded the ${comboMidOut(j)} to your Ferry node` : `NEAR Intents refunded your ${a}`;
+    case "expired":
+      return "No deposit arrived. Nothing moved";
+    default:
+      return j.outcome === "route_refunded" ? `Your ${comboMidIn(j)} is back in your Ferry node` : j.outcome === "punished" ? "The deadline passed while your Ferry node was offline" : "The private swap didn't start. Nothing moved";
   }
 }

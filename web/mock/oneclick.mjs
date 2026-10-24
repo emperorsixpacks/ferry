@@ -116,6 +116,7 @@ export function mockOneClick({ speed = 1, onDeliver = () => {}, now = Date.now }
     if (type === "INTENTS") return accountish(v);
     if (type !== "ORIGIN_CHAIN" && type !== "DESTINATION_CHAIN") return false;
     if (token.blockchain === "btc" && /^(bcrt1|tb1)[02-9ac-hj-np-z]{8,87}$/.test(v)) return true;
+    if (token.blockchain === "ltc" && /^(rltc1|tltc1)[02-9ac-hj-np-z]{8,87}$/.test(v)) return true;
     return addressProblem(token.blockchain, v) === null;
   }
 

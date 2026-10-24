@@ -23,6 +23,8 @@ interface LocalDaemon extends Daemon {
   daemon: string | null;
   pairs: Pair[];
   info: PairsInfo;
+  // the server said which daemons it has, and each was asked which pair it swaps
+  known: boolean;
   // the pair on screen: the followed daemon's coin, or the one picked while it connects
   pair: PairId;
   choosePair: (id: PairId, on?: Direction) => void;
@@ -111,6 +113,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
     daemon,
     pairs: pairs.list,
     info: pairs.info,
+    known: pairs.probed,
     pair,
     choosePair,
     chooseDirection,
