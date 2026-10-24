@@ -34,7 +34,7 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
       },
       {
         q: "Why is there no “Connect wallet” button?",
-        a: "Because a swap needs things no wallet can do: one-time keys shared between you and your partner, and someone online at the deadlines to claim or refund. Your Ferry node does both. Connecting a wallet would also tell a website who you are, and Ferry never asks. You still use your own wallet: it works with Zodl. Scan the code on the Wallet page to add funds, and paste your Zodl address in “Receive to” so the ZEC you buy lands there, still shielded. MetaMask and Bitcoin wallets work the same way.",
+        a: "Because a swap needs things no wallet can do: one-time keys shared between you and your partner, and someone online at the deadlines to claim or refund. Your Ferry node does both. Connecting a wallet would also tell a website who you are, and Ferry never asks. You still use your own wallet: it works with Zodl. Scan the code on the Wallet page to add funds, and paste your Zodl address in “Receive to” so the ZEC you buy lands there, still shielded. MetaMask and Bitcoin wallets work the same way. For USDC or ETH on your own node, Add funds can also fill the transfer in MetaMask for you (“Pay with MetaMask”). Ferry doesn't keep the address it pays from; the transfer itself is public on its chain, like any payment.",
       },
       {
         q: "Who is my swap partner?",

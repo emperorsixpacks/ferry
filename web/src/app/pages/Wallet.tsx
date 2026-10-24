@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { ArrowUpRight, Check, CircleNotch, Info, PaperPlaneTilt, Plus, Warning, WarningCircle } from "@phosphor-icons/react";
+import { Suspense, lazy, useEffect, useMemo, useState, type ReactNode } from "react";
+import { ArrowUpRight, Check, CircleNotch, Info, PaperPlaneTilt, Plus, Wallet as WalletIcon, Warning, WarningCircle } from "@phosphor-icons/react";
 import { getAddresses, previewSend, sendOut, type Addresses, type SendAsset, type Withdrawal } from "@/api";
 import { CopyText } from "../components/CopyText";
 import { Layout, PageHeader, REPO_URL } from "../components/Layout";
@@ -7,6 +7,7 @@ import { ChainLogo, PairLogo, TokenLogo } from "../components/Logos";
 import { QrCode } from "../components/QrCode";
 import { ToneBadge } from "../components/ui/badge";
 import { Sheet } from "../components/ui/sheet";
+import { useBrowserWallet } from "../lib/browserWallet";
 import { useLocal } from "../lib/daemon";
 import { addressProblem, cleanAddress, shortAddress, storedReceive } from "../lib/receive";
 import { cn } from "../lib/utils";
@@ -20,6 +21,7 @@ import {
   fundingOf,
   inputText,
   parseUnits,
+  payTarget,
   receiveOf,
   sendAsset,
   sendFirst,
@@ -37,7 +39,16 @@ import {
 // and which network to send on) and "Send to my wallet" (an amount, an address, the network fee, one
 // check, then the send's status as the node reports it). Below, what the node sent. On a public demo
 // it only shows the balances: the coins there are the operator's. Opened from the account menu, the
-// swap card's "Add funds" (?add=<coin>) and a finished swap's "Send it to my wallet" (?send=<coin>).
+// swap card's "Add funds" (?add=<coin>, with ?need=<base units> when the swap was short of it) and a
+// finished swap's "Send it to my wallet" (?send=<coin>).
+// An EVM coin's Add funds also offers "Pay with MetaMask" (or the browser's other wallet) when the
+// browser has one; that flow is loaded only when it is used.
+const PayFromWallet = lazy(() =>
+  import("../components/PayFromWallet").then(
+    (m) => ({ default: m.PayFromWallet }),
+    () => ({ default: () => <p className="px-5 pb-6 text-sm text-rose-600">Couldn't open this. Reload the page and try again, or use the QR code.</p> }),
+  ),
+);
 
 export function WalletPage() {
   const d = useLocal();
@@ -46,10 +57,16 @@ export function WalletPage() {
   const params = new URLSearchParams(window.location.search);
   const [adding, setAdding] = useState<string | null>(() => params.get("add"));
   const [sending, setSending] = useState<string | null>(() => params.get("send"));
+  // ?need=<base units>: how much the swap card was short of the coin it opened Add funds for
+  const [need, setNeed] = useState<bigint | null>(() => {
+    const n = params.get("need");
+    return n && /^\d{1,30}$/.test(n) ? BigInt(n) : null;
+  });
   // the sheets close back to plain /wallet, so a reload doesn't reopen them
   const close = () => {
     setAdding(null);
     setSending(null);
+    setNeed(null);
     if (window.location.search) window.history.replaceState(null, "", "/wallet");
   };
   const addCoin = own ? w.coins.find((c) => c.key === adding) : undefined;
@@ -121,7 +138,7 @@ export function WalletPage() {
         ) : null}
       </div>
 
-      {addCoin ? <AddFunds coin={addCoin} onClose={close} /> : null}
+      {addCoin ? <AddFunds coin={addCoin} need={addCoin.kind === "token" ? need : null} onClose={close} /> : null}
       {sendCoin ? <SendSheet coin={sendCoin} onClose={close} sends={w.sends.data} refresh={w.sends.refresh} /> : null}
     </Layout>
   );
@@ -243,7 +260,7 @@ function Sides({ coin, options, value, onChange, label }: { coin: Coin; options:
 // ------------------------------------------------------------------------------------------------
 // Add funds: the address, a QR code and what to send
 
-function AddFunds({ coin, onClose }: { coin: Coin; onClose: () => void }) {
+function AddFunds({ coin, need, onClose }: { coin: Coin; need: bigint | null; onClose: () => void }) {
   // the sides that use this coin in swaps (ZEC: selling; a coin: buying; gas: every EVM side)
   const options = fundOptions(coin);
   // the side picked, else the first that uses it (as balances arrive, until one is picked)
@@ -268,6 +285,25 @@ function AddFunds({ coin, onClose }: { coin: Coin; onClose: () => void }) {
   }, [at, tries]);
   const f = fundingOf(coin, h, got[at]);
   const missing = got[at] && !f;
+  // an EVM coin can also be paid from the browser's wallet (MetaMask, Rabby, ...), when it has one
+  const target = payTarget(coin, h, got[at]);
+  const wallet = useBrowserWallet(coin.kind === "token" || coin.kind === "eth");
+  const [paying, setPaying] = useState(false);
+  const [payTitle, setPayTitle] = useState<string | null>(null);
+  if (paying && wallet && target)
+    return (
+      <Sheet open onClose={onClose} title={payTitle ?? `Pay from ${wallet.name}`}>
+        <Suspense
+          fallback={
+            <div className="flex h-40 items-center justify-center">
+              <CircleNotch size={22} weight="bold" className="animate-spin text-slate-400 motion-reduce:animate-none" aria-label="Opening" />
+            </div>
+          }
+        >
+          <PayFromWallet wallet={wallet} coin={coin} holding={h} target={target} base={at} need={need} onBack={() => (setPaying(false), setPayTitle(null))} onDone={onClose} onTitle={setPayTitle} />
+        </Suspense>
+      </Sheet>
+    );
   return (
     <Sheet open onClose={onClose} title={`Add ${coin.ticker}`} note={options.length > 1 ? "Your node keeps a wallet for each way it swaps. Add to the one that will use it." : undefined}>
       <Sides coin={coin} options={options} value={at} onChange={setBase} label="Add to" />
@@ -314,6 +350,17 @@ function AddFunds({ coin, onClose }: { coin: Coin; onClose: () => void }) {
             </div>
             {coin.kind === "btc" || coin.kind === "ltc" ? <p className="mt-2 text-[13px] text-slate-500">This one works every time. A new one for each deposit keeps them apart on the chain.</p> : null}
           </div>
+        ) : null}
+        {f && target && wallet ? (
+          <button
+            type="button"
+            onClick={() => (setBase(at), setPaying(true))}
+            className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white text-sm font-medium text-slate-900 transition-colors hover:bg-slate-50"
+            data-pay-wallet={wallet.name}
+          >
+            {wallet.icon ? <img src={wallet.icon} alt="" width={18} height={18} className="h-[18px] w-[18px] shrink-0 rounded-[4px]" /> : <WalletIcon size={16} weight="bold" aria-hidden />}
+            Pay with {wallet.name}
+          </button>
         ) : null}
         <ul className="mt-4 space-y-2 text-[13px] text-slate-600" data-funding-notes>
           {fundingNotes(coin, h).map((n) => (

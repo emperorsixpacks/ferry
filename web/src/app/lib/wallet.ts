@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getStatus, getSwaps, getWithdrawals, pairChain, type Addresses, type PairId, type SendAsset, type Status, type SwapView, type Withdrawal } from "@/api";
 import { CHAIN_NAMES, chainOfNetwork, coinOf, isMainnet, networkLabel } from "@/format";
+import { isEvmAddress, sameAddress } from "./browserWallet";
 import { useLocal } from "./daemon";
 import { pairName } from "./pairs";
 import type { ReceiveCoin } from "./receive";
@@ -248,6 +249,33 @@ export function fundingOf(coin: Coin, h: Holding, a: Addresses | undefined): { a
   if (coin.kind === "eth") return { address, uri: `ethereum:${address}${at}` };
   const token = a.btc?.token ?? counter?.token;
   return { address, uri: token ? `ethereum:${token}${at}/transfer?address=${address}` : `ethereum:${address}${at}` };
+}
+
+// What a browser wallet pays to add an EVM coin (components/PayFromWallet): the node's account, on
+// its chain, and for a token its contract and decimals, from the same GET /api/addresses. null when
+// any of it is missing or isn't 0x and 40 hex digits, or when the account is one of the swap's own
+// contracts (the token, the lock): a transfer there would be lost.
+export interface PayTarget {
+  chainId: number;
+  address: string;
+  token: string | null;
+  decimals: number;
+  ticker: string;
+}
+
+export function payTarget(coin: Coin, h: Holding, a: Addresses | undefined): PayTarget | null {
+  if ((coin.kind !== "token" && coin.kind !== "eth") || !a?.btc) return null;
+  const counter = h.node.status?.counter;
+  const address = a.btc.address;
+  const chainId = a.btc.chain_id ?? counter?.chain_id ?? CHAIN_IDS[coin.network];
+  if (!isEvmAddress(address) || !Number.isSafeInteger(chainId) || chainId <= 0) return null;
+  const contracts = [a.btc.token, counter?.token, counter?.contract].filter(isEvmAddress);
+  if (contracts.some((c) => sameAddress(c, address))) return null;
+  if (coin.kind === "eth") return { chainId, address, token: null, decimals: 18, ticker: "ETH" };
+  const token = a.btc.token ?? counter?.token;
+  const decimals = a.btc.decimals ?? counter?.decimals ?? coin.decimals;
+  if (!isEvmAddress(token) || !Number.isInteger(decimals) || decimals < 0 || decimals > 36) return null;
+  return { chainId, address, token, decimals, ticker: coin.ticker };
 }
 
 // chain ids of the EVM networks ferryd names (when a daemon doesn't say)
