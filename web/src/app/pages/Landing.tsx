@@ -1,322 +1,241 @@
-import { useEffect, useState } from "react";
-import { ArrowRight, GithubLogo } from "@phosphor-icons/react";
+import { useState, type ReactNode } from "react";
+import { ArrowCounterClockwise, ArrowDown, ArrowRight, CaretDown, EyeSlash, HandCoins } from "@phosphor-icons/react";
 import { Link } from "@/router";
 import { coin } from "@/format";
 import { btcText } from "@/swap/shared";
-import { CipherGrid } from "../components/CipherGrid";
-import { CipherSwarm } from "../components/CipherSwarm";
-import { LogoMark } from "../components/LogoMark";
-import { Reveal } from "../components/Reveal";
-import { ScrambleText } from "../components/ScrambleText";
+import { FaqList } from "../components/FaqList";
+import { SiteFooter, SiteHeader } from "../components/Layout";
+import { PairLogo, TokenLogo } from "../components/Logos";
+import { TokenPicker } from "../components/TokenPicker";
 import { useLocal } from "../lib/daemon";
+import { LANDING_FAQ } from "../lib/faq";
+import { counterFor, liveQuote, useMakers } from "../lib/makers";
+import { pairName } from "../lib/pairs";
 
-// `/`: SealPad's landing pattern, told for Ferry.
+// `/`: what Ferry does in one line, a live quote with the one button that matters, three
+// promises, three steps and five answers. The depth lives in Help, /how-it-works and /safety.
 export function Landing() {
   return (
-    <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
-      <Navbar />
-      <Hero />
-      <Narrative />
-      <Guarantees />
-      <Lifecycle />
-      <FinalCTA />
-      <Footer />
+    <div className="flex min-h-screen flex-col bg-white text-slate-900">
+      <SiteHeader />
+      <main className="flex-1">
+        <Hero />
+        <Promises />
+        <Steps />
+        <Questions />
+      </main>
+      <SiteFooter />
     </div>
   );
 }
 
-const links = [
-  { to: "#guarantees", label: "GUARANTEES" },
-  { to: "#flow", label: "HOW IT WORKS" },
-  { to: "/how-it-works", label: "DOCS" },
-  { to: "/safety", label: "SAFETY" },
-  { to: "/inspect", label: "INSPECT" },
-];
-
-function Navbar() {
-  return (
-    <nav className="fixed inset-x-0 top-0 z-50 flex h-20 items-center justify-between border-b border-slate-200 bg-white/80 px-6 backdrop-blur md:px-8">
-      <Link to="/" className="flex items-center gap-3">
-        <LogoMark size={36} />
-        <span className="font-bold tracking-wider text-slate-900">FERRY</span>
-      </Link>
-      <ul className="hidden items-center gap-10 font-mono text-xs tracking-widest text-slate-700 lg:flex">
-        {links.map((l) => (
-          <li key={l.label}>
-            {l.to.startsWith("#") ? (
-              <a href={l.to} className="transition-colors hover:text-brand-600">
-                {l.label}
-              </a>
-            ) : (
-              <Link to={l.to} className="transition-colors hover:text-brand-600">
-                {l.label}
-              </Link>
-            )}
-          </li>
-        ))}
-      </ul>
-      <Link to="/app" className="bg-slate-900 px-5 py-2.5 text-xs font-medium tracking-tight text-white transition-colors hover:bg-slate-800">
-        Launch app
-      </Link>
-    </nav>
-  );
-}
-
-// The coins Ferry swaps shielded ZEC for. The hero's second line cycles through them; with
-// reduced motion it stays on the first.
-const counters = [
-  { ticker: "BTC", asset: "Bitcoin" },
-  { ticker: "LTC", asset: "Litecoin" },
-  { ticker: "USDC", asset: "USDC" },
-];
-
-function useCycle(n: number, ms: number) {
-  const [i, setI] = useState(0);
-  useEffect(() => {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const id = setInterval(() => setI((k) => (k + 1) % n), ms);
-    return () => clearInterval(id);
-  }, [n, ms]);
-  return i;
-}
-
 function Hero() {
-  const d = useLocal();
-  const out = counters[useCycle(counters.length, 3200)].asset;
-  const settled = d.list.filter((s) => s.outcome === "swapped").length;
-  const offer = d.status?.offer;
+  const { role } = useLocal();
+  const z = role === "Z";
   return (
-    <section className="relative overflow-hidden border-b border-slate-200 bg-canvas">
-      <CipherSwarm />
-      <div className="relative mx-auto max-w-7xl px-6 pt-32 pb-24 md:px-8 lg:pt-40 lg:pb-32">
-        <div className="lg:grid lg:grid-cols-12 lg:gap-16">
-          <div className="lg:col-span-7">
-            <p className="font-mono text-[11px] tracking-[0.18em] text-brand-500 uppercase">Shielded ZEC ⇄ BTC · LTC · USDC</p>
-            <h1 className="mt-10 text-5xl leading-[1.02] font-medium tracking-tight text-slate-900 md:text-6xl lg:text-[5.25rem]">
-              Shielded ZEC in.
-              <br />
-              <span className="whitespace-nowrap">
-                <ScrambleText text={out} duration={700} /> out.
+    <section className="mx-auto grid max-w-6xl grid-cols-1 items-center gap-12 px-4 pt-14 pb-20 sm:px-6 md:pt-20 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)] lg:gap-14 lg:pt-24 lg:pb-28">
+      <div>
+        <div className="inline-flex items-center gap-2.5 rounded-full border border-slate-200 bg-white py-1 pr-3.5 pl-1.5 text-[13px] text-slate-600">
+          <span className="flex -space-x-1.5" aria-hidden>
+            {(["btc", "ltc", "usdc", "eth"] as const).map((t) => (
+              <span key={t} className="rounded-full bg-white p-px">
+                <TokenLogo id={t} size={20} />
               </span>
-              <br />
-              <span className="text-slate-400">No middleman.</span>
-            </h1>
-            <p className="mt-10 max-w-prose text-lg leading-relaxed text-slate-600">
-              Swap with a stranger without trusting them. No bridge, no custodian, and your ZEC never leaves the shielded pool.
-            </p>
-            <div className="mt-12 flex flex-wrap items-center gap-8">
-              <Link to="/app" className="bg-slate-900 px-7 py-3.5 text-sm font-medium tracking-tight text-white transition-colors hover:bg-slate-800">
-                Launch app
-              </Link>
-              <Link to="/how-it-works" className="inline-flex items-center gap-1.5 text-sm text-slate-700 transition-colors hover:text-brand-600">
-                How it works
-                <ArrowRight size={14} weight="bold" />
-              </Link>
-            </div>
-          </div>
-          <div className="mt-20 lg:col-span-5 lg:mt-3 lg:border-l lg:border-slate-200 lg:pl-12">
-            <p className="font-mono text-[10px] tracking-[0.18em] text-brand-500 uppercase">Network state</p>
-            <p className="mt-8 text-[5.5rem] leading-none font-medium tracking-tight text-slate-900 tabular-nums lg:text-[7.5rem]">{String(settled).padStart(2, "0")}</p>
-            <p className="mt-3 text-sm text-slate-500">swaps settled on this daemon</p>
-            <div className="mt-10">
-              <CipherGrid />
-            </div>
-            <dl className="mt-16 space-y-7 border-t border-slate-200 pt-8">
-              <div>
-                <dt className="font-mono text-[10px] tracking-[0.18em] text-slate-400 uppercase">Network</dt>
-                <dd className="mt-1.5 text-sm text-slate-900 capitalize">{d.status ? `${coin().kind === "evm" ? coin().name : `${d.status.chains.btc.network} ${coin().name}`}, ${d.status.chains.zec.network} Zcash` : "–"}</dd>
-              </div>
-              <div>
-                <dt className="font-mono text-[10px] tracking-[0.18em] text-slate-400 uppercase">Rate</dt>
-                <dd className="mt-1.5 font-mono text-sm text-slate-900">{offer ? `1 ZEC = ${btcText(offer.rate_sat_per_zec)} ${coin().ticker}` : "–"}</dd>
-              </div>
-              <div>
-                <dt className="font-mono text-[10px] tracking-[0.18em] text-slate-400 uppercase">Pairs</dt>
-                <dd className="mt-1.5 font-mono text-sm text-slate-400">
-                  ZEC ⇄{" "}
-                  {counters.map((c, i) => (
-                    <span key={c.ticker}>
-                      {i > 0 && " · "}
-                      <span className={d.status && c.ticker === coin().ticker ? "text-slate-900" : undefined}>{c.ticker}</span>
-                    </span>
-                  ))}
-                </dd>
-              </div>
-            </dl>
-          </div>
+            ))}
+          </span>
+          Bitcoin, Litecoin, USDC and ETH
         </div>
+        <h1 className="mt-7 text-[44px] leading-[1.04] font-semibold tracking-[-0.03em] text-slate-900 sm:text-6xl lg:text-[64px]">
+          {z ? "Swap shielded ZEC." : "Buy shielded ZEC."}
+          <br />
+          <span className="text-slate-500">Privately.</span>
+        </h1>
+        <p className="mt-6 max-w-[34rem] text-lg leading-relaxed text-slate-600">
+          {z ? "Get Bitcoin, Litecoin, USDC or ETH for your shielded ZEC." : "Pay with Bitcoin, Litecoin, USDC or ETH, and get shielded ZEC."} No account. No bridge. Nobody holds your coins.
+        </p>
+        <a href="#how" className="mt-7 inline-flex items-center gap-1.5 rounded text-[15px] font-medium text-slate-700 transition-colors hover:text-slate-900">
+          See how it works
+          <ArrowDown size={14} weight="bold" aria-hidden />
+        </a>
       </div>
+      <QuoteCard />
     </section>
   );
 }
 
-function Narrative() {
-  return (
-    <section className="border-t border-b border-slate-200 bg-cloud">
-      <div className="mx-auto max-w-5xl px-6 py-32 text-center md:px-8 lg:py-48">
-        <Reveal direction="fade" duration={1100}>
-          <h2 className="text-4xl leading-[1.08] font-medium tracking-tight text-slate-900 md:text-6xl lg:text-7xl">
-            Bridges hold your coins.
-            <br />
-            Unshielding shows them.
-            <br />
-            <span className="text-brand-500">Ferry does neither.</span>
-          </h2>
-        </Reveal>
-        <Reveal direction="fade" delay={400}>
-          <p className="mt-14 font-mono text-[10px] tracking-[0.22em] text-slate-500 uppercase">A private way across</p>
-        </Reveal>
-      </div>
-    </section>
+// 1 ZEC at the best partner's rate for the coin on screen; the coin can be changed right here.
+function QuoteCard() {
+  const d = useLocal();
+  const makers = useMakers();
+  const [picker, setPicker] = useState(false);
+  const { maker, quote } = liveQuote(makers, d.status, d.role, 1e8);
+  const online = d.connected || !!d.status;
+  const out = quote ? counterFor(quote, 1e8, d.role) : 0;
+  const name = pairName(d.pair);
+  const z = d.role === "Z";
+  const zecSide = (
+    <QuotePanel label={z ? "You sell" : "You get"} pill={<ZecPill />}>
+      <span className="text-slate-900">1</span>
+    </QuotePanel>
   );
-}
-
-const guarantees = [
-  { n: "01", title: "No custodian", desc: "Nobody holds your coins in between. Both sides lock their own coins in a way only the swap can open, and the way back is signed before anything moves." },
-  { n: "02", title: "Never unshielded", desc: "Your ZEC goes from shielded address to shielded address. Its amount and addresses never appear on chain, before, during or after the swap." },
-  { n: "03", title: "Nothing points back", desc: "On Bitcoin and Litecoin a finished swap is a single-signature payment, like millions of others. On Base it is a call to the swap contract. Nothing on either points to your Zcash wallet." },
-];
-
-function Guarantees() {
-  return (
-    <section id="guarantees" className="border-t border-slate-200 bg-white">
-      <div className="mx-auto max-w-7xl px-6 py-32 md:px-8 lg:py-40">
-        <Reveal>
-          <div className="lg:max-w-3xl">
-            <p className="font-mono text-[11px] tracking-[0.18em] text-brand-500 uppercase">What you get</p>
-            <h2 className="mt-10 text-4xl leading-[1.05] font-medium tracking-tight text-slate-900 md:text-5xl lg:text-[3.5rem]">
-              Three guarantees
-              <br />
-              bridges can't make.
-            </h2>
-          </div>
-        </Reveal>
-        <div className="mt-20 grid gap-12 md:grid-cols-3 lg:mt-24 lg:gap-16">
-          {guarantees.map((g, i) => (
-            <Reveal key={g.n} delay={i * 100}>
-              <span className="font-mono text-2xl tracking-tight text-slate-400 tabular-nums">{g.n}</span>
-              <div className="mt-6 h-px bg-slate-200" />
-              <h3 className="mt-8 text-2xl font-medium tracking-tight text-slate-900">{g.title}</h3>
-              <p className="mt-4 text-sm leading-relaxed text-slate-600">{g.desc}</p>
-            </Reveal>
-          ))}
-        </div>
-      </div>
-    </section>
+  const coinSide = (
+    <QuotePanel
+      label={z ? "You get" : "You pay"}
+      pill={
+        <button
+          type="button"
+          onClick={() => setPicker(true)}
+          aria-haspopup="dialog"
+          aria-label={`${name.noun}. Choose another coin`}
+          className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-slate-200 bg-white pr-3 pl-1.5 shadow-[0_1px_2px_rgba(24,24,27,0.06)] transition-colors hover:border-slate-300 hover:bg-slate-50"
+        >
+          <PairLogo pair={d.pair} size={28} />
+          <span className="text-[15px] font-semibold text-slate-900">{name.label}</span>
+          <CaretDown size={14} weight="bold" className="text-slate-500" aria-hidden />
+        </button>
+      }
+    >
+      <span className={out ? "text-slate-900" : "text-slate-300"}>{out ? `≈ ${btcText(out)}` : "–"}</span>
+    </QuotePanel>
   );
-}
-
-const phases = [
-  { n: "01", title: "Their coins locked", desc: "The other side locks their bitcoin, litecoin or USDC first, in a way only you can claim." },
-  { n: "02", title: "ZEC sealed", desc: "Your ZEC moves to a shielded address made for this swap, which needs both halves of a key to open." },
-  { n: "03", title: "You claim", desc: "Claiming their coins shows your half of the key, which is exactly what lets them open the ZEC." },
-  { n: "04", title: "Settled", desc: "They sweep the ZEC into their own shielded wallet. If anyone vanishes, a deadline sends every coin home." },
-];
-
-function Lifecycle() {
   return (
-    <section id="flow" className="border-t border-slate-200 bg-canvas">
-      <div className="mx-auto max-w-7xl px-6 py-32 md:px-8 lg:py-40">
-        <Reveal>
-          <div className="lg:max-w-3xl">
-            <p className="font-mono text-[11px] tracking-[0.18em] text-brand-500 uppercase">Lifecycle</p>
-            <h2 className="mt-10 text-4xl leading-[1.05] font-medium tracking-tight text-slate-900 md:text-5xl lg:text-[3.5rem]">From lock to settle.</h2>
-            <p className="mt-8 max-w-prose text-lg leading-relaxed text-slate-600">
-              Every swap moves through four steps. Nobody can take without giving, and nothing waits on trust: the chains enforce each step.
-            </p>
-          </div>
-        </Reveal>
-        <div className="mt-20 grid gap-12 md:grid-cols-2 lg:mt-24 lg:grid-cols-4 lg:gap-10">
-          {phases.map((p, i) => (
-            <Reveal key={p.n} delay={i * 100}>
-              <span className="font-mono text-[11px] tracking-[0.18em] text-slate-400 tabular-nums">{p.n}</span>
-              <div className="mt-4 h-px bg-slate-200" />
-              <h3 className="mt-6 text-xl font-medium tracking-tight text-slate-900">{p.title}</h3>
-              <p className="mt-3 text-sm leading-relaxed text-slate-600">{p.desc}</p>
-            </Reveal>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function FinalCTA() {
-  return (
-    <section className="border-t border-slate-200 bg-canvas">
-      <div className="mx-auto max-w-5xl px-6 py-32 text-center md:px-8 lg:py-48">
-        <Reveal>
-          <p className="font-mono text-[11px] tracking-[0.18em] text-brand-500 uppercase">Get started</p>
-          <h2 className="mt-10 text-4xl leading-[1.02] font-medium tracking-tight text-slate-900 md:text-5xl lg:text-[4rem]">Shielded by default.</h2>
-          <p className="mx-auto mt-8 max-w-prose text-lg leading-relaxed text-slate-600">Start a swap or read how it works. Test networks only: no real coins at stake.</p>
-          <div className="mt-12 flex flex-wrap items-center justify-center gap-8">
-            <Link to="/app" className="bg-slate-900 px-7 py-3.5 text-sm font-medium tracking-tight text-white transition-colors hover:bg-slate-800">
-              Launch app
-            </Link>
-            <Link to="/how-it-works" className="inline-flex items-center gap-1.5 text-sm text-slate-700 transition-colors hover:text-brand-600">
-              How it works
-              <ArrowRight size={14} weight="bold" />
-            </Link>
-          </div>
-        </Reveal>
-      </div>
-    </section>
-  );
-}
-
-function Footer() {
-  const cols = [
-    { title: "PROTOCOL", links: [["Guarantees", "#guarantees"], ["Lifecycle", "#flow"], ["Swap", "/app"]] },
-    { title: "RESOURCES", links: [["How it works", "/how-it-works"], ["What could go wrong", "/safety"], ["Protocol inspector", "/inspect"]] },
-  ];
-  return (
-    <footer className="border-t border-slate-200 bg-slate-50 px-6 pt-24 pb-12 md:px-8">
-      <div className="mx-auto grid max-w-7xl gap-12 md:grid-cols-3">
-        <div>
-          <div className="mb-4 flex items-center gap-2.5">
-            <LogoMark size={32} />
-            <span className="font-bold tracking-wider text-slate-900">FERRY</span>
-          </div>
-          <p className="max-w-xs text-sm leading-relaxed text-slate-500">
-            Atomic swaps between shielded ZEC and bitcoin, litecoin or USDC.
-            <br />
-            No bridge, no custodian, nothing unshielded.
-          </p>
-          <span className="mt-4 inline-flex items-center gap-2 text-slate-700">
-            <GithubLogo size={18} />
-            <span className="text-sm">Open source</span>
+    <div className="w-full rounded-[28px] border border-slate-200 bg-white p-2 shadow-[0_24px_64px_-32px_rgba(24,24,27,0.22)] lg:justify-self-end lg:max-w-[440px]">
+      <div className="flex flex-col">
+        {zecSide}
+        <div className="relative z-10 -my-[18px] flex justify-center" aria-hidden>
+          <span className="flex h-10 w-10 items-center justify-center rounded-2xl border-4 border-white bg-slate-100 text-slate-700">
+            <ArrowDown size={16} weight="bold" />
           </span>
         </div>
-        {cols.map((c) => (
-          <div key={c.title}>
-            <h5 className="mb-4 font-mono text-xs tracking-widest text-slate-500">{c.title}</h5>
-            <ul className="space-y-3 text-sm text-slate-700">
-              {c.links.map(([label, to]) => (
-                <li key={label}>
-                  {to.startsWith("#") ? (
-                    <a href={to} className="transition-colors hover:text-brand-600">
-                      {label}
-                    </a>
-                  ) : (
-                    <Link to={to} className="transition-colors hover:text-brand-600">
-                      {label}
-                    </Link>
-                  )}
-                </li>
-              ))}
-            </ul>
+        {coinSide}
+      </div>
+      <p className="px-3 pt-3 pb-1 text-[13px] text-slate-500" aria-live="polite">
+        {!online
+          ? "Can't reach your Ferry node right now."
+          : quote
+            ? `1 ZEC = ${btcText(quote.rate)} ${coin().ticker}${maker ? ` · best rate, from ${maker.name}` : ""}`
+            : makers.list === undefined
+              ? "Finding the best rate…"
+              : "No partner is taking swaps for this coin right now."}
+      </p>
+      <Link to="/app" className="mt-2 flex h-14 w-full items-center justify-center gap-2 rounded-2xl bg-slate-900 text-base font-semibold text-white transition-colors hover:bg-slate-800">
+        Start a swap
+        <ArrowRight size={16} weight="bold" aria-hidden />
+      </Link>
+      <TokenPicker open={picker} onClose={() => setPicker(false)} makers={makers} role={d.role} />
+    </div>
+  );
+}
+
+function ZecPill() {
+  return (
+    <span className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-slate-200 bg-white pr-3.5 pl-1.5 shadow-[0_1px_2px_rgba(24,24,27,0.06)]">
+      <TokenLogo id="zec" size={28} />
+      <span className="text-[15px] font-semibold text-slate-900">ZEC</span>
+    </span>
+  );
+}
+
+function QuotePanel({ label, pill, children }: { label: string; pill: ReactNode; children: ReactNode }) {
+  return (
+    <div className="rounded-3xl bg-slate-50 px-5 py-4">
+      <p className="text-xs font-medium tracking-wider text-slate-500 uppercase">{label}</p>
+      <div className="mt-2 flex items-center gap-3">
+        <span className="min-w-0 flex-1 truncate text-[28px] leading-tight font-medium tracking-tight tabular-nums sm:text-[34px]">{children}</span>
+        {pill}
+      </div>
+    </div>
+  );
+}
+
+const promises = [
+  {
+    icon: <EyeSlash size={22} weight="regular" />,
+    title: "Private",
+    body: "Your ZEC stays shielded the whole time. Nothing on either chain links the two sides of the swap.",
+  },
+  {
+    icon: <HandCoins size={22} weight="regular" />,
+    title: "Nobody holds your coins",
+    body: "Each side locks its own coins, and the swap releases them together. There is no exchange or bridge in the middle.",
+  },
+  {
+    icon: <ArrowCounterClockwise size={22} weight="regular" />,
+    title: "Safe if anything goes wrong",
+    body: "If the other side disappears, a deadline sends your coins back to you automatically.",
+  },
+];
+
+function Promises() {
+  return (
+    <section className="border-t border-slate-100 bg-slate-50/60">
+      <div className="mx-auto grid max-w-6xl gap-5 px-4 py-20 sm:px-6 md:grid-cols-3 lg:py-24">
+        {promises.map((p) => (
+          <div key={p.title} className="rounded-3xl border border-slate-200/80 bg-white p-6 sm:p-7">
+            <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-slate-100 text-slate-800" aria-hidden>
+              {p.icon}
+            </span>
+            <h2 className="mt-5 text-lg font-semibold tracking-tight text-slate-900">{p.title}</h2>
+            <p className="mt-2 leading-relaxed text-slate-600">{p.body}</p>
           </div>
         ))}
       </div>
-      <div className="mx-auto mt-16 flex max-w-7xl flex-wrap justify-between gap-4 border-t border-slate-200 pt-8 font-mono text-[11px] tracking-[0.12em] text-slate-500">
-        <span>© 2026 Ferry</span>
-        <div className="flex flex-wrap gap-6">
-          <span>Zcash shielded pool</span>
-          <span>Bitcoin</span>
-          <span>Litecoin</span>
-          <span>Base</span>
-        </div>
+    </section>
+  );
+}
+
+function Steps() {
+  const { role } = useLocal();
+  const steps =
+    role === "Z"
+      ? [
+          { title: "Choose what you want", body: "Type how much ZEC to sell and pick Bitcoin, Litecoin, USDC or ETH." },
+          { title: "Confirm", body: "Press Swap. Ferry finds the best rate, and both sides lock their coins." },
+          { title: "Receive", body: "Your coins arrive in a few minutes. If anything stalls, your ZEC comes back." },
+        ]
+      : [
+          { title: "Choose what you pay with", body: "Type how much ZEC to buy and pick Bitcoin, Litecoin, USDC or ETH to pay." },
+          { title: "Confirm", body: "Press Swap. Ferry finds the best rate, and both sides lock their coins." },
+          { title: "Receive", body: "Shielded ZEC arrives in a few minutes. If anything stalls, your coins come back." },
+        ];
+  return (
+    <section id="how" className="scroll-mt-20 border-t border-slate-100">
+      <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6 lg:py-24">
+        <h2 className="text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">How it works</h2>
+        <ol className="mt-10 grid gap-8 md:grid-cols-3 md:gap-10">
+          {steps.map((s, i) => (
+            <li key={s.title}>
+              <span className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-900 text-sm font-semibold text-white tabular-nums" aria-hidden>
+                {i + 1}
+              </span>
+              <h3 className="mt-5 text-lg font-semibold tracking-tight text-slate-900">{s.title}</h3>
+              <p className="mt-2 leading-relaxed text-slate-600">{s.body}</p>
+            </li>
+          ))}
+        </ol>
+        <Link to="/how-it-works" className="mt-10 inline-flex items-center gap-1.5 rounded font-medium text-accent-700 underline-offset-4 hover:underline">
+          The full explanation
+          <ArrowRight size={14} weight="bold" aria-hidden />
+        </Link>
       </div>
-    </footer>
+    </section>
+  );
+}
+
+function Questions() {
+  return (
+    <section className="border-t border-slate-100 bg-slate-50/60">
+      <div className="mx-auto grid max-w-6xl gap-10 px-4 py-20 sm:px-6 lg:grid-cols-[1fr_1.6fr] lg:py-24">
+        <div>
+          <h2 className="text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">Questions</h2>
+          <p className="mt-3 text-slate-600">The short answers. There are more in Help.</p>
+          <Link to="/help" className="mt-5 inline-flex items-center gap-1.5 rounded font-medium text-accent-700 underline-offset-4 hover:underline">
+            All questions
+            <ArrowRight size={14} weight="bold" aria-hidden />
+          </Link>
+        </div>
+        <FaqList items={LANDING_FAQ} />
+      </div>
+    </section>
   );
 }
