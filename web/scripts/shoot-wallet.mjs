@@ -10,11 +10,20 @@
 //     in a swap), "Add funds" with the right address and QR payment link per coin (ZIP-321 zcash:,
 //     BIP-21 bitcoin:, EIP-681 for USDC and ETH on Base Sepolia) and its network notes, and "Send to
 //     my wallet": a send that goes through (form, check, sending, sent), one the node refuses (a
-//     swap took the coins in between) and one the network drops, all in the list of sends.
+//     swap took the coins in between) and one the network drops, all in the list of sends;
+//   - "Pay with MetaMask" in Add funds for USDC and ETH, against a fake browser wallet (EIP-1193,
+//     announced with EIP-6963 as MetaMask) that records every request: no button without a wallet;
+//     the swap card's shortfall as the amount; connect, then the switch to Base Sepolia (0x14a34);
+//     its balance read (balanceOf) and too much refused; a cancel (4001) in plain words; the token
+//     transfer sent to the token contract with exactly transfer(node, amount) as its data, and ETH
+//     with value to the node; Sent from your wallet, confirmed, then Arrived in your node once the
+//     node's balance rises (POST /api/_mock/credit); a reverted one; and the wallet's address in no
+//     request to the Ferry server and not in localStorage (the page makes no other request at all).
 // Then the production server (server/prod.mjs, needs `pnpm build` first): as a public demo (no
 // FERRY_OWN_NODE) the card has no "Receive to" or "Add funds", /wallet only shows balances, and the
 // server drops a browser's payout_to and sweep_to, refuses withdraw, withdrawals and addresses, and
-// leaves the daemons' `event: withdrawal` messages out of their event streams; PUBLIC_ORIGIN stays
+// leaves the daemons' `event: withdrawal` messages out of their event streams (and the page never
+// offers to pay from a browser wallet, nor talks to one); PUBLIC_ORIGIN stays
 // one origin. With FERRY_OWN_NODE=1 it passes them for the node's own page only (a loopback Host, no
 // other site's Origin; PUBLIC_ORIGIN's other loopback name, http://localhost:<port>, is the node's
 // own page too).
@@ -133,7 +142,64 @@ const MY_BTC = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 const MY_ZEC = bech("uregtest", Array.from({ length: 120 }, (_, i) => (i * 11 + 3) % 32), true);
 const MY_ZEC2 = bech("uregtest", Array.from({ length: 120 }, (_, i) => (i * 5 + 1) % 32), true);
 const MY_EVM = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
+// the account in the person's browser wallet (MetaMask), which pays the node
+const MY_METAMASK = "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65";
 const short = (a) => `${a.slice(0, 8)}…${a.slice(-6)}`;
+
+// A fake MetaMask for the page (page.addInitScript): an EIP-1193 provider announced with EIP-6963,
+// recording every request in window.__eth.calls. It holds 40 USDC and 0.5 ETH, starts on Ethereum
+// (0x1), and its knobs are window.__eth.reject (the person cancels the send: 4001) and .revert (the
+// chain reverts it); a receipt shows from the second time it is asked.
+function fakeMetaMask({ account, token, eth }) {
+  const s = { calls: [], chain: "0x1", reject: false, revert: false, sent: [], token: BigInt(token), eth: BigInt(eth), on: {} };
+  window.__eth = s;
+  const fail = (code, message) => Object.assign(new Error(message), { code });
+  const emit = (ev, v) => (s.on[ev] ?? []).forEach((f) => f(v));
+  const provider = {
+    isMetaMask: true,
+    async request({ method, params }) {
+      s.calls.push({ method, params: JSON.parse(JSON.stringify(params ?? null)) });
+      switch (method) {
+        case "eth_requestAccounts":
+        case "eth_accounts":
+          return [account];
+        case "eth_chainId":
+          return s.chain;
+        case "wallet_switchEthereumChain":
+          s.chain = params[0].chainId;
+          emit("chainChanged", s.chain);
+          return null;
+        case "eth_call":
+          if (params[0].data.startsWith("0x70a08231")) return "0x" + s.token.toString(16).padStart(64, "0");
+          throw fail(-32000, "execution reverted");
+        case "eth_getBalance":
+          return "0x" + s.eth.toString(16);
+        case "eth_sendTransaction": {
+          if (s.reject) throw fail(4001, "MetaMask Tx Signature: User denied transaction signature.");
+          const hash = "0x" + String(s.sent.length + 1).padStart(64, "ab");
+          s.sent.push({ hash, tx: params[0], asked: 0, revert: s.revert });
+          return hash;
+        }
+        case "eth_getTransactionReceipt": {
+          const x = s.sent.find((y) => y.hash === params[0]);
+          if (!x || ++x.asked < 2) return null;
+          return { transactionHash: x.hash, blockNumber: "0x10", status: x.revert ? "0x0" : "0x1" };
+        }
+        default:
+          throw fail(4200, `unsupported: ${method}`);
+      }
+    },
+    on: (ev, f) => (s.on[ev] ??= []).push(f),
+    removeListener: (ev, f) => (s.on[ev] = (s.on[ev] ?? []).filter((g) => g !== f)),
+  };
+  // a plain test icon (not MetaMask's logo), as the data: URI a wallet announces
+  const icon = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#3f3f46"/><path d="M8 23V9l8 8 8-8v14" fill="none" stroke="#fff" stroke-width="3" stroke-linejoin="round"/></svg>');
+  const info = Object.freeze({ uuid: "6f1c1a52-3d0e-4c39-9d7e-2f4a0c5b8e11", name: "MetaMask", icon, rdns: "io.metamask" });
+  const announce = () => window.dispatchEvent(new CustomEvent("eip6963:announceProvider", { detail: Object.freeze({ info, provider }) }));
+  window.addEventListener("eip6963:requestProvider", announce);
+  announce();
+}
+const word = (hex) => hex.toLowerCase().padStart(64, "0");
 
 const browser = await chromium.launch();
 const shots = [];
@@ -158,9 +224,9 @@ for (const theme of THEMES) {
   const [desk, phone] = pages;
   const each = (fn) => Promise.all(pages.map(fn));
   const text = (p, s, timeout = 20_000) => p.waitForFunction((s) => document.body.innerText.includes(s), s, { timeout });
-  const shoot = async (name, { settle = 600 } = {}) => {
+  const shoot = async (name, { settle = 600, on = pages } = {}) => {
     await sleep(settle);
-    for (const p of pages) {
+    for (const p of on) {
       const w = p.viewportSize().width;
       const path = `${OUT}${name}-${w}${theme === "dark" ? "-dark" : ""}.png`;
       await p.screenshot({ path });
@@ -402,7 +468,123 @@ for (const theme of THEMES) {
   await each((p) => text(p, "0.000065 ETH, for gas"));
   check(true, t("send USDC: the fee is gas, in ETH"));
   await shoot("20-send-usdc");
+
+  // ---------------------------------------------------------------------------- Wallet: Pay with MetaMask
+  // no browser wallet in these pages: the QR code only
+  await each((p) => p.goto(`${DEV}/wallet?add=usdc-base`));
+  await each((p) => p.locator('[data-qr^="ethereum:"] svg').waitFor());
+  await sleep(800);
+  check((await desk.locator("[data-pay-wallet]").count()) + (await phone.locator("[data-pay-wallet]").count()) === 0, t("no browser wallet: Add USDC has the QR code and no Pay with button"));
   for (const p of pages) await p.close();
+
+  // the same, with MetaMask in the browser
+  const ferryCalls = [];
+  const elsewhere = [];
+  const walletPage = async (width) => {
+    const p = await page(width);
+    await p.addInitScript(fakeMetaMask, { account: MY_METAMASK, token: "40000000", eth: "500000000000000000" });
+    p.on("request", (r) => (r.url().startsWith(DEV + "/") ? ferryCalls.push(`${r.method()} ${r.url()} ${r.postData() ?? ""}`) : r.url().startsWith("data:") ? null : elsewhere.push(r.url())));
+    return p;
+  };
+  const mm = [await walletPage(1440), await walletPage(390)];
+  const [mdesk] = mm;
+  const all = (fn) => Promise.all(mm.map(fn));
+  const calls = (p, method) => p.evaluate((m) => window.__eth.calls.filter((c) => c.method === m), method);
+  const sentTxs = (p) => p.evaluate(() => window.__eth.sent.map((x) => x.tx));
+  // buying ZEC with more USDC than the node holds: the card's Add funds says by how much (?need=)
+  await mdesk.goto(`${DEV}/app?sell=usdc-base&buy=zec`);
+  await mdesk.locator('input[aria-label="ZEC to buy"]').fill("5");
+  await text(mdesk, "and this costs");
+  const [, have, cost] = (await mdesk.locator("#swap-message").innerText()).match(/You have ([\d.]+) USDC, and this costs ([\d.]+) USDC/) ?? [];
+  const needHref = (await mdesk.locator("[data-add-funds]").getAttribute("href")) ?? "";
+  const needUnits = Number(new URL(needHref, DEV).searchParams.get("need"));
+  check(new URL(needHref, DEV).searchParams.get("add") === "usdc-base" && Math.abs(needUnits / 1e6 - (Number(cost) - Number(have))) < 0.01, t(`the swap card, ${have} USDC for ${cost}: Add funds carries the shortfall (${needHref})`));
+  // the swap card was 12.50 USDC short (?need, in base units)
+  await all((p) => p.goto(`${DEV}/wallet?add=usdc-base&need=12500000`));
+  await all((p) => p.locator('[data-pay-wallet="MetaMask"]').waitFor());
+  check((await mdesk.locator("[data-pay-wallet]").innerText()) === "Pay with MetaMask" && (await mdesk.locator('[data-pay-wallet] img[src^="data:image/svg+xml"]').count()) === 1, t("Add USDC: Pay with MetaMask, under the QR code, with the icon MetaMask announced"));
+  check((await calls(mdesk, "eth_requestAccounts")).length === 0, t("nothing asks the wallet until the person clicks"));
+  await shoot("22-add-usdc-metamask", { on: mm });
+  await all((p) => p.locator("[data-pay-wallet]").click());
+  await all((p) => p.locator("[data-wallet-balance]", { hasText: "40.00 USDC in MetaMask" }).waitFor());
+  check((await calls(mdesk, "eth_requestAccounts")).length === 1, t("Pay with MetaMask: eth_requestAccounts, once"));
+  const switches = await calls(mdesk, "wallet_switchEthereumChain");
+  check(switches.length === 1 && switches[0].params[0].chainId === "0x14a34", t(`the wallet is switched to Base Sepolia: wallet_switchEthereumChain ${JSON.stringify(switches[0]?.params)}`));
+  const reads = await calls(mdesk, "eth_call");
+  check(reads.some((c) => c.params[0].to.toLowerCase() === u.btc.token.toLowerCase() && c.params[0].data === "0x70a08231" + word(MY_METAMASK.slice(2))), t("its USDC is read with balanceOf(account) on the token"));
+  check((await mdesk.getByLabel("USDC to add").inputValue()) === "12.5", t("the amount starts at the swap card's shortfall: 12.5 USDC"));
+  check((await mdesk.locator("[data-pay-to]").innerText()) === u.btc.address, t("the review shows the node's whole address"));
+  check((await mdesk.locator("[data-pay-privacy]").innerText()) === "Ferry doesn't keep your MetaMask address. The transfer is public on Base Sepolia, like any USDC payment.", t("one line on privacy"));
+  await shoot("23-pay-usdc-form", { on: mm });
+  // more than the wallet has
+  await all((p) => p.getByLabel("USDC to add").fill("50"));
+  await all((p) => text(p, "MetaMask has 40.00 USDC on Base Sepolia."));
+  check(await mdesk.locator("[data-pay-submit]").isDisabled(), t("more than MetaMask holds: said plainly, and Send waits"));
+  // cancelled in the wallet
+  await all((p) => p.getByLabel("USDC to add").fill("12.5"));
+  await all((p) => p.evaluate(() => (window.__eth.reject = true)));
+  await all((p) => p.getByRole("button", { name: "Send 12.50 USDC" }).click());
+  await all((p) => p.locator("[data-pay-error]").waitFor());
+  check((await mdesk.locator("[data-pay-error]").innerText()) === "You cancelled in MetaMask. Nothing was sent.", t("a cancel in MetaMask (4001): You cancelled in MetaMask. Nothing was sent."));
+  await shoot("24-pay-cancelled", { on: mm });
+  // sent
+  await all((p) => p.evaluate(() => (window.__eth.reject = false)));
+  const callsBefore = ferryCalls.length;
+  await all((p) => p.getByRole("button", { name: "Send 12.50 USDC" }).click());
+  await all((p) => p.locator('[data-pay-state="pending"], [data-pay-state="confirmed"]').first().waitFor());
+  check(ferryCalls.slice(callsBefore).some((c) => c.startsWith(`GET ${DEV}/daemon/b-usdc-base/api/addresses`)), t("the node's address is fetched again right before sending"));
+  const [tx] = await sentTxs(mdesk);
+  const data = "0xa9059cbb" + word(u.btc.address.slice(2)) + word((12_500_000).toString(16));
+  check(tx.from === MY_METAMASK && tx.to.toLowerCase() === u.btc.token.toLowerCase() && tx.data === data && !("value" in tx) && !("gas" in tx), t(`the transfer goes to the token contract with data ${tx.data}`));
+  check(tx.data.length === 2 + 8 + 128 && tx.data.slice(34, 74) === u.btc.address.slice(2).toLowerCase(), t("the node's address is inside the call, never the recipient"));
+  await all((p) => text(p, "Sent from your wallet"));
+  const hash = (await mdesk.evaluate(() => window.__eth.sent[0].hash));
+  check((await mdesk.locator("[data-pay-explorer]").getAttribute("href")) === `https://sepolia.basescan.org/tx/${hash}`, t("Sent from your wallet: the hash, and a link to Basescan"));
+  await shoot("25-pay-sent", { on: mm, settle: 200 });
+  await all((p) => p.locator('[data-pay-state="confirmed"]').waitFor());
+  await all((p) => text(p, "Confirmed on Base Sepolia"));
+  check(true, t("the wallet's receipt (eth_getTransactionReceipt, status 0x1): confirmed, waiting for the node"));
+  check((await post(MU, "/api/_mock/credit", { asset: "token", amount: "25000000" })).ok, t("the two transfers land in the node's account"));
+  await all((p) => p.locator('[data-pay-state="arrived"]').waitFor({ timeout: 20_000 }));
+  await all((p) => text(p, "Arrived in your node"));
+  check(true, t("Arrived in your node, once its USDC goes up"));
+  await shoot("26-pay-arrived", { on: mm });
+
+  // ETH for gas: value to the node's account
+  await all((p) => p.goto(`${DEV}/wallet?add=eth:base-sepolia`));
+  await all((p) => p.locator('[data-pay-wallet="MetaMask"]').waitFor());
+  check(true, t("Add ETH: Pay with MetaMask too"));
+  await all((p) => p.locator("[data-pay-wallet]").click());
+  await all((p) => p.locator("[data-wallet-balance]", { hasText: "0.50 ETH in MetaMask" }).waitFor());
+  check((await mdesk.getByLabel("ETH to add").inputValue()) === "", t("no shortfall for gas: the amount starts empty"));
+  await all((p) => p.getByLabel("ETH to add").fill("0.01"));
+  await all((p) => p.getByRole("button", { name: "Send 0.01 ETH" }).click());
+  await all((p) => p.locator('[data-pay-state="pending"], [data-pay-state="confirmed"]').first().waitFor());
+  const [ethTx] = await sentTxs(mdesk);
+  check(ethTx.from === MY_METAMASK && ethTx.to === u.btc.address && ethTx.value === "0x2386f26fc10000" && !("data" in ethTx), t(`ETH goes to the node's account with value ${ethTx.value} (0.01 ETH)`));
+  await post(MU, "/api/_mock/credit", { asset: "eth", amount: "20000000000000000" });
+  await all((p) => p.locator('[data-pay-state="arrived"]').waitFor({ timeout: 20_000 }));
+  check(true, t("Arrived in your node, once its ETH goes up"));
+
+  // reverted on the chain
+  await all((p) => p.goto(`${DEV}/wallet?add=usdc-base`));
+  await all((p) => p.locator("[data-pay-wallet]").click());
+  await all((p) => p.locator("[data-wallet-balance]", { hasText: "in MetaMask" }).waitFor());
+  check((await mdesk.getByLabel("USDC to add").inputValue()) === "", t("opened from the Wallet page: the amount starts empty"));
+  await all((p) => p.evaluate(() => (window.__eth.revert = true)));
+  await all((p) => p.getByLabel("USDC to add").fill("5"));
+  await all((p) => p.getByRole("button", { name: "Send 5.00 USDC" }).click());
+  await all((p) => p.locator('[data-pay-state="reverted"]').waitFor({ timeout: 20_000 }));
+  await all((p) => text(p, "It didn't go through"));
+  check(true, t("a reverted transfer (receipt status 0x0): It didn't go through"));
+  await shoot("27-pay-reverted", { on: mm });
+
+  // the wallet's address went nowhere but the wallet
+  const mine = MY_METAMASK.slice(2).toLowerCase();
+  check(ferryCalls.length > 0 && ferryCalls.every((c) => !c.toLowerCase().includes(mine)), t(`the MetaMask address is in none of the ${ferryCalls.length} requests to the Ferry server`));
+  check(elsewhere.length === 0, t(`the page made no request anywhere else (${elsewhere.join(", ")})`));
+  for (const p of mm) check(!(await p.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }))).toLowerCase().includes(mine), t(`nor in localStorage (${p.viewportSize().width})`));
+  for (const p of mm) await p.close();
 
   // ---------------------------------------------------------------------------- the public demo
   await reset();
@@ -424,6 +606,14 @@ for (const theme of THEMES) {
     shots.push(path);
   }
   for (const p of demo) await p.close();
+  // with MetaMask in the browser too: no Add funds, so no Pay with, and the wallet is never asked
+  const pub = await page(1440);
+  await pub.addInitScript(fakeMetaMask, { account: MY_METAMASK, token: "40000000", eth: "500000000000000000" });
+  await pub.goto(PUBLIC + "/wallet?add=usdc-base");
+  await pub.locator('[data-coin="usdc-base"] [data-balance]').waitFor();
+  await sleep(800);
+  check((await pub.locator("[data-pay-wallet], [data-add-funds-sheet]").count()) === 0 && (await pub.evaluate(() => window.__eth.calls.length)) === 0, t("public demo with MetaMask in the browser: no Add funds sheet, no Pay with MetaMask, nothing asked of the wallet"));
+  await pub.close();
 }
 await browser.close();
 

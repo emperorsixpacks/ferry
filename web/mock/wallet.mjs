@@ -201,6 +201,14 @@ export function usdcNode({ zec, blockMs = 2000, name = "bram-usdc" }) {
       book.reset();
     },
     failNext: () => book.failNext(),
+    // a deposit lands in its account (POST /api/_mock/credit {asset: "token" | "eth", amount}), as a
+    // transfer from the person's browser wallet would: true when it is one
+    credit(asset, amount) {
+      const n = big(amount);
+      if ((asset !== "token" && asset !== "eth") || n == null || n <= 0n) return false;
+      bal[asset] += n;
+      return true;
+    },
     tick: () => book.tick(confs),
     sends: () => book.list(confs),
     // [status, body], or null for a path it doesn't serve
