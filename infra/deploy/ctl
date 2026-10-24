@@ -1,0 +1,540 @@
+#!/usr/bin/env bash
+# The Ferry deployment on its own host: docker compose with the enabled pairs, the secrets, what
+# to fund, status, token rotation and WETH wrapping. deploy.sh runs it over SSH; on the host, run
+# it from the repository copy (cd ~/ferry). docs/DEPLOY.md has the walkthrough.
+#
+#   infra/deploy/ctl pairs                   the optional pairs and which are enabled
+#   infra/deploy/ctl enable|disable <pair>   edit COMPOSE_PROFILES in infra/deploy/.env
+#   infra/deploy/ctl secrets                 create what is missing: .env, the node RPC passwords
+#                                            and their rpcauth lines, the enabled pairs' Base
+#                                            Sepolia keys (never printed)
+#   infra/deploy/ctl addresses               what to fund for each enabled pair: address, network,
+#                                            amount, faucet
+#   infra/deploy/ctl status                  the enabled pairs' node sync, balances and swaps
+#   infra/deploy/ctl wrap-weth <ETH>         wrap Base Sepolia ETH into WETH in the WETH maker's
+#                                            account (WETH's deposit())
+#   infra/deploy/ctl rotate-tokens           replace every daemon's API token
+#   infra/deploy/ctl stop-disabled           stop the containers of pairs that are not enabled
+#   infra/deploy/ctl compose <args>          docker compose for this deployment (= infra/deploy/compose)
+#
+# Pairs (compose profiles): ltc (ZEC/LTC, Litecoin testnet), usdc-base (ZEC/USDC, Base Sepolia),
+# weth-base (ZEC/WETH, Base Sepolia). ZEC/BTC always runs.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+ENV_FILE=infra/deploy/.env
+SECRETS=infra/deploy/secrets
+PROJECT="${FERRY_COMPOSE_PROJECT:-ferry}"
+ALL_PAIRS="ltc usdc-base weth-base"
+# cast, for the Base Sepolia accounts and the WETH wrap (only pulled when an EVM pair is on).
+FOUNDRY_IMAGE="${FOUNDRY_IMAGE:-ghcr.io/foundry-rs/foundry:v1.5.1@sha256:3a70bfa9bd2c732a767bb60d12c8770b40e8f9b6cca28efc4b12b1be81c7f28e}"
+BASE_SEPOLIA_CHAIN_ID=84532
+# What `addresses` asks for (test coins only; see docs/DEPLOY.md for the reasoning).
+SWAPS_TO_FUND=4
+B_GAS_ETH=0.002
+Z_GAS_ETH=0.001
+ZEC_FEE_RESERVE_ZAT=50000
+
+log() { printf '[ctl] %s\n' "$*" >&2; }
+die() { printf '[ctl] error: %s\n' "$*" >&2; exit 1; }
+
+# env_get <KEY> [default]: KEY's value in .env (the last line wins; surrounding quotes dropped).
+env_get() {
+  local v=
+  [ -f "$ENV_FILE" ] && v=$(sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1)
+  v=${v%\"}
+  v=${v#\"}
+  v=${v%\'}
+  v=${v#\'}
+  printf '%s' "${v:-${2:-}}"
+}
+
+# The enabled pairs, in canonical order: COMPOSE_PROFILES from the environment, else from .env.
+enabled_pairs() {
+  local raw p out=
+  if [ -n "${COMPOSE_PROFILES+x}" ]; then raw=$COMPOSE_PROFILES; else raw=$(env_get COMPOSE_PROFILES); fi
+  for p in $(printf '%s' "$raw" | tr ',' ' '); do
+    case " $ALL_PAIRS " in
+      *" $p "*) ;;
+      *) die "COMPOSE_PROFILES names \"$p\"; the pairs are: ${ALL_PAIRS// /, }" ;;
+    esac
+  done
+  for p in $ALL_PAIRS; do
+    case ",$(printf '%s' "$raw" | tr -d ' ')," in *",$p,"*) out="$out $p" ;; esac
+  done
+  printf '%s' "${out# }"
+}
+
+is_enabled() { case " $(enabled_pairs) " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# the containers of a pair
+services_of() {
+  case $1 in
+    ltc) echo "litecoind-init litecoind ferryd-z-ltc ferryd-b-ltc" ;;
+    *) echo "ferryd-z-$1 ferryd-b-$1" ;;
+  esac
+}
+
+# FERRY_LTC_URL, FERRY_USDC_BASE_URL, ...
+url_var() { printf 'FERRY_%s_URL' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')"; }
+
+# ------------------------------------------------------------------ compose
+
+# docker compose, with the web server's view of the enabled pairs: Z's URL for each one (empty for
+# the others, which then show as "not available here"), and unless .env sets FERRY_MAKERS, a maker
+# list with every enabled pair's maker.
+cmd_compose() {
+  [ -f "$ENV_FILE" ] || die "no $ENV_FILE yet (deploy.sh creates it; or: infra/deploy/ctl secrets)"
+  local pairs p makers
+  pairs=$(enabled_pairs)
+  for p in $ALL_PAIRS; do
+    if is_enabled "$p"; then
+      export "$(url_var "$p")=http://ferryd-z-$p:7101"
+    else
+      export "$(url_var "$p")="
+    fi
+  done
+  if [ -n "$pairs" ] && [ -z "$(env_get FERRY_MAKERS)" ] && [ -z "${FERRY_MAKERS:-}" ]; then
+    # B's peer URLs on the private network; the first stays the ZEC/BTC maker (the default).
+    makers="Demo maker|http://ferryd-b:7112|ZEC/BTC"
+    for p in $pairs; do
+      case $p in
+        ltc) makers="$makers, Demo maker (LTC)|http://ferryd-b-ltc:7112|ZEC/LTC" ;;
+        usdc-base) makers="$makers, Demo maker (USDC)|http://ferryd-b-usdc-base:7112|ZEC/USDC|base" ;;
+        weth-base) makers="$makers, Demo maker (WETH)|http://ferryd-b-weth-base:7112|ZEC/WETH|base" ;;
+      esac
+    done
+    export FERRY_MAKERS="$makers"
+  fi
+  local files=(-f infra/deploy/docker-compose.yml)
+  # a local rehearsal can add its own overrides (ports, a fork RPC); never needed on the server
+  [ -n "${FERRY_COMPOSE_OVERRIDE:-}" ] && files+=(-f "$FERRY_COMPOSE_OVERRIDE")
+  exec docker compose -p "$PROJECT" "${files[@]}" --env-file "$ENV_FILE" "$@"
+}
+
+compose() { "$ROOT/infra/deploy/ctl" compose "$@"; }
+
+# ------------------------------------------------------------------ pairs on/off
+
+cmd_pairs() {
+  local p
+  for p in $ALL_PAIRS; do
+    printf '  %-10s %s\n' "$p" "$(is_enabled "$p" && echo enabled || echo off)"
+  done
+}
+
+set_profiles() { # set_profiles "<pair> <pair>..."
+  local list
+  list=$(printf '%s' "$1" | tr -s ' ' ',' | sed 's/^,//; s/,$//')
+  [ -f "$ENV_FILE" ] || cp infra/deploy/.env.example "$ENV_FILE"
+  if grep -q '^COMPOSE_PROFILES=' "$ENV_FILE"; then
+    sed "s/^COMPOSE_PROFILES=.*/COMPOSE_PROFILES=$list/" "$ENV_FILE" >"$ENV_FILE.tmp"
+  else
+    { cat "$ENV_FILE"; printf '\n# The optional pairs that run (docs/DEPLOY.md, "More pairs").\nCOMPOSE_PROFILES=%s\n' "$list"; } >"$ENV_FILE.tmp"
+  fi
+  chmod 600 "$ENV_FILE.tmp"
+  mv "$ENV_FILE.tmp" "$ENV_FILE"
+  log "COMPOSE_PROFILES=$list"
+}
+
+cmd_enable() {
+  local pair=${1:-} p next=
+  case " $ALL_PAIRS " in *" $pair "*) ;; *) die "usage: ctl enable <${ALL_PAIRS// /|}>" ;; esac
+  for p in $ALL_PAIRS; do
+    if [ "$p" = "$pair" ] || is_enabled "$p"; then next="$next $p"; fi
+  done
+  set_profiles "$next"
+}
+
+cmd_disable() {
+  local pair=${1:-} p next=
+  case " $ALL_PAIRS " in *" $pair "*) ;; *) die "usage: ctl disable <${ALL_PAIRS// /|}>" ;; esac
+  for p in $(enabled_pairs); do [ "$p" = "$pair" ] || next="$next $p"; done
+  set_profiles "$next"
+}
+
+cmd_stop_disabled() {
+  local p
+  for p in $ALL_PAIRS; do
+    is_enabled "$p" && continue
+    # only if this pair ever ran here
+    if docker ps -q --filter "label=com.docker.compose.project=$PROJECT" \
+      --filter "label=com.docker.compose.service=ferryd-z-$p" | grep -q .; then
+      log "stopping the $p pair (not in COMPOSE_PROFILES; its volumes are kept)"
+      # shellcheck disable=SC2046
+      compose --profile "$p" stop $(services_of "$p")
+    fi
+  done
+}
+
+# ------------------------------------------------------------------ secrets
+
+# rpc_secret <password file> <ENV VAR>: a random node RPC password, and its rpcauth line (user
+# "ferry", salted HMAC-SHA256) in .env. The node gets only the hash; the daemons read the file.
+rpc_secret() {
+  local file=$SECRETS/$1 var=$2 auth
+  if [ ! -s "$file" ]; then
+    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$file"
+    # Readable inside the containers (a bind-mounted secret keeps host permissions); the
+    # directory above stays private to the deploying user.
+    chmod 644 "$file"
+    sed "/^$var=/d" "$ENV_FILE" >"$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+  fi
+  if ! grep -q "^$var=." "$ENV_FILE"; then
+    auth=$(python3 -c '
+import hashlib, hmac, secrets, sys
+pw = open(sys.argv[1]).read().strip()
+salt = secrets.token_hex(16)
+print("ferry:%s$%s" % (salt, hmac.new(salt.encode(), pw.encode(), hashlib.sha256).hexdigest()))' "$file")
+    sed "/^$var=/d" "$ENV_FILE" >"$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+    # single quotes: compose must not expand the $ in the hash
+    printf "%s='%s'\n" "$var" "$auth" >>"$ENV_FILE"
+  fi
+}
+
+# Run in the Foundry image as root, with only the capabilities it needs, the secrets directory
+# mounted and no network. For each account name: an encrypted keystore (<name>.json, its random
+# password in <name>.pass: what `cast --keystore` uses, e.g. for wrap-weth), the raw key ferryd
+# reads (<name>.key, 0600, owned by the daemons' uid 10001) and the address (<name>.addr). Nothing
+# is printed; no key is ever on a command line.
+KEYGEN='set -eu
+umask 077
+cd /secrets
+for n in "$@"; do
+  if [ ! -s "$n.json" ]; then
+    rm -f "$n.pass"
+    head -c 32 /dev/urandom | od -An -tx1 | tr -d " \n" >"$n.pass"
+    CAST_PASSWORD="$(cat "$n.pass")" cast wallet new /secrets "$n.json" >/dev/null
+  fi
+  cast wallet address --keystore "/secrets/$n.json" --password-file "/secrets/$n.pass" >"$n.addr"
+  CAST_UNSAFE_PASSWORD="$(cat "$n.pass")" cast wallet decrypt-keystore -k /secrets "$n.json" \
+    | sed -n "s/.*private key is: *//p" >"$n.key.tmp"
+  if ! grep -Eq "^0x[0-9a-fA-F]{64}$" "$n.key.tmp"; then
+    rm -f "$n.key.tmp"
+    echo "could not read back the key of $n" >&2
+    exit 1
+  fi
+  chmod 600 "$n.json" "$n.pass" "$n.key.tmp"
+  chmod 644 "$n.addr"
+  chown "$OWNER" "$n.json" "$n.pass" "$n.addr"
+  chown 10001:10001 "$n.key.tmp"
+  mv "$n.key.tmp" "$n.key"
+done'
+
+evm_keys() { # evm_keys <account name>...
+  local missing=() n
+  for n in "$@"; do [ -s "$SECRETS/$n.key" ] && [ -s "$SECRETS/$n.addr" ] || missing+=("$n"); done
+  [ ${#missing[@]} -eq 0 ] && return 0
+  log "creating Base Sepolia accounts: ${missing[*]} (keys in $SECRETS, never printed)"
+  docker run --rm --network none --user 0 --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE \
+    --security-opt no-new-privileges -e OWNER="$(id -u):$(id -g)" \
+    -v "$ROOT/$SECRETS:/secrets" "$FOUNDRY_IMAGE" "$KEYGEN" keygen "${missing[@]}" ||
+    die "creating the Base Sepolia accounts failed"
+}
+
+cmd_secrets() {
+  umask 077
+  [ -f "$ENV_FILE" ] || cp infra/deploy/.env.example "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  mkdir -p "$SECRETS"
+  chmod 700 "$SECRETS"
+  rpc_secret btc_rpc_pass BTC_RPCAUTH
+  rpc_secret ltc_rpc_pass LTC_RPCAUTH
+  local p
+  for p in $(enabled_pairs); do
+    case $p in
+      usdc-base | weth-base) evm_keys "$p-z" "$p-b" ;;
+    esac
+  done
+}
+
+# ------------------------------------------------------------------ status and funding
+
+# api_json <service> <path>: GET a daemon's control API from inside its container (the token is
+# read from its file there), or nothing.
+api_json() { compose exec -T "$1" ferry-api "$2" 2>/dev/null || true; }
+
+ltc_info() {
+  compose exec -T litecoind litecoin-cli -testnet -datadir=/home/litecoin/.litecoin -rpcport=19332 \
+    getblockchaininfo 2>/dev/null || true
+}
+
+evm_rpc() { env_get BASE_SEPOLIA_RPC https://sepolia.base.org; }
+
+# One python program formats both commands. Arguments: the mode, then KEY=VALUE settings, then the
+# pairs; each daemon's answers come in the environment (CTL_<pair>_<z|b>_<status|addresses|swaps>).
+REPORT='
+import json, os, sys
+
+mode = sys.argv[1]
+env = dict(a.split("=", 1) for a in sys.argv[2:] if "=" in a)
+pairs = [a for a in sys.argv[2:] if "=" not in a]
+
+def side(p, who):
+    k = "CTL_%s_%s_" % (p.replace("-", "_"), who)
+    return {"pair": p, **{n: os.environ.get(k + n, "") for n in ("status", "addresses", "swaps", "addr_file")}}
+
+data = [{"pair": p, "z": side(p, "z"), "b": side(p, "b"),
+         "node": os.environ.get("CTL_%s_node" % p.replace("-", "_"), "")} for p in pairs]
+
+def load(s):
+    try:
+        return json.loads(s) if s.strip() else None
+    except ValueError:
+        return None
+
+def num(v, d):
+    s = ("%.*f" % (d, v)).rstrip("0").rstrip(".")
+    return s or "0"
+
+def units(n, d):
+    # an exact decimal of n base units at d decimals: 10800000000000001 wei is 0.010800000000000001
+    whole, frac = divmod(int(n), 10 ** d)
+    f = ("%0*d" % (d, frac)).rstrip("0") if d else ""
+    return "%d.%s" % (whole, f) if f else str(whole)
+
+def zec(zat):
+    return units(zat, 8)
+
+FAUCET_TAZ = "https://fauzec.com (1 TAZ a day)"
+FAUCET_ETH = ("the Coinbase CDP faucet (https://portal.cdp.coinbase.com/products/faucet) or the "
+              "Alchemy faucet (https://www.alchemy.com/faucets/base-sepolia), network BASE SEPOLIA, "
+              "not Ethereum Sepolia")
+FAUCET_USDC = "https://faucet.circle.com, network BASE SEPOLIA"
+FAUCET_LTC = ("a Litecoin testnet faucet (they come and go: search \"litecoin testnet faucet\"), "
+              "or anyone holding tLTC")
+SWAPS = int(env["swaps"])
+
+def taz_line(z, max_zat):
+    a = load(z["addresses"])
+    addr = a["zec"]["address"] if a and a["zec"].get("address") else "(ferryd-z-%s not answering yet)" % z["pair"]
+    need = max_zat + int(env["zec_reserve"])
+    print("  Z (zoe), the taker, sells ZEC: Zcash testnet (TAZ), at least %s TAZ (the largest swap plus fees)" % zec(need))
+    print("      %s" % addr)
+    print("      from %s; TAZ from another wallet is spendable after 10 confirmations (~13 min)" % FAUCET_TAZ)
+
+def offer_of(s, fallback):
+    if s and s.get("offer"):
+        return s["offer"]["rate_sat_per_zec"], s["offer"]["max_zat"]
+    return fallback
+
+for pair in data:
+    p = pair["pair"]
+    zs, bs = load(pair["z"]["status"]), load(pair["b"]["status"])
+    if p == "ltc":
+        rate, max_zat = offer_of(bs, (int(env["ltc_rate"]), int(env["ltc_max"])))
+        if mode == "addresses":
+            a = load(pair["b"]["addresses"])
+            per = rate * max_zat / 1e8
+            print("ZEC/LTC on the Litecoin TESTNET (testnet4; addresses tltc1...)")
+            print("  B (bram), the maker, pays LTC: at least %s tLTC (the largest swap, %s ZEC at %s LTC per ZEC,"
+                  " plus fees); %s covers %d" % (num(per * 1.02 / 1e8, 4), zec(max_zat), units(rate, 8),
+                                                 num(per * SWAPS * 1.02 / 1e8, 4), SWAPS))
+            print("      %s" % (a["btc"]["address"] if a else "(ferryd-b-ltc not answering yet)"))
+            print("      from %s. Send to this tltc1 address only, never to an MWEB (tmweb1...) one" % FAUCET_LTC)
+            taz_line(pair["z"], max_zat)
+        else:
+            n = load(pair.get("node", ""))
+            if n:
+                state = "synced" if not n["initialblockdownload"] and n["blocks"] == n["headers"] else "syncing"
+                print("ZEC/LTC  litecoin testnet node %s: block %d of %d headers (%.2f%%)"
+                      % (state, n["blocks"], n["headers"], 100 * n["verificationprogress"]))
+            else:
+                print("ZEC/LTC  litecoin testnet node not answering")
+            for who, s in (("B", bs), ("Z", zs)):
+                if s:
+                    b = s["balances"]
+                    print("  ferryd %s  %s: %s LTC  %s ZEC  (litecoin height %d, zec %s height %d)"
+                          % (who, s["name"], units(b["btc_sat"], 8), zec(b["zec_shielded_zat"]),
+                             s["chains"]["btc"]["height"], s["chains"]["zec"]["network"], s["chains"]["zec"]["height"]))
+                else:
+                    print("  ferryd %s  not answering" % who)
+    else:
+        token = "USDC" if p.startswith("usdc") else "WETH"
+        dec = 6 if token == "USDC" else 18
+        key = "usdc" if token == "USDC" else "weth"
+        rate, max_zat = offer_of(bs, (int(env[key + "_rate"]), int(env[key + "_max"])))
+        if mode == "addresses":
+            ab, az = load(pair["b"]["addresses"]), load(pair["z"]["addresses"])
+            b_addr = ab["btc"]["address"] if ab else pair["b"]["addr_file"] or "(no account yet: run ctl secrets)"
+            z_addr = az["btc"]["address"] if az else pair["z"]["addr_file"] or "(no account yet: run ctl secrets)"
+            per = rate * max_zat / 1e8 / 10 ** dec
+            print("ZEC/%s on BASE SEPOLIA (chain %s), token %s" % (token, env["chain_id"], env[key + "_token"]))
+            if token == "USDC":
+                print("  B (bram), the maker, pays USDC: about %s ETH for gas, and at least %s USDC (the largest"
+                      " swap, %s ZEC at %s USDC per ZEC); %s covers %d" % (env["b_gas"], num(per, 6), zec(max_zat),
+                                                                          units(rate, 6), num(per * SWAPS, 6), SWAPS))
+                print("      %s" % b_addr)
+                print("      ETH from %s" % FAUCET_ETH)
+                print("      USDC from %s" % FAUCET_USDC)
+            else:
+                wrap = per * SWAPS
+                print("  B (bram), the maker, pays WETH: about %s ETH: %s for gas, %s to wrap into WETH (%d swaps of %s ZEC at %s WETH per ZEC)"
+                      % (num(float(env["b_gas"]) + wrap, 6), env["b_gas"], num(wrap, 6), SWAPS, zec(max_zat), units(rate, 18)))
+                print("      %s" % b_addr)
+                print("      ETH from %s" % FAUCET_ETH)
+                print("      then wrap it (WETH deposit()): infra/deploy/deploy.sh <ssh-host> wrap-weth %s" % num(wrap, 6))
+            print("  Z (zoe), the taker, receives the %s and sends the claim: about %s ETH for gas" % (token, env["z_gas"]))
+            print("      %s" % z_addr)
+            print("      from the same ETH faucets")
+            taz_line(pair["z"], max_zat)
+        else:
+            s0 = bs or zs
+            if s0:
+                print("ZEC/%s  %s (chain %s): block %d via %s" % (token, s0["chains"]["btc"]["network"],
+                      s0["counter"]["chain_id"], s0["chains"]["btc"]["height"], env["rpc_host"]))
+            else:
+                print("ZEC/%s  Base Sepolia daemons not answering" % token)
+            for who, s in (("B", bs), ("Z", zs)):
+                if s:
+                    b = s["balances"]
+                    print("  ferryd %s  %s %s: %s %s  %s ETH  %s ZEC"
+                          % (who, s["name"], s["counter"]["account"], units(b["token_units"], dec),
+                             token, num(int(b["eth_wei"]) / 1e18, 6), zec(b["zec_shielded_zat"])))
+                else:
+                    print("  ferryd %s  not answering" % who)
+    if mode == "status":
+        for who in ("z", "b"):
+            sw = load(pair[who]["swaps"]) or []
+            for s in sw:
+                print("    %s swap %s...  %-18s outcome %s" % (who.upper(), s["id"][:12], s["state"], s["outcome"]))
+    print()
+'
+
+# report <addresses|status>: ask every enabled pair's daemons, then format.
+report() {
+  local mode=$1 p who k pairs
+  pairs=$(enabled_pairs)
+  for p in $pairs; do
+    for who in z b; do
+      k=CTL_${p//-/_}_${who}
+      export "${k}_status=$(api_json "ferryd-$who-$p" /api/status)"
+      if [ "$mode" = addresses ]; then
+        export "${k}_addresses=$(api_json "ferryd-$who-$p" /api/addresses)"
+      else
+        export "${k}_swaps=$(api_json "ferryd-$who-$p" /api/swaps)"
+      fi
+      # the Base Sepolia account, known before its daemon answers
+      [ -s "$SECRETS/$p-$who.addr" ] && export "${k}_addr_file=$(cat "$SECRETS/$p-$who.addr")"
+    done
+  done
+  if [ "$mode" = status ] && is_enabled ltc; then export "CTL_ltc_node=$(ltc_info)"; fi
+  # shellcheck disable=SC2086
+  python3 -c "$REPORT" "$mode" \
+    swaps="$SWAPS_TO_FUND" zec_reserve="$ZEC_FEE_RESERVE_ZAT" b_gas="$B_GAS_ETH" z_gas="$Z_GAS_ETH" \
+    chain_id="$BASE_SEPOLIA_CHAIN_ID" rpc_host="$(evm_rpc | sed -E 's#^([a-z]+://[^/]+).*#\1#')" \
+    ltc_rate="$(env_get LTC_RATE 100000000)" ltc_max="$(env_get LTC_MAX_ZAT 25000000)" \
+    usdc_rate="$(env_get USDC_RATE 40000000)" usdc_max="$(env_get USDC_MAX_ZAT 25000000)" \
+    usdc_token="$(env_get BASE_SEPOLIA_USDC 0x036CbD53842c5426634e7929541eC2318f3dCF7e) (Circle's test USDC)" \
+    weth_rate="$(env_get WETH_RATE 12000000000000000)" weth_max="$(env_get WETH_MAX_ZAT 25000000)" \
+    weth_token="$(env_get BASE_SEPOLIA_WETH 0x4200000000000000000000000000000000000006) (WETH)" \
+    $pairs
+}
+
+cmd_addresses() {
+  if [ -z "$(enabled_pairs)" ]; then
+    echo "No optional pair is enabled (ZEC/BTC only). See: infra/deploy/ctl pairs"
+    return 0
+  fi
+  report addresses
+}
+
+cmd_status() {
+  [ -n "$(enabled_pairs)" ] || return 0
+  report status
+}
+
+# ------------------------------------------------------------------ WETH
+
+WRAP='set -eu
+k="--keystore /secrets/weth-base-b.json --password-file /secrets/weth-base-b.pass"
+id=$(cast chain-id)
+if [ "$id" != "$CHAIN_ID" ]; then
+  echo "the RPC answers for chain $id, not Base Sepolia ($CHAIN_ID): nothing sent" >&2
+  exit 1
+fi
+sym=$(cast call "$WETH" "symbol()(string)")
+if [ "$sym" != "\"WETH\"" ]; then
+  echo "$WETH reports symbol $sym, not WETH: nothing sent" >&2
+  exit 1
+fi
+me=$(cast wallet address $k)
+wei=$(cast to-wei "$AMOUNT")
+eth=$(cast balance "$me")
+weth=$(cast call "$WETH" "balanceOf(address)(uint256)" "$me" | cut -d " " -f 1)
+echo "WETH maker $me on Base Sepolia: $(cast from-wei "$eth") ETH, $(cast from-wei "$weth") WETH"
+# keep about 0.001 ETH for the maker'"'"'s own gas (approve and lock)
+if awk -v have="$eth" -v want="$wei" "BEGIN { exit !(have + 0 < want + 1e15) }"; then
+  echo "not enough ETH: wrapping $AMOUNT ETH needs $AMOUNT plus about 0.001 ETH left for gas" >&2
+  exit 1
+fi
+echo "wrapping $AMOUNT ETH: deposit() on $WETH"
+cast send "$WETH" "deposit()" --value "$wei" $k | grep -E "^(status|transactionHash) "
+weth=$(cast call "$WETH" "balanceOf(address)(uint256)" "$me" | cut -d " " -f 1)
+echo "now $(cast from-wei "$(cast balance "$me")") ETH, $(cast from-wei "$weth") WETH"'
+
+# in_foundry <account> <script> [-e VAR=value...]: cast with that Base Sepolia account's keystore,
+# as the deploying user (who owns the keystore), no capabilities, the secrets read-only. The key
+# stays in its keystore: cast decrypts it in memory.
+in_foundry() {
+  local account=$1 script=$2
+  shift 2
+  if [ ! -s "$SECRETS/$account.json" ] || [ ! -s "$SECRETS/$account.pass" ]; then
+    die "no $account account yet: run infra/deploy/ctl secrets"
+  fi
+  docker run --rm --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
+    -e HOME=/tmp -e ETH_RPC_URL="$(evm_rpc)" -e CHAIN_ID="$BASE_SEPOLIA_CHAIN_ID" \
+    -e ACCOUNT="$account" "$@" -v "$ROOT/$SECRETS:/secrets:ro" "$FOUNDRY_IMAGE" "$script"
+}
+
+cmd_wrap_weth() {
+  local amount=${1:-}
+  if ! printf '%s' "$amount" | grep -Eq '^[0-9]+(\.[0-9]{1,18})?$' || [ "$amount" = 0 ]; then
+    die "usage: ctl wrap-weth <ETH amount, e.g. 0.012>"
+  fi
+  is_enabled weth-base || die "the weth-base pair is not enabled (infra/deploy/ctl enable weth-base)"
+  in_foundry weth-base-b "$WRAP" -e AMOUNT="$amount" \
+    -e WETH="$(env_get BASE_SEPOLIA_WETH 0x4200000000000000000000000000000000000006)"
+}
+
+# ------------------------------------------------------------------ tokens
+
+cmd_rotate_tokens() {
+  local svcs="ferryd-z ferryd-b" p key vol
+  for p in $(enabled_pairs); do svcs="$svcs ferryd-z-$p ferryd-b-$p"; done
+  log "replacing the API tokens of: $svcs"
+  # shellcheck disable=SC2086
+  compose stop $svcs web
+  for key in $svcs; do
+    vol=${PROJECT}_token-${key#ferryd-}
+    docker run --rm --network none -v "$vol:/t" debian:bookworm-slim rm -f /t/api-token
+  done
+  # shellcheck disable=SC2086
+  compose up -d $svcs web
+  log "done: each daemon created a new token; the web server reads it from the token volume"
+}
+
+# the header comment above
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}"; }
+
+# A typo in COMPOSE_PROFILES stops every command here (a command substitution would hide it).
+case "${1:-help}" in
+  help | -h | --help) ;;
+  *) enabled_pairs >/dev/null ;;
+esac
+
+case "${1:-help}" in
+  compose) shift; cmd_compose "$@" ;;
+  pairs) cmd_pairs ;;
+  enable) cmd_enable "${2:-}" ;;
+  disable) cmd_disable "${2:-}" ;;
+  secrets) cmd_secrets ;;
+  addresses) cmd_addresses ;;
+  status) cmd_status ;;
+  wrap-weth) cmd_wrap_weth "${2:-}" ;;
+  rotate-tokens) cmd_rotate_tokens ;;
+  stop-disabled) cmd_stop_disabled ;;
+  help | -h | --help) usage ;;
+  *) usage; exit 2 ;;
+esac
