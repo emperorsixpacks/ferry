@@ -1,8 +1,8 @@
 import { Fragment, type ReactNode } from "react";
-import { ArrowDown, ArrowRight, ArrowsDownUp, CaretDown, ShieldCheck } from "@phosphor-icons/react";
+import { ArrowDown, ArrowRight, ArrowsDownUp, CaretDown, Check, ShieldCheck } from "@phosphor-icons/react";
 import type { PairId } from "@/api";
 import { useNear } from "../lib/near";
-import { ZEC, isNear, tickerOf, type Path, type Step, type Token } from "../lib/paths";
+import { ZEC, isNear, tickerOf, type OptOut, type Path, type Step, type Token } from "../lib/paths";
 import { cn } from "../lib/utils";
 import { NearMark, NearTokenLogo, PairLogo, TokenLogo } from "./Logos";
 
@@ -125,7 +125,7 @@ export function PathLine({ path, via = [], time, className }: { path: Path; via?
       );
     })
     .filter(Boolean);
-  const tags = [path.kind === "sell" || path.kind === "buy" ? "one swap" : null, path.private ? "private" : null, path.available === false ? "not available here" : (time ?? path.time) || null].filter(Boolean);
+  const tags = [path.kind === "sell" || path.kind === "buy" ? "one swap" : null, path.private ? "private" : path.kind === "near-only" ? "public" : null, path.available === false ? "not available here" : (time ?? path.time) || null].filter(Boolean);
   return (
     <p className={cn("flex flex-wrap items-center gap-x-1.5 gap-y-0.5", className)} data-path-line {...(near ? { "data-near-route": true } : {})}>
       {/* the spaces read in its text (a flex row doesn't draw them) */}
@@ -157,6 +157,38 @@ export function PrivacyLine({ text }: { text: string }) {
       <ShieldCheck size={16} weight="regular" className="mt-px shrink-0" aria-hidden />
       <span>{text}</span>
     </p>
+  );
+}
+
+// The settings sheet's choice for two coins: private, through shielded ZEC (the default), or the
+// opt-out, NEAR Intents alone, with its cost said plainly. Remembered for these two coins.
+export function RouteChoice({ optOut }: { optOut: OptOut }) {
+  if (!optOut.available) return null;
+  const options = [
+    { on: false, label: "Private, through shielded ZEC", note: "The default. No transaction links what you sold to what you got." },
+    { on: true, label: "Faster, but public: via NEAR Intents only", note: "Anyone can link what you sold to what you got, and you trust NEAR Intents for all of it." },
+  ];
+  return (
+    <Section title="Route" note="Ferry swaps privately by default: the coins pass through Zcash's shielded pool.">
+      <div role="radiogroup" aria-label="Route" className="space-y-1 px-2">
+        {options.map((o) => (
+          <button
+            key={o.label}
+            type="button"
+            role="radio"
+            aria-checked={optOut.on === o.on}
+            onClick={() => optOut.set(o.on)}
+            className={cn("flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-colors", optOut.on === o.on ? "bg-slate-100" : "hover:bg-slate-50")}
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block font-medium text-slate-900">{o.label}</span>
+              <span className="mt-0.5 block text-[13px] text-slate-500">{o.note}</span>
+            </span>
+            {optOut.on === o.on ? <Check size={16} weight="bold" className="shrink-0 text-slate-900" aria-hidden /> : <span className="w-4 shrink-0" aria-hidden />}
+          </button>
+        ))}
+      </div>
+    </Section>
   );
 }
 

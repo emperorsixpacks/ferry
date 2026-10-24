@@ -12,7 +12,7 @@ import { PAUSE, PAUSES, coinFor, parseUnits, routeQuote, startAmount, tickerOf, 
 import { cn } from "../lib/utils";
 import { RouteStrip } from "./RouteStrip";
 import { CoinPicker, tokenSubtitle } from "./TokenPicker";
-import { Fact, FlipButton, Panel, PathLine, PrivacyLine, Section, SidePill, amountSize } from "./SwapParts";
+import { Fact, FlipButton, Panel, PathLine, PrivacyLine, RouteChoice, Section, SidePill, amountSize } from "./SwapParts";
 import { Sheet } from "./ui/sheet";
 
 // The swap card for two Ferry coins: a private swap, the default for any two coins. Sell one coin,
@@ -25,7 +25,7 @@ import { Sheet } from "./ui/sheet";
 // what a Bitcoin or Litecoin lock's own fee needs on top of the amount (ferryd's B keeps as much)
 const LOCK_FEE_RESERVE = 10_000;
 
-export function RouteCard({ pick, path, ctx, onPick, onFlip, blocked }: CardProps) {
+export function RouteCard({ pick, path, ctx, onPick, onFlip, blocked, optOut }: CardProps) {
   const from = path.from as PairId;
   const to = path.to as PairId;
   const d = useLocal();
@@ -141,6 +141,7 @@ export function RouteCard({ pick, path, ctx, onPick, onFlip, blocked }: CardProp
             <GearSix size={16} weight="bold" className="text-slate-500" aria-hidden />
           </button>
           <Sheet anchored open={settings} onClose={() => setSettings(false)} title="Private swap settings">
+            {optOut ? <RouteChoice optOut={optOut} /> : null}
             <Section title="Privacy pause" note="A random wait between the two swaps, so they're harder to match up.">
               <div role="radiogroup" aria-label="Privacy pause" className="space-y-1 px-2">
                 {PAUSES.map((p) => (

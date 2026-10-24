@@ -297,7 +297,8 @@ export interface NearToken {
 export interface NearInfo {
   available: boolean;
   // whether NEAR swaps run here, each way (the operator's own node, on mainnet)
-  execution: { sell: boolean; buy: boolean };
+  // direct: NEAR Intents alone, the opt-out from a private swap
+  execution: { sell: boolean; buy: boolean; direct?: boolean };
   // why not: "demo" (a public demo: quotes only) or "mainnet" (the nodes are on test networks)
   reason: "demo" | "mainnet" | null;
   tokens: NearToken[];
@@ -425,8 +426,8 @@ export const retryNear = (id: string) => near<NearJob>(`/jobs/${id}/retry`, {});
 // NEAR Intents' part alone: "out" what `amount` of coin C (a route's payout) comes to in the asset;
 // "in" what sending `amount` of the asset delivers of coin A into the user's B node
 export interface NearHop {
-  side: "in" | "out";
-  pair: PairId;
+  side: "in" | "out" | "direct";
+  pair: PairId | null;
   asset: string;
   amount_in: string;
   amount_out: string;
@@ -436,9 +437,11 @@ export interface NearHop {
   address: "ok" | null;
   verified: boolean;
 }
-export const getNearHop = (body: { side: "in" | "out"; pair: PairId; asset: string; amount: string; address?: string; exact?: boolean }) => near<NearHop>("/hop", body);
+export const getNearHop = (body: { side: "in" | "out"; pair: PairId; asset: string; amount: string; address?: string; exact?: boolean } | { side: "direct"; asset_in: string; asset_out: string; amount: string; address?: string; refund?: string; exact?: boolean }) =>
+  near<NearHop>("/hop", body);
 
-export type ComboKind = "route-near" | "near-route" | "near-near";
+// near-only: the opt-out from a private swap, NEAR Intents alone (from your own wallet to your address)
+export type ComboKind = "route-near" | "near-route" | "near-near" | "near-only";
 export type ComboState = "deposit" | "near_in" | "funding" | "route" | "near_out" | "holding" | "done" | "refunded" | "failed" | "expired";
 export type NearAsset = { id: string; symbol: string; blockchain: string; decimals: number };
 
@@ -467,9 +470,10 @@ export interface ComboJob {
   created_at: number;
   updated_at: number;
   // the route's two Ferry coins
-  from: PairId;
-  to: PairId;
-  pause: Pause;
+  // (near-only: the Ferry coin each end is, if it is one)
+  from: PairId | null;
+  to: PairId | null;
+  pause: Pause | null;
   asset_in: NearAsset | null;
   asset_out: NearAsset | null;
   via_in: { id: string; symbol: string; decimals: number } | null;
@@ -490,7 +494,7 @@ export interface ComboJob {
 
 export const startCombo = (body: {
   kind: ComboKind;
-  route: { from: PairId; to: PairId; zec_zat: number; min_out: number; pause: Pause; maker1?: string; maker2?: string[]; max_in?: number };
+  route?: { from: PairId; to: PairId; zec_zat: number; min_out: number; pause: Pause; maker1?: string; maker2?: string[]; max_in?: number };
   asset_in?: string;
   amount_in?: string;
   refund_address?: string;

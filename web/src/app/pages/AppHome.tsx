@@ -9,6 +9,7 @@ import { ComboCard } from "../components/ComboCard";
 import { Layout } from "../components/Layout";
 import { PartnerList } from "../components/MakerList";
 import { NearCard } from "../components/NearCard";
+import { NearOnlyCard } from "../components/NearOnlyCard";
 import { OffCard } from "../components/OffCard";
 import { RouteCard } from "../components/RouteCard";
 import { Fact, FlipButton, Panel, PathLine, PrivacyLine, Section, SidePill, amountSize, capital, minutesText } from "../components/SwapParts";
@@ -34,6 +35,8 @@ import { useActivityRows } from "./Activity";
 //   coin ↔ coin               a private swap through shielded ZEC (RouteCard), the default for any
 //                             two coins: Ferry's promise is a cross-chain swap that leaves no trail
 //   NEAR Intents at an end    a private swap with NEAR Intents before it, after it or both (ComboCard)
+//   opted out, for two coins  NEAR Intents alone, public (NearOnlyCard): chosen in the settings sheet
+//                             only, remembered for those two coins, never the default
 // What this server can't run stays on the card, looking the same, with one sentence on why
 // (OffCard). Under the amounts, the path line says who runs each part and how long it takes; under
 // the card, one honest line says what stays private. Beside the card (below it on a phone), "Recent
@@ -66,8 +69,9 @@ export function AppHome() {
   const { pick, path } = sel;
   let card = null;
   if (pick && path) {
-    const props: CardProps = { pick, path, ctx, onPick: sel.pickSide, onFlip: sel.flip, blocked };
+    const props: CardProps = { pick, path, ctx, onPick: sel.pickSide, onFlip: sel.flip, blocked, optOut: sel.optOut };
     if (!path.available) card = <OffCard {...props} />;
+    else if (path.kind === "near-only") card = <NearOnlyCard key={`${pick.sell}>${pick.buy}`} {...props} />;
     else if ((path.kind === "sell" || path.kind === "buy") && following(path, d)) card = <SwapCard key={`${path.kind}|${path.pair}`} {...props} status={d.status} />;
     else if ((path.kind === "near-sell" || path.kind === "near-buy") && following(path, d)) card = <NearCard key={path.kind} {...props} asset={nearAssetOf(path.kind === "near-sell" ? pick.buy : pick.sell)!} />;
     else if (path.kind === "route") card = <RouteCard {...props} />;

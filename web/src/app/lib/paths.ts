@@ -16,6 +16,14 @@ export interface Pick {
   buy: Token;
 }
 
+// The opt-out from a private swap, for two coins: NEAR Intents alone. `available`: NEAR Intents takes
+// both coins here; `on`: the person chose it for these two (remembered per pair).
+export interface OptOut {
+  on: boolean;
+  available: boolean;
+  set: (on: boolean) => void;
+}
+
 // What every card on /app gets: the two coins, their path, what this server runs, and the two ways
 // to change them (a coin picked on a side, the arrow). `blocked`: why nothing can start now.
 export interface CardProps {
@@ -25,6 +33,7 @@ export interface CardProps {
   onPick: (side: Side, token: Token) => void;
   onFlip: () => void;
   blocked: string | null;
+  optOut?: OptOut | null;
 }
 
 // What this server runs: its daemons each way, its router, NEAR Intents.
@@ -46,6 +55,7 @@ export function usePathCtx(): PathCtx {
             ? null
             : {
                 tokens: Object.fromEntries(near.tokens.map((t) => [t.assetId, { symbol: t.symbol, blockchain: t.blockchain, ferry: t.ferry }])),
+                // sell, buy and direct (NEAR Intents alone)
                 runs: info.execution,
                 reason: info.reason,
                 vias: info.vias,
@@ -107,10 +117,24 @@ function start(): Start {
 
 export const storePick = (p: Pick) => write(KEY, `${p.sell}>${p.buy}`);
 
+// the pairs the person opted out of a private swap for (NEAR Intents alone), "sell>buy"
+const PUBLIC_KEY = "ferry.public";
+function readPublic(): Set<string> {
+  try {
+    const v = JSON.parse(read(PUBLIC_KEY) ?? "[]");
+    return new Set(Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+const PRIVATE_KINDS = ["route", "route-near", "near-route", "near-near"];
+
 export interface Selection {
   // null while what this server runs is still unknown and nothing names a pick
   pick: Pick | null;
   path: Path | null;
+  // the opt-out for two coins (null: these two aren't coin to coin)
+  optOut: OptOut | null;
   set: (p: Pick) => void;
   // a coin picked on one side (the other side's coin swaps them)
   pickSide: (side: Side, token: Token) => void;
@@ -125,7 +149,26 @@ export function useSelection(ctx: PathCtx): Selection {
   if (state.source === "legacy" && ctx.ready) pick = isPair(d.pair) ? oriented(d.pair, d.dir) : null;
   // a remembered pick this server can't run gives way to the default
   if ((state.source === "stored" || state.source === "legacy") && ctx.ready && (!pick || resolvePath(pick.sell, pick.buy, ctx).available === false)) pick = defaultPick(ctx);
-  const path = pick ? resolvePath(pick.sell, pick.buy, ctx) : null;
+  // private by default; NEAR Intents alone only where the person opted out, for these two coins
+  const [publics, setPublics] = useState<Set<string>>(readPublic);
+  const privatePath = pick ? resolvePath(pick.sell, pick.buy, ctx) : null;
+  const publicPath = pick && privatePath && PRIVATE_KINDS.includes(privatePath.kind) ? resolvePath(pick.sell, pick.buy, ctx, { public: true }) : null;
+  const pickKey = pick ? `${pick.sell}>${pick.buy}` : "";
+  const optOut: OptOut | null =
+    pick && publicPath
+      ? {
+          on: publics.has(pickKey) && publicPath.available === true,
+          available: publicPath.available === true,
+          set: (on) => {
+            const next = new Set(publics);
+            if (on) next.add(pickKey);
+            else next.delete(pickKey);
+            setPublics(next);
+            write(PUBLIC_KEY, JSON.stringify([...next]));
+          },
+        }
+      : null;
+  const path = optOut?.on ? publicPath : privatePath;
 
   // follow the daemon of a ZEC swap: its direction, and its pair
   const follow = (p: Pick) => {
@@ -148,6 +191,7 @@ export function useSelection(ctx: PathCtx): Selection {
   return {
     pick,
     path,
+    optOut,
     set,
     pickSide: (side, token) => pick && set(pickOn(pick, side, token)),
     flip: () => pick && set({ sell: pick.buy, buy: pick.sell }),

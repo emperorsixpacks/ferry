@@ -237,9 +237,9 @@ function ComboRow({ job: j }: { job: ComboJob }) {
   const started = new Date(j.created_at * 1000);
   const logo = (side: "in" | "out", size: number) => {
     const a = side === "in" ? j.asset_in : j.asset_out;
-    return a ? <NearTokenLogo symbol={a.symbol} chain={a.blockchain} size={size} /> : <PairLogo pair={side === "in" ? j.from : j.to} size={size} />;
+    return a ? <NearTokenLogo symbol={a.symbol} chain={a.blockchain} size={size} /> : <PairLogo pair={(side === "in" ? j.from : j.to)!} size={size} />;
   };
-  const inText = j.front && j.asset_in ? nearText(j.front.amount_in, j.asset_in) : j.route.paid != null ? unitsText(j.route.paid, j.from) : j.route.in_max != null ? unitsText(j.route.in_max, j.from) : comboIn(j);
+  const inText = j.front && j.asset_in ? nearText(j.front.amount_in, j.asset_in) : j.route.paid != null ? unitsText(j.route.paid, j.from!) : j.route.in_max != null ? unitsText(j.route.in_max, j.from!) : comboIn(j);
   return (
     <a
       href={`/app/combo/${j.id}`}
@@ -259,10 +259,10 @@ function ComboRow({ job: j }: { job: ComboJob }) {
           {inText} <span className="text-slate-400">→</span> <span className="whitespace-nowrap">{comboGot(j) ?? comboOut(j)}</span>
         </span>
         <span className="mt-0.5 flex min-w-0 items-center gap-1 truncate text-[13px] text-slate-500">
-          <span className="font-medium text-slate-700">Private swap</span>
+          <span className="font-medium text-slate-700">{j.kind === "near-only" ? "Public swap" : "Private swap"}</span>
           <span aria-hidden>·</span>
           <NearMark size={12} />
-          <span>via NEAR Intents</span>
+          <span>{j.kind === "near-only" ? "NEAR Intents only" : "via NEAR Intents"}</span>
           <span className="hidden sm:inline"> · {started.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>
         </span>
       </span>

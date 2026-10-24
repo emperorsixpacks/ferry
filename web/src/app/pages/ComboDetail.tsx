@@ -74,7 +74,7 @@ function Body({ j }: { j: ComboJob }) {
   const midIn = comboMidIn(j);
   const midOut = comboMidOut(j);
   const front = !!j.front;
-  const back = !!j.back || j.kind !== "near-route";
+  const back = !!j.back || j.kind === "route-near" || j.kind === "near-near";
   const zec = zecText(route?.amounts.zec_zat ?? j.route.zec_zat ?? j.agreed.zec_zat);
   const got = comboGot(j);
 
@@ -92,8 +92,11 @@ function Body({ j }: { j: ComboJob }) {
   const finish = () => act(async () => routes.put(await continueRoute(j.route.id!)));
   const retry = () => act(async () => near.putCombo(await retryCombo(j.id)));
 
+  const alone = j.kind === "near-only";
   let head: { tone: Tone; title: string; sub: ReactNode };
   if (j.state === "deposit" && j.front && j.asset_in) head = { tone: "live", title: `Send ${nearText(j.front.amount_in, j.asset_in)}`, sub: `To NEAR Intents' deposit address on ${chainName(j.asset_in.blockchain)}. Once it arrives, the rest happens on its own.` };
+  else if (j.state === "near_in" && alone) head = { tone: "live", title: `Swapping your ${a}`, sub: `NEAR Intents got your deposit and is sending ${c}${j.address ? ` to ${short(j.address)}` : ""}.` };
+  else if (j.state === "done" && alone) head = { tone: "good", title: `You received ${got ?? c}`, sub: "Through NEAR Intents alone: this swap was public, end to end." };
   else if (j.state === "near_in") head = { tone: "live", title: `Swapping your ${a}`, sub: `NEAR Intents got your deposit and is sending ${midIn} to your Ferry node.` };
   else if (j.state === "funding") head = { tone: "live", title: `Swapping ${a} for ${c} privately`, sub: `Your ${midIn} arrived in your Ferry node. Starting the private swap.${j.problem ? ` ${j.problem}` : ""}` };
   else if (j.state === "route")
@@ -118,16 +121,18 @@ function Body({ j }: { j: ComboJob }) {
   const steps: TrackerStep[] = [];
   if (front && j.front && j.asset_in) {
     steps.push({ title: `You send ${nearText(j.front.amount_in, j.asset_in)}`, status: j.state === "deposit" ? "active" : reached("near_in") || j.state === "refunded" ? "done" : "pending", at: at("near_known_deposit_tx") ?? at("near_processing"), note: `Before ${clock(new Date(j.front.deadline))}.`, extra: <Deposit part={j.front} asset={j.asset_in} refund={j.refund_address} now={now} /> });
-    steps.push({ title: `NEAR Intents: ${a} → ${midIn}`, status: j.state === "near_in" ? "active" : reached("funding") ? "done" : "pending", at: at("near_success"), note: `NEAR Intents delivers ${midIn} to your Ferry node.` });
+    steps.push({ title: `NEAR Intents: ${a} → ${midIn}`, status: j.state === "near_in" ? "active" : reached("funding") ? "done" : "pending", at: at("near_success"), note: alone ? `NEAR Intents delivers ${c}${j.address ? ` to ${short(j.address)}` : ""}.` : `NEAR Intents delivers ${midIn} to your Ferry node.` });
   }
   const inRoute = j.state === "route" || (j.state === "holding" && !!j.route.id) || j.state === "funding";
-  steps.push({ title: `Swap 1: ${midIn} → shielded ZEC`, status: inRoute && (rstate === "leg1" || j.state === "funding" || !rstate) ? "active" : reached("route") && rstate && rstate !== "leg1" ? "done" : routeDone ? "done" : "pending", at: route?.timeline.find((e) => e.kind === "leg1_swapped")?.at, note: j.state === "funding" ? (j.problem ?? "Starting the swap with your partner.") : route ? legNote(route.legs[0]) : "Buying shielded ZEC." });
-  steps.push({
-    title: "Private pause",
-    status: inRoute && (rstate === "settling" || rstate === "pausing") ? "active" : routeDone || rstate === "leg2" || (j.state === "holding" && !!j.route.id) ? "done" : "pending",
-    note: rstate === "settling" ? "Your ZEC is settling in your shielded wallet." : route ? `A random wait, so the two swaps are harder to link. Swap 2 starts ${inAbout(route, now)}.` : "A random wait, so the two swaps are harder to link.",
-  });
-  steps.push({ title: `Swap 2: ZEC → ${midOut}`, status: (j.state === "route" && rstate === "leg2") || (j.state === "holding" && !!j.route.id) ? "active" : routeDone ? "done" : "pending", at: route?.timeline.find((e) => e.kind === "done")?.at, note: j.state === "holding" ? "Waiting for you: finish now, or keep the ZEC." : route ? legNote(route.legs[1]) : "Selling the ZEC." });
+  if (!alone) {
+    steps.push({ title: `Swap 1: ${midIn} → shielded ZEC`, status: inRoute && (rstate === "leg1" || j.state === "funding" || !rstate) ? "active" : reached("route") && rstate && rstate !== "leg1" ? "done" : routeDone ? "done" : "pending", at: route?.timeline.find((e) => e.kind === "leg1_swapped")?.at, note: j.state === "funding" ? (j.problem ?? "Starting the swap with your partner.") : route ? legNote(route.legs[0]) : "Buying shielded ZEC." });
+    steps.push({
+      title: "Private pause",
+      status: inRoute && (rstate === "settling" || rstate === "pausing") ? "active" : routeDone || rstate === "leg2" || (j.state === "holding" && !!j.route.id) ? "done" : "pending",
+      note: rstate === "settling" ? "Your ZEC is settling in your shielded wallet." : route ? `A random wait, so the two swaps are harder to link. Swap 2 starts ${inAbout(route, now)}.` : "A random wait, so the two swaps are harder to link.",
+    });
+    steps.push({ title: `Swap 2: ZEC → ${midOut}`, status: (j.state === "route" && rstate === "leg2") || (j.state === "holding" && !!j.route.id) ? "active" : routeDone ? "done" : "pending", at: route?.timeline.find((e) => e.kind === "done")?.at, note: j.state === "holding" ? "Waiting for you: finish now, or keep the ZEC." : route ? legNote(route.legs[1]) : "Selling the ZEC." });
+  }
   // the last NEAR Intents part's own success, after the first one's
   const lastSuccess = [...j.timeline].reverse().find((e) => e.kind === "near_success")?.at;
   if (back) steps.push({ title: `NEAR Intents: ${midOut} → ${c}`, status: j.state === "near_out" ? "active" : j.state === "done" || (j.state === "refunded" && !!j.back && j.back.status !== "PENDING_DEPOSIT") ? "done" : "pending", at: lastSuccess, note: j.address ? `NEAR Intents delivers ${c} to ${short(j.address)}.` : "" });
@@ -151,8 +156,17 @@ function Body({ j }: { j: ComboJob }) {
 
         {isActive(j) && j.state !== "holding" ? (
           <div className="mt-6 space-y-2 border-t border-slate-100 pt-5 text-sm text-slate-600">
-            <p>Private swaps usually take {pause} in all, plus NEAR Intents' part.</p>
-            <p>The ZEC between the two Ferry swaps stays shielded. The NEAR Intents part is public, and you trust NEAR Intents for it.</p>
+            {alone ? (
+              <>
+                {j.front?.time_s != null ? <p>NEAR Intents usually takes {aboutTime(j.front.time_s)}, once your deposit confirms.</p> : null}
+                <p>This swap is public: anyone can link what you sold to what you got, and you trust NEAR Intents for all of it.</p>
+              </>
+            ) : (
+              <>
+                <p>Private swaps usually take {pause} in all, plus NEAR Intents' part.</p>
+                <p>The ZEC between the two Ferry swaps stays shielded. The NEAR Intents part is public, and you trust NEAR Intents for it.</p>
+              </>
+            )}
             <p className="text-slate-900">You can close this page — the server follows every part.</p>
           </div>
         ) : j.state === "holding" ? (
@@ -196,14 +210,24 @@ function Strip({ j, zec }: { j: ComboJob; zec: string }) {
   const inPart = j.asset_in ? (
     <Part logo={<NearTokenLogo symbol={j.asset_in.symbol} chain={j.asset_in.blockchain} size={22} />} value={j.front ? nearText(j.front.amount_in, j.asset_in) : j.asset_in.symbol} />
   ) : (
-    <Part logo={<PairLogo pair={j.from} size={22} />} value={j.route.paid != null ? unitsText(j.route.paid, j.from) : j.route.in_max != null ? unitsText(j.route.in_max, j.from) : comboIn(j)} note={j.route.paid != null ? undefined : "at most"} />
+    <Part logo={<PairLogo pair={j.from!} size={22} />} value={j.route.paid != null ? unitsText(j.route.paid, j.from!) : j.route.in_max != null ? unitsText(j.route.in_max, j.from!) : comboIn(j)} note={j.route.paid != null ? undefined : "at most"} />
   );
   const outVal = comboGot(j);
+  // what was promised: the last NEAR part's least, or (NEAR Intents alone) its only one's
+  const promise = j.back ?? (j.kind === "near-only" ? j.front : null);
   const outPart = j.asset_out ? (
-    <Part logo={<NearTokenLogo symbol={j.asset_out.symbol} chain={j.asset_out.blockchain} size={22} />} value={outVal ?? (j.back ? nearText(j.back.min_amount_out, j.asset_out) : `${j.asset_out.symbol}`)} note={outVal ? undefined : j.back ? "at least" : undefined} />
+    <Part logo={<NearTokenLogo symbol={j.asset_out.symbol} chain={j.asset_out.blockchain} size={22} />} value={outVal ?? (promise ? nearText(promise.min_amount_out, j.asset_out) : `${j.asset_out.symbol}`)} note={outVal ? undefined : promise ? "at least" : undefined} />
   ) : (
-    <Part logo={<PairLogo pair={j.to} size={22} />} value={outVal ?? (j.route.out_min != null ? unitsText(j.route.out_min, j.to) : comboOut(j))} note={outVal ? undefined : j.route.out_min != null ? "at least" : undefined} />
+    <Part logo={<PairLogo pair={j.to!} size={22} />} value={outVal ?? (j.route.out_min != null ? unitsText(j.route.out_min, j.to!) : comboOut(j))} note={outVal ? undefined : j.route.out_min != null ? "at least" : undefined} />
   );
+  if (j.kind === "near-only")
+    return (
+      <div className="mt-6 grid grid-cols-[1fr_auto_1fr] items-start gap-1 rounded-2xl bg-slate-50 px-2 py-3 text-center tabular-nums">
+        {inPart}
+        <ArrowRight size={14} weight="bold" className="mt-1 text-slate-400" aria-label="for" />
+        {outPart}
+      </div>
+    );
   return (
     <div className="mt-6 grid grid-cols-[1fr_auto_1fr_auto_1fr] items-start gap-1 rounded-2xl bg-slate-50 px-2 py-3 text-center tabular-nums">
       {inPart}
@@ -289,18 +313,21 @@ function Technical({ j }: { j: ComboJob }) {
   return (
     <div className="space-y-7 text-sm">
       {j.front && j.asset_in && j.via_in ? nearGroup("NEAR Intents, first", j.front, nearText(j.front.amount_in, j.asset_in), `at least ${nearText(j.front.min_amount_out, j.via_in)}`) : null}
-      <Group title="Private swap">
-        <Row label="Route" value={`${comboMidIn(j)} → shielded ZEC → ${comboMidOut(j)}`} />
-        <Row label="ID" value={j.route.id ? <CopyText value={j.route.id} head={10} tail={6} /> : "not started"} />
-        {j.route.state ? <Row label="State" value={<span className="font-mono text-xs">{j.route.state}</span>} /> : null}
-        {j.route.out_min != null ? <Row label="Swap 2 pays at least" value={unitsText(j.route.out_min, j.to)} /> : null}
-        {j.route.id ? (
-          <Link to={`/app/route/${j.route.id}`} className="inline-flex items-center gap-1 text-[13px] font-medium text-slate-900 underline underline-offset-4 hover:no-underline">
-            The private swap, step by step
-            <ArrowRight size={12} weight="bold" aria-hidden />
-          </Link>
-        ) : null}
-      </Group>
+      {j.kind === "near-only" && j.front && j.asset_in && j.asset_out ? nearGroup("NEAR Intents, alone", j.front, nearText(j.front.amount_in, j.asset_in), `at least ${nearText(j.front.min_amount_out, j.asset_out)}`) : null}
+      {j.kind !== "near-only" ? (
+        <Group title="Private swap">
+          <Row label="Route" value={`${comboMidIn(j)} → shielded ZEC → ${comboMidOut(j)}`} />
+          <Row label="ID" value={j.route.id ? <CopyText value={j.route.id} head={10} tail={6} /> : "not started"} />
+          {j.route.state ? <Row label="State" value={<span className="font-mono text-xs">{j.route.state}</span>} /> : null}
+          {j.route.out_min != null ? <Row label="Swap 2 pays at least" value={unitsText(j.route.out_min, j.to!)} /> : null}
+          {j.route.id ? (
+            <Link to={`/app/route/${j.route.id}`} className="inline-flex items-center gap-1 text-[13px] font-medium text-slate-900 underline underline-offset-4 hover:no-underline">
+              The private swap, step by step
+              <ArrowRight size={12} weight="bold" aria-hidden />
+            </Link>
+          ) : null}
+        </Group>
+      ) : null}
       {j.back && j.asset_out && j.via_out ? nearGroup("NEAR Intents, last", j.back, `${nearText(j.back.min_amount_in, j.via_out)} or more`, `at least ${nearText(j.back.min_amount_out, j.asset_out)}`) : null}
       <Group title="Every step">
         <ol className="space-y-1.5">
@@ -314,7 +341,9 @@ function Technical({ j }: { j: ComboJob }) {
       </Group>
       <Group title="Who you trust for what">
         <p className="text-slate-600">
-          The two Ferry swaps are atomic: a partner can't take your coins, and the ZEC between them stays shielded. Ferry never sends ZEC to NEAR Intents. NEAR Intents' part runs on its bridges and solvers, on public chains: you trust it to deliver, or to refund. 1Click signed the quotes above; keep them if you ever need to dispute a swap.
+          {j.kind === "near-only"
+            ? "NEAR Intents alone runs this swap, on its bridges and solvers, on public chains: you trust it to deliver, or to refund, and anyone can link the two sides. No Ferry swap is in it. 1Click signed the quote above; keep it if you ever need to dispute the swap."
+            : "The two Ferry swaps are atomic: a partner can't take your coins, and the ZEC between them stays shielded. Ferry never sends ZEC to NEAR Intents. NEAR Intents' part runs on its bridges and solvers, on public chains: you trust it to deliver, or to refund. 1Click signed the quotes above; keep them if you ever need to dispute a swap."}
         </p>
       </Group>
       <a href={near.info?.explorer ?? j.explorer} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1.5 font-medium text-slate-900 underline-offset-4 hover:underline">

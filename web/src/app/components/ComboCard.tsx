@@ -12,7 +12,7 @@ import { PAUSE, PAUSES, coinFor, parseUnits, routeQuote, startAmount, tickerOf, 
 import { cn } from "../lib/utils";
 import { Line, Point } from "./NearCard";
 import { NearMark } from "./Logos";
-import { Fact, FlipButton, Panel, PathLine, PrivacyLine, Section, SidePill, amountSize } from "./SwapParts";
+import { Fact, FlipButton, Panel, PathLine, PrivacyLine, RouteChoice, Section, SidePill, amountSize } from "./SwapParts";
 import { CoinPicker, tokenSubtitle } from "./TokenPicker";
 import { Sheet } from "./ui/sheet";
 
@@ -30,7 +30,7 @@ const LOCK_FEE_RESERVE = 10_000;
 const ROOM_BPS = 50;
 
 // "1.5" in a token's units → base units, as a decimal string; null if it isn't an amount
-function toUnits(text: string, decimals: number): string | null {
+export function toUnits(text: string, decimals: number): string | null {
   const t = text.trim();
   if (!/^\d*\.?\d*$/.test(t) || t === "" || t === ".") return null;
   const [w, f = ""] = t.split(".");
@@ -39,7 +39,7 @@ function toUnits(text: string, decimals: number): string | null {
   return n > 0n ? n.toString() : null;
 }
 // what about $100 of a token is, rounded to two digits: a first amount that reads like a person typed it
-function firstAmount(t: NearToken | null): string {
+export function firstAmount(t: NearToken | null): string {
   if (!t?.price) return "";
   const v = 100 / t.price;
   const step = 10 ** (Math.floor(Math.log10(v)) - 1);
@@ -48,7 +48,7 @@ function firstAmount(t: NearToken | null): string {
 }
 const scaled = (v: string, num: number, den: number) => (den > 0 ? ((BigInt(v) * BigInt(Math.round(num))) / BigInt(Math.round(den))).toString() : v);
 
-export function ComboCard({ pick, path, ctx, onPick, onFlip, blocked }: CardProps) {
+export function ComboCard({ pick, path, ctx, onPick, onFlip, blocked, optOut }: CardProps) {
   const d = useLocal();
   const near = useNear();
   const makers = useMakers();
@@ -136,6 +136,7 @@ export function ComboCard({ pick, path, ctx, onPick, onFlip, blocked }: CardProp
             <GearSix size={16} weight="bold" className="text-slate-500" aria-hidden />
           </button>
           <Sheet anchored open={settings} onClose={() => setSettings(false)} title="Private swap settings">
+            {optOut ? <RouteChoice optOut={optOut} /> : null}
             <Section title="Privacy pause" note="A random wait between the two Ferry swaps, so they're harder to match up.">
               <div role="radiogroup" aria-label="Privacy pause" className="space-y-1 px-2">
                 {PAUSES.map((p) => (
