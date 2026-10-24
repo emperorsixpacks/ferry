@@ -1,8 +1,7 @@
-import type { ReactNode } from "react";
-import { ArrowUpRight, Flask, WarningCircle } from "@phosphor-icons/react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { ArrowUpRight, CaretDown, CaretRight, WarningCircle } from "@phosphor-icons/react";
 import { Link, usePath } from "@/router";
-import { coin, isMainnet, networkLabel, zec } from "@/format";
-import { btcText } from "@/swap/shared";
+import { coin, isMainnet, networkLabel } from "@/format";
 import { counterBalance } from "@/api";
 import { useLocal, type Status } from "../lib/daemon";
 import { pairName } from "../lib/pairs";
@@ -12,12 +11,13 @@ import { PairLogo, TokenLogo } from "./Logos";
 import { Fold } from "./ui/fold";
 import { Popover } from "./ui/popover";
 
-// The app shell: a quiet sticky header (logo, three tabs, a "Test network" pill when it applies and
-// your balance) and a footer with the deeper pages. Below md the tabs get their own row, so they
-// stay one tap away on a phone.
+// The app shell: a sticky header across the full width (the mark on the left; Swap, Activity and Help
+// as a segmented pill in the true centre; the network and your account on the right, or "Start a
+// swap" on the landing) and a footer with the deeper pages. Below md the tabs get their own row,
+// the same pill centred, so they stay one tap away on a phone.
 
 const nav = [
-  { to: "/app", label: "Swap", match: (p: string) => p === "/app" || p.startsWith("/app/swap/") || p.startsWith("/app/route/") },
+  { to: "/app", label: "Swap", match: (p: string) => p === "/app" || p.startsWith("/app/swap/") || p.startsWith("/app/route/") || p.startsWith("/app/near/") },
   { to: "/app/activity", label: "Activity", match: (p: string) => p === "/app/activity" },
   { to: "/help", label: "Help", match: (p: string) => p === "/help" || p === "/how-it-works" || p === "/safety" },
 ];
@@ -39,149 +39,188 @@ export function Layout({ children, wide }: { children: ReactNode; wide?: boolean
   );
 }
 
-// `night`: the landing's dark header
-export function SiteHeader({ night = false }: { night?: boolean } = {}) {
+// `landing`: the landing page's bar, with "Start a swap" where the account would be
+export function SiteHeader({ landing = false }: { landing?: boolean } = {}) {
   const path = usePath().replace(/\/+$/, "") || "/";
   const d = useLocal();
   const online = d.connected || !!d.status;
-  const tabs = nav.map((n) => ({ ...n, active: n.match(path), night }));
+  const tabs = nav.map((n) => ({ ...n, active: n.match(path) }));
   return (
-    <header className={cn("sticky top-0 z-40 border-b backdrop-blur-md", night ? "border-white/10 bg-[#070a1f]/80" : "border-slate-200/80 bg-white/85")}>
-      <div className="mx-auto flex h-16 max-w-6xl items-center gap-6 px-4 sm:px-6">
+    <header className="sticky top-0 z-40 border-b border-slate-200/70 bg-white/80 backdrop-blur-md">
+      <div className="relative flex h-16 items-center gap-3 px-4 sm:px-6 lg:px-10">
         <Link to="/" className="flex shrink-0 items-center rounded-lg" aria-label="Ferry, home">
-          <Wordmark size={26} night={night} />
+          <Wordmark size={26} />
         </Link>
-        <nav aria-label="Main" className="hidden items-center gap-1 md:flex">
-          {tabs.map((t) => (
-            <Tab key={t.to} {...t} />
-          ))}
+        <nav aria-label="Main" className="absolute top-1/2 left-1/2 hidden -translate-x-1/2 -translate-y-1/2 md:block">
+          <Tabs tabs={tabs} />
         </nav>
         <div className="ml-auto flex min-w-0 items-center gap-2">
-          <TestPill status={d.status} night={night} />
-          <BalanceChip online={online} name={d.status?.name ?? null} status={d.status} night={night} />
+          <NetworkBadge status={d.status} />
+          {landing ? (
+            <Link to="/app" className="inline-flex h-10 shrink-0 items-center rounded-full bg-slate-900 px-5 text-sm font-semibold text-white transition-colors hover:bg-slate-800">
+              Start a swap
+            </Link>
+          ) : online ? (
+            <AccountMenu name={d.status?.name ?? null} status={d.status} />
+          ) : (
+            <span className="inline-flex h-9 items-center gap-2 rounded-full bg-rose-50 px-3 text-xs font-medium text-rose-700">
+              <span className="h-1.5 w-1.5 rounded-full bg-rose-500" aria-hidden />
+              Not connected
+            </span>
+          )}
         </div>
       </div>
-      <nav aria-label="Main" className={cn("flex items-center justify-center gap-1 border-t px-4 py-1.5 md:hidden", night ? "border-white/10" : "border-slate-100")}>
-        {tabs.map((t) => (
-          <Tab key={t.to} {...t} />
-        ))}
+      <nav aria-label="Main" className="flex justify-center border-t border-slate-100 px-4 py-2 md:hidden">
+        <Tabs tabs={tabs} />
       </nav>
     </header>
   );
 }
 
-function Tab({ to, label, active, night }: { to: string; label: string; active: boolean; night?: boolean }) {
+// Swap, Activity and Help on a light grey track; the page you're on is a white pill.
+function Tabs({ tabs }: { tabs: { to: string; label: string; active: boolean }[] }) {
   return (
-    <Link
-      to={to}
-      aria-current={active ? "page" : undefined}
-      className={cn(
-        "rounded-full px-3.5 py-1.5 text-sm whitespace-nowrap transition-colors",
-        night
-          ? active
-            ? "bg-white/10 font-medium text-white"
-            : "text-white/70 hover:text-white"
-          : active
-            ? "bg-slate-100 font-medium text-slate-900"
-            : "text-slate-500 hover:text-slate-900",
-      )}
-    >
-      {label}
-    </Link>
+    <div className="flex items-center gap-0.5 rounded-full bg-slate-100 p-1">
+      {tabs.map((t) => (
+        <Link
+          key={t.to}
+          to={t.to}
+          aria-current={t.active ? "page" : undefined}
+          className={cn(
+            "rounded-full px-4 py-1.5 text-sm whitespace-nowrap transition-[color,background-color,box-shadow]",
+            t.active ? "bg-white font-medium text-slate-900 shadow-[0_1px_3px_rgba(24,24,27,0.12),0_1px_1px_rgba(24,24,27,0.04)]" : "text-slate-500 hover:text-slate-900",
+          )}
+        >
+          {t.label}
+        </Link>
+      ))}
+    </div>
   );
 }
 
-// "Test network" when either chain isn't a main network; the networks themselves on a tap.
-function TestPill({ status, night }: { status: Status | null; night?: boolean }) {
+// "Testnet" or "Mainnet", with each chain's network on a tap.
+function NetworkBadge({ status }: { status: Status | null }) {
   if (!status) return null;
   const counterNet = status.chains.btc.network;
   const zecNet = status.chains.zec.network;
-  if (isMainnet(counterNet) && isMainnet(zecNet)) return null;
+  const main = isMainnet(counterNet) && isMainnet(zecNet);
   const kind = coin().kind === "evm" ? "evm" : coin().id === "ltc" ? "ltc" : "btc";
   const names = [networkLabel(counterNet, kind), networkLabel(zecNet, "zec")];
+  const word = main ? "Mainnet" : "Testnet";
   return (
     <Popover
-      label={`Test network: ${names.join(" and ")}`}
-      className={cn(
-        "inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-xs font-medium transition-colors",
-        night ? "bg-white/10 text-white/85 hover:bg-white/15" : "bg-slate-100 text-slate-700 hover:bg-slate-200",
-      )}
+      label={`${word}: ${names.join(" and ")}`}
+      className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-600 transition-colors hover:border-slate-300 hover:text-slate-900"
       trigger={
         <>
-          <Flask size={13} weight="bold" aria-hidden />
-          <span className="sm:hidden">Test</span>
-          <span className="hidden sm:inline">Test network</span>
+          <span className={cn("h-1.5 w-1.5 rounded-full", main ? "bg-slate-900" : "bg-[#F4B728]")} aria-hidden />
+          {word}
         </>
       }
     >
-      <span className="block font-medium text-slate-900">Test network</span>
-      <span className="mt-1 block text-slate-600">Coins here are for testing and have no value.</span>
+      <span className="block font-medium text-slate-900">{main ? "Main networks" : "Test networks"}</span>
+      {main ? null : <span className="mt-1 block text-slate-600">Coins here are for testing and have no value.</span>}
       <span className="mt-3 block border-t border-slate-100 pt-3 text-xs text-slate-500">{names.join(" · ")}</span>
     </Popover>
   );
 }
 
-// Your Ferry node and its balances: the name and ZEC on the chip, the other coin on lg+ and on a tap.
-function BalanceChip({ online, name, status, night }: { online: boolean; name: string | null; status: Status | null; night?: boolean }) {
-  const { pair, dir } = useLocal();
-  if (!online) {
-    return (
-      <span className="inline-flex h-9 items-center gap-2 rounded-full bg-rose-50 px-3 text-xs font-medium text-rose-700">
-        <span className="h-1.5 w-1.5 rounded-full bg-rose-500" aria-hidden />
-        Not connected
-      </span>
-    );
-  }
-  const zecBal = status ? zec(status.balances.zec_shielded_zat) : "–";
-  const other = status ? btcText(counterBalance(status)) : "–";
-  const ticker = coin().ticker;
-  return (
-    <Popover
-      label={`Your Ferry node${name ? ` ${name}` : ""}: ${zecBal} ZEC and ${other} ${ticker}`}
-      className={cn(
-        "inline-flex h-9 min-w-0 items-center gap-2 rounded-full border pr-3 pl-1 text-sm transition-colors",
-        night ? "border-white/15 bg-white/5 hover:border-white/30" : "border-slate-200 bg-white shadow-[0_1px_2px_rgba(24,24,27,0.04)] hover:border-slate-300",
-      )}
-      trigger={
-        <>
-          <span
-            className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold uppercase", night ? "bg-white text-slate-900" : "bg-slate-900 text-white")}
-            aria-hidden
-          >
-            {(name ?? "?").slice(0, 1)}
-          </span>
-          <span className={cn("hidden max-w-[7rem] truncate font-medium sm:inline", night ? "text-white" : "text-slate-900")}>{name ?? "…"}</span>
-          {/* what you spend shows on every screen (ZEC when selling, the coin when buying); both on lg+ */}
-          <span className={cn("items-center gap-1.5 tabular-nums", night ? "text-white/80" : "text-slate-700", dir === "buy" ? "hidden lg:flex" : "flex")}>
-            <TokenLogo id="zec" size={14} />
-            {zecBal}
-          </span>
-          <span className={cn("items-center gap-1.5 tabular-nums", night ? "text-white/80" : "text-slate-700", dir === "buy" ? "flex" : "hidden lg:flex")}>
-            <PairLogo pair={pair} size={14} />
-            {other}
-          </span>
-        </>
+// a balance for the menu: no long raw decimals (4 significant digits below 1,000, whole above)
+const amount = (n: number) =>
+  n === 0 ? "0" : n.toLocaleString("en-US", n < 1000 ? { maximumSignificantDigits: 4 } : { maximumFractionDigits: 0 });
+
+// Your Ferry node: its initial and name in the bar; its balances, the pair on screen and the
+// way to your swaps in a small menu under it. Escape or a click elsewhere closes it, and Escape
+// puts focus back on the button.
+function AccountMenu({ name, status }: { name: string | null; status: Status | null }) {
+  const { pair } = useLocal();
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const id = useId();
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: PointerEvent) => {
+      if (!root.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setOpen(false);
+        button.current?.focus();
       }
-    >
-      <span className="block text-xs text-slate-500">Your Ferry node</span>
-      <span className="mt-0.5 block font-medium text-slate-900">{name ?? "–"}</span>
-      <span className="mt-3 flex items-center justify-between gap-4 border-t border-slate-100 pt-3">
-        <span className="flex items-center gap-2 text-slate-600">
-          <TokenLogo id="zec" size={18} />
-          Shielded ZEC
+    };
+    document.addEventListener("pointerdown", away);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("pointerdown", away);
+      document.removeEventListener("keydown", key);
+    };
+  }, [open]);
+  const c = coin();
+  const zecBal = status ? amount(status.balances.zec_shielded_zat / 1e8) : "–";
+  const other = status ? amount(counterBalance(status) / 10 ** c.decimals) : "–";
+  const label = name ?? "Your Ferry node";
+  return (
+    <div ref={root} className="relative min-w-0">
+      <button
+        ref={button}
+        type="button"
+        aria-expanded={open}
+        aria-controls={id}
+        aria-label={`Your Ferry node${name ? `, ${name}` : ""}`}
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex h-10 min-w-0 items-center gap-2 rounded-full border border-slate-200 bg-white p-1 text-sm transition-colors hover:border-slate-300 sm:pr-3"
+      >
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-900 text-xs font-semibold text-white uppercase" aria-hidden>
+          {(name ?? "?").slice(0, 1)}
         </span>
-        <span className="text-slate-900 tabular-nums">{zecBal}</span>
-      </span>
-      <span className="mt-2 flex items-center justify-between gap-4">
-        <span className="flex min-w-0 items-center gap-2 text-slate-600">
-          <PairLogo pair={pair} size={18} />
-          <span className="truncate">{pairName(pair).noun}</span>
-        </span>
-        <span className="shrink-0 text-slate-900 tabular-nums">
-          {other} {ticker}
-        </span>
-      </span>
-    </Popover>
+        <span className="hidden max-w-[8rem] truncate font-medium text-slate-900 sm:inline">{name ?? "…"}</span>
+        <CaretDown size={12} weight="bold" className={cn("hidden shrink-0 text-slate-500 transition-transform sm:block", open && "rotate-180")} aria-hidden />
+      </button>
+      <div
+        id={id}
+        hidden={!open}
+        className="absolute top-full right-0 z-50 mt-2 w-[min(18rem,calc(100vw-2rem))] rounded-2xl border border-slate-200 bg-white p-2 text-sm shadow-[0_16px_48px_-16px_rgba(24,24,27,0.25)]"
+      >
+        <div className="px-3 pt-2 pb-3">
+          <p className="text-xs text-slate-500">Your Ferry node</p>
+          <p className="mt-0.5 truncate font-medium text-slate-900">{label}</p>
+        </div>
+        <dl className="space-y-2 rounded-xl bg-slate-50 px-3 py-3">
+          <div className="flex items-center justify-between gap-4">
+            <dt className="flex items-center gap-2 text-slate-600">
+              <TokenLogo id="zec" size={18} />
+              Shielded ZEC
+            </dt>
+            <dd className="text-slate-900 tabular-nums">{zecBal} ZEC</dd>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <dt className="flex min-w-0 items-center gap-2 text-slate-600">
+              <PairLogo pair={pair} size={18} />
+              <span className="truncate">{pairName(pair).noun}</span>
+            </dt>
+            <dd className="shrink-0 text-slate-900 tabular-nums">
+              {other} {c.ticker}
+            </dd>
+          </div>
+        </dl>
+        <p className="px-3 pt-3 pb-2 text-xs text-slate-500">Pair on screen: ZEC ⇄ {pairName(pair).noun}</p>
+        {/* a link closes the menu (the click bubbles up to here) */}
+        <div className="border-t border-slate-100 pt-1" onClick={() => setOpen(false)}>
+          {(
+            [
+              ["Activity", "/app/activity"],
+              ["Help", "/help"],
+            ] as const
+          ).map(([text, to]) => (
+            <Link key={to} to={to} className="flex items-center justify-between rounded-xl px-3 py-2 text-slate-700 transition-colors hover:bg-slate-50 hover:text-slate-900">
+              {text}
+              <CaretRight size={12} weight="bold" className="text-slate-400" aria-hidden />
+            </Link>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -216,7 +255,7 @@ export function SiteFooter() {
   const links = FOOTER_LINKS;
   return (
     <footer className="border-t border-slate-200/80 bg-white">
-      <div className="mx-auto flex max-w-6xl flex-col gap-5 px-4 py-10 sm:px-6 md:flex-row md:items-center md:justify-between">
+      <div className="flex flex-col gap-5 px-4 py-10 sm:px-6 md:flex-row lg:px-10 md:items-center md:justify-between">
         <div className="flex items-center gap-3">
           <Wordmark size={22} />
           <span className="text-sm text-slate-500">Private swaps for shielded ZEC.</span>
