@@ -126,6 +126,7 @@ internal key, so cancel/refund/punish are script-path spends.
 ## Other counter-chains
 
 [EVM.md](EVM.md) describes the same construction with USDC on an EVM chain (Base) as the
-counter-asset. The `FerryLock` contract replaces the Taproot scripts, an on-chain `ready` by B
-takes the place of the redeem adaptor signature, and the shares are revealed in calldata, which
-the contract checks with the ecrecover scalar-multiplication trick.
+counter-asset (`ferryd --counter evm`). The `FerryLock` contract replaces the Taproot scripts, B's
+EIP-712 `Ready(id)` signature takes the place of the redeem adaptor signature, and the shares are
+revealed in claim and refund calldata, which the contract checks with the ecrecover
+scalar-multiplication trick.

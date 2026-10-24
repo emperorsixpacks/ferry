@@ -9,7 +9,8 @@ export interface Status {
   balances: { zec_shielded_zat: number; btc_sat: number };
   chains: {
     // the coin swapped against ZEC ("btc" | "ltc"); older daemons leave it out (btc)
-    btc: { network: string; height: number; coin?: "btc" | "ltc"; ticker?: string };
+    // coin "usdc": an EVM daemon (--counter evm); `time` is the latest block's unix time
+    btc: { network: string; height: number; coin?: "btc" | "ltc" | "usdc"; ticker?: string; decimals?: number; time?: number };
     zec: { network: string; height: number; pool: string };
   };
   offer: {
@@ -43,13 +44,22 @@ export interface TimelineEntry {
 
 export interface SwapView {
   id: string;
-  coin?: "btc" | "ltc";
+  coin?: "btc" | "ltc" | "usdc";
   role: Role;
   counterparty: string;
   state: string;
   outcome: Outcome;
   amounts: { zec_zat: number; btc_sat: number };
-  deadlines: { t1_blocks: number; t2_blocks: number; btc_lock_height: number | null; cancel_height: number | null };
+  deadlines: {
+    t1_blocks: number;
+    t2_blocks: number;
+    btc_lock_height: number | null;
+    cancel_height: number | null;
+    // EVM swaps: block-time deadlines (unix seconds) and the latest block time seen
+    t1_unix?: number;
+    t2_unix?: number;
+    now_unix?: number;
+  };
   keys: {
     my_share_point_pallas: string;
     my_share_point_secp: string;

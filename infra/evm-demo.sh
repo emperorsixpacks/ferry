@@ -18,7 +18,7 @@ B_PORT="${B_PORT:-7902}"
 Z_PEER_PORT="${Z_PEER_PORT:-7911}" # peer protocol (/peer/*)
 B_PEER_PORT="${B_PEER_PORT:-7912}"
 MAKER_URL="http://127.0.0.1:$B_PEER_PORT"
-UI_ORIGINS="${UI_ORIGINS:-http://localhost:5190 http://127.0.0.1:5190}"
+UI_ORIGINS="${UI_ORIGINS:-http://localhost:7990 http://127.0.0.1:7990}"
 Z_NAME="${Z_NAME:-zoe}"
 B_NAME="${B_NAME:-bram}"
 # USDC base units (10^-6) per ZEC: 40 USDC/ZEC
@@ -55,7 +55,7 @@ Ferry EVM demo: shielded ZEC (mock Zcash chain) <-> USDC (MockUSDC) in FerryLock
   infra/evm-demo.sh status | down | logs [z|b|anvil] | help
 
 Ports: anvil $ANVIL_PORT, Z API $Z_PORT / peer $Z_PEER_PORT, B API $B_PORT / peer $B_PEER_PORT.
-UI: cd web && source $STATE/env && pnpm dev:ui   (or FERRY_UI_PORT, see web/scripts)
+UI: cd web && source $STATE/env && PORT=7990 pnpm dev:ui   (screenshots: pnpm shoot:evm)
 Environment: RATE [$RATE] SWAP_ZAT [$SWAP_ZAT] T1_SECS [$T1_SECS] REFUND_SECS [$REFUND_SECS]
   DELTA_SECS [$DELTA_SECS] ZEC_CONFS [$ZEC_CONFS] ZEC_BLOCK_SECS [$ZEC_BLOCK_SECS] FERRY_EVM_DEMO_DIR [$STATE]
 EOF

@@ -133,7 +133,7 @@ function SwapForm({ status, bt, busySwap }: { status: Status | null; bt: BlockTi
     </Field>
   );
   const btcField = (
-    <Field label={role === "Z" ? "You receive" : "You pay"} unit={coin().ticker} note={`In the open, like any ${coin().name} payment`} readOnly>
+    <Field label={role === "Z" ? "You receive" : "You pay"} unit={coin().ticker} note={coin().kind === "evm" ? `In the open, like any token transfer on ${coin().name}` : `In the open, like any ${coin().name} payment`} readOnly>
       <span className="font-mono text-2xl font-medium text-slate-900">≈ {valid && offer ? btcSide : "–"}</span>
     </Field>
   );
@@ -166,7 +166,10 @@ function SwapForm({ status, bt, busySwap }: { status: Status | null; bt: BlockTi
           </div>
           <div className="grid grid-cols-2 gap-4 border-t border-slate-100 pt-4 text-sm md:grid-cols-4">
             <Detail label="Rate" value={<span className="font-mono">{offer ? `1 ZEC = ${btcText(offer.rate)} ${coin().ticker}` : "–"}</span>} />
-            <Detail label="Network fee" value={<span className="font-mono">{offer?.fee != null ? `${offer.fee.toLocaleString("en-US")} ${coin().unit}` : "–"}</span>} />
+            <Detail
+              label="Network fee"
+              value={<span className="font-mono">{coin().kind === "evm" ? "Gas only, paid in ETH" : offer?.fee != null ? `${offer.fee.toLocaleString("en-US")} ${coin().unit}` : "–"}</span>}
+            />
             <Detail
               label="Takes"
               value={

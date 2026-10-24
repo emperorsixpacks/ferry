@@ -42,7 +42,9 @@ export function deriveCrossing(z?: SwapView, b?: SwapView): Crossing {
   const zlock = find(z, "zec_lock_broadcast");
   const redeem = find(z, "btc_redeem_broadcast");
   const sweep = find(b, "zec_sweep_broadcast");
-  const cancel = find(b, "cancel_broadcast") ?? find(z, "cancel_broadcast");
+  // EVM: no cancel transaction; the claim window simply closes at t1
+  const evm = coin().kind === "evm";
+  const cancel = find(b, "cancel_broadcast") ?? find(z, "cancel_broadcast") ?? (evm ? find(b, "cancel_seen") ?? find(z, "cancel_seen") : undefined);
   const refund = find(b, "refund_broadcast");
   const reclaim = find(z, "zec_reclaim_broadcast");
   const punish = find(z, "punish_broadcast");
@@ -51,7 +53,7 @@ export function deriveCrossing(z?: SwapView, b?: SwapView): Crossing {
 
   let btc: Crossing["btc"] = { at: "b-shore", pending: false };
   if (lock) btc = { at: "lock", pending: lock.height == null };
-  if (cancel) btc = { at: "cancel", pending: cancel.height == null };
+  if (cancel) btc = evm ? { at: "lock", pending: false } : { at: "cancel", pending: cancel.height == null };
   if (redeem) btc = { at: "z-shore", pending: redeem.height == null };
   if (refund) btc = { at: "b-shore", pending: refund.height == null };
   if (punish) btc = { at: "z-shore", pending: punish.height == null };
@@ -67,9 +69,9 @@ export function deriveCrossing(z?: SwapView, b?: SwapView): Crossing {
     leg(2, "Z locks ZEC", "Z", "zec", zlock),
   ];
   if (path === "happy") {
-    legs.push(leg(3, `Z redeems ${coin().ticker}`, "Z", "btc", redeem), leg(4, "B sweeps ZEC", "B", "zec", sweep));
+    legs.push(leg(3, `${evm ? "Z claims" : "Z redeems"} ${coin().ticker}`, "Z", "btc", redeem), leg(4, "B sweeps ZEC", "B", "zec", sweep));
   } else {
-    legs.push(leg(3, "Cancel after T1", "Z or B", "btc", cancel));
+    legs.push(evm ? leg(3, "t1 passes without a claim", "Z or B", "btc", cancel, true) : leg(3, "Cancel after T1", "Z or B", "btc", cancel));
     if (path === "refund") {
       legs.push(leg(4, `B refunds ${coin().ticker}`, "B", "btc", refund));
       if (zlock) legs.push(leg(5, "Z reclaims ZEC", "Z", "zec", reclaim));

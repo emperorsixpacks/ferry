@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { injectStall, startSwap, type Role, type SwapView } from "./api";
 import { CrossingChart } from "./components/Crossing";
-import { Deadlines } from "./components/Deadlines";
+import { Deadlines, EvmDeadlines } from "./components/Deadlines";
 import { Observer } from "./components/Observer";
 import { PartyPanel } from "./components/PartyPanel";
 import { deriveCrossing, deriveDeadlines, latestEvent } from "./derive";
@@ -30,8 +30,9 @@ function isStalled(v?: SwapView) {
 
 // Mirrors when a stall changes the story; the daemon has the final say and returns an error otherwise.
 const CAN_STALL: Record<Role, string[]> = {
-  Z: ["CancelSigned", "BtcLockSeen", "ZecLocked", "RedeemSigReceived"],
-  B: ["BtcLocked", "ZecSeen"],
+  // Bitcoin states, then EVM ones (ferryd --counter evm)
+  Z: ["CancelSigned", "BtcLockSeen", "ZecLocked", "RedeemSigReceived", "LockSeen", "ReadyReceived"],
+  B: ["BtcLocked", "ZecSeen", "Locked"],
 };
 
 const PATH_TITLE = { happy: "The crossing", refund: "Cancelled and refunded", punish: "Cancelled and punished" };
@@ -110,7 +111,8 @@ export default function App() {
           <span id="quote" className="quote">
             {quote != null ? (
               <>
-                for <span className="mono">{btcShort(quote)}</span> {coin().ticker} at {offer!.rate_sat_per_zec.toLocaleString("en-US")} {coin().unit} per ZEC
+                for <span className="mono">{btcShort(quote)}</span> {coin().ticker} at{" "}
+                {coin().kind === "evm" ? `${btcShort(offer!.rate_sat_per_zec)} ${coin().ticker}` : `${offer!.rate_sat_per_zec.toLocaleString("en-US")} ${coin().unit}`} per ZEC
               </>
             ) : offer ? (
               <>Between {zec(offer.min_zat)} and {zec(offer.max_zat)} ZEC</>
@@ -167,10 +169,13 @@ export default function App() {
               <li key={l.n + l.title} className={`leg leg-${l.status}${crossing && crossing.path !== "happy" && l.n > 2 ? " leg-abort" : ""}`}>
                 <span className="leg-n">{l.n}</span>
                 <span className="leg-title">{l.title}</span>
-                <span className="leg-meta">{l.status === "done" ? <>height <span className="mono">{l.height}</span></> : l.status === "mempool" ? "in mempool" : l.who === "Z or B" ? "either party" : `by ${l.who}`}</span>
+                <span className="leg-meta">{l.status === "done" ? (l.height == null ? "passed" : <>height <span className="mono">{l.height}</span></>) : l.status === "mempool" ? "in mempool" : l.who === "Z or B" ? "either party" : `by ${l.who}`}</span>
               </li>
             ))}
           </ol>
+          {coin().kind === "evm" ? (
+            <EvmDeadlines swap={zs ?? bs} />
+          ) : (
           <Deadlines
             d={deadlines}
             height={z.status?.chains.btc.height ?? null}
@@ -178,6 +183,7 @@ export default function App() {
             t1Blocks={(zs ?? bs)?.deadlines.t1_blocks ?? 12}
             t2Blocks={(zs ?? bs)?.deadlines.t2_blocks ?? 24}
           />
+          )}
           <Observer btc={(zs ?? bs)?.observer.btc ?? []} zec={(zs ?? bs)?.observer.zec ?? []} />
         </section>
 

@@ -74,7 +74,8 @@ pub struct OfferView {
     pub t1_secs: u64,
     pub refund_secs: u64,
     pub delta_secs: u64,
-    pub lock_confs: u32,
+    /// Named like the Bitcoin offer's: confirmations of the counter-chain lock.
+    pub btc_lock_confs: u32,
     pub zec_confs: u32,
     pub rate_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -95,7 +96,7 @@ impl OfferView {
             t1_secs: o.terms.t1_secs,
             refund_secs: o.terms.refund_secs,
             delta_secs: o.terms.claim_margin,
-            lock_confs: o.terms.lock_confirmations,
+            btc_lock_confs: o.terms.lock_confirmations,
             zec_confs: o.terms.zec_confirmations,
             rate_source: o.rate_source.clone(),
             rate_updated_at: o.rate_updated_at,
@@ -241,7 +242,7 @@ pub fn swap_view(rec: &EvmRecord) -> EvmSwapView {
             z_addr: a(|t| t.z_addr),
             b_addr: a(|t| t.b_addr),
             max_tip: p.max_tip,
-            ready_signed: rec.has("ready_sig_sent") || rec.has("ready_sig_received"),
+            ready_signed: rec.has("redeem_adaptor_sent") || rec.has("redeem_adaptor_received"),
         },
     }
 }

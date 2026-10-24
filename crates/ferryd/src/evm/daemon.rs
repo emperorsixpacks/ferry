@@ -519,6 +519,12 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             ),
             None,
         );
+        rec.log(
+            "peer",
+            "terms_agreed",
+            "Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines",
+            None,
+        );
         rec.pending
             .extend(actions.into_iter().map(EvmPending::from));
         let mut st = self.state.lock().await;
@@ -717,6 +723,12 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             format!("Verified {p}'s DLEQ proof: {p}_p and {p}_s share one discrete log"),
             None,
         );
+        rec.log(
+            "peer",
+            "terms_agreed",
+            "Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines",
+            None,
+        );
         rec.pending
             .extend(actions.into_iter().map(EvmPending::from));
         self.drive_pending(&mut rec).await;
@@ -891,7 +903,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         rec.log(
             "local",
             "sweep_delayed",
-            format!("Waiting {secs}s before sweeping, so the ZEC sweep does not line up with the {} claim or refund", self.offer.network),
+            format!("Waiting {secs}s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund"),
             None,
         );
     }
@@ -974,7 +986,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                         rec.set_evm_tx("claim", hash.clone(), Some(tx.block_number));
                         rec.log(
                             "btc",
-                            "evm_claim_broadcast",
+                            "btc_redeem_broadcast",
                             format!(
                                 "Claimed {} from FerryLock with B's Ready signature. The claim publishes z in its calldata",
                                 self.token(amount)
@@ -1022,7 +1034,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                         rec.set_evm_tx("refund", hash.clone(), Some(tx.block_number));
                         rec.log(
                             "btc",
-                            "evm_refund_broadcast",
+                            "refund_broadcast",
                             "t1 passed without a claim. Refunded from FerryLock; the refund publishes b in its calldata",
                             Some(hash),
                         );
@@ -1046,7 +1058,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                         rec.set_evm_tx("punish", hash.clone(), Some(tx.block_number));
                         rec.log(
                             "btc",
-                            "evm_punish_broadcast",
+                            "punish_broadcast",
                             "t2 passed without a refund. Called punish: the locked tokens go to Z",
                             Some(hash),
                         );
@@ -1150,7 +1162,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 rec.set_evm_tx("lock", hash.clone(), Some(tx.block_number));
                 rec.log(
                     "btc",
-                    "evm_lock_broadcast",
+                    "btc_lock_broadcast",
                     format!(
                         "Locked {} in FerryLock for Z, committed to address(Z_s) and address(B_s)",
                         self.token(terms.amount)
@@ -1303,7 +1315,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 ),
             ),
             EvmMessage::ReadySig { .. } => (
-                "ready_sig_sent",
+                "redeem_adaptor_sent",
                 "Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain".into(),
             ),
             EvmMessage::Propose { .. } => return,
@@ -1316,7 +1328,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             if let EvmMessage::ReadySig { .. } = env.message {
                 rec.log(
                     "peer",
-                    "ready_sig_received",
+                    "redeem_adaptor_received",
                     "Received B's Ready(id) signature and checked it recovers to B's account",
                     None,
                 );
@@ -1329,9 +1341,9 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         let p = rec.swap.session().params.clone();
         let tx = |rec: &EvmRecord, k: &str| rec.evm_tx(k).map(|t| t.hash.clone());
         match (rec.role(), after.as_str()) {
-            (Role::Z, "LockSeen" | "ZecLocked") if !rec.has("evm_lock_seen") => rec.log(
+            (Role::Z, "LockSeen" | "ZecLocked") if !rec.has("btc_lock_seen") => rec.log(
                 "btc",
-                "evm_lock_seen",
+                "btc_lock_seen",
                 format!(
                     "FerryLock holds {} for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s",
                     self.token(p.token_amount)
@@ -1352,7 +1364,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             ),
             (Role::Z, "Expired") => rec.log(
                 "local",
-                "claim_window_closed",
+                "cancel_seen",
                 "t1 passed without a claim: waiting for B's refund (or t2)",
                 None,
             ),
@@ -1420,6 +1432,12 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                     tx(rec, "claim"),
                 );
             }
+            (Role::B, "Refunding") => rec.log(
+                "btc",
+                "cancel_seen",
+                "t1 passed without a claim: the swap is called off. Refunding from FerryLock",
+                None,
+            ),
             (Role::B, "ZecSwept") => rec.log(
                 "local",
                 "swap_complete",
@@ -1690,14 +1708,13 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             let first = rec.set_evm_tx(key, hash.clone(), Some(ev.block_number));
             EvmRecord::set_observer(&mut rec.observer_evm, key, line);
             self.fill_height(rec, key, ev.block_number);
-            if first && key != "lock" {
+            if first && (key == "claim" || key == "refund") {
                 // Someone else's call (or a relayer's): it goes on the timeline too.
                 let label = match key {
-                    "claim" => "Z claimed from FerryLock",
-                    "refund" => "B refunded from FerryLock",
-                    _ => "Punish called on FerryLock after t2",
+                    "claim" => "Saw Z's claim on FerryLock: z is now public",
+                    _ => "Saw B's refund on FerryLock: b is now public",
                 };
-                rec.log("btc", &format!("evm_{key}_seen"), label, Some(hash));
+                rec.log("btc", &format!("{key}_seen"), label, Some(hash));
                 self.fill_height(rec, key, ev.block_number);
             }
         }
@@ -1777,6 +1794,8 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 continue;
             }
             if let Ok(Some(line)) = self.leg.describe_tx(&txid).await {
+                // The Zcash leg describes itself against Bitcoin; here the other chain is EVM.
+                let line = line.replace("Bitcoin", "the EVM chain");
                 EvmRecord::set_observer(&mut rec.observer_zec, key, line);
             }
         }

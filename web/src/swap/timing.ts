@@ -23,7 +23,13 @@ export function useBlockTimes(status: Status | null): BlockTimes {
     const next = { ...times };
     for (const chain of ["btc", "zec"] as const) {
       const { network, height } = status.chains[chain];
-      if (network !== "regtest") {
+      // a local EVM chain (anvil) is measured like regtest; public EVM chains (Base) make 2 s blocks
+      const local = network === "regtest" || (chain === "btc" && network === "anvil");
+      if (chain === "btc" && coin().kind === "evm" && !local) {
+        next.btc = 2;
+        continue;
+      }
+      if (!local) {
         // Litecoin targets 2.5 min blocks
         next[chain] = chain === "btc" && coin().id === "ltc" ? 150 : TARGET[chain];
         continue;
@@ -77,6 +83,14 @@ export function confirmationsLabel(status: Status | null): string {
 // then the cancel and the refund each confirm, then the ZEC comes home (random delay + 1 block).
 export function unwoundBy(status: Status | null, swap: SwapView, bt: BlockTimes): Date | null {
   if (!status) return null;
+  const d = swap.deadlines;
+  if (d.t1_unix != null) {
+    // EVM: the refund can land right after t1 (block time, which may run ahead of the wall clock
+    // on a local chain), then the ZEC comes home after the random delay and a Zcash block.
+    const chainNow = d.now_unix ?? status.chains.btc.time ?? Date.now() / 1000;
+    const seconds = Math.max(0, d.t1_unix - chainNow) + 2 * bt.btc + 20 + bt.zec;
+    return new Date(Date.now() + seconds * 1000);
+  }
   const t = terms(status, swap);
   const height = status.chains.btc.height;
   const lock = swap.deadlines.btc_lock_height ?? height + t.lockConfs;
