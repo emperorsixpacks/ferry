@@ -648,6 +648,8 @@ function statusView(role, coin = null) {
     role,
     name: p.name,
     balances: { ...p.balances },
+    // as ferryd: what a new swap may use, the balances less what live swaps hold before their locks
+    free: { zec_shielded_zat: freeOf(role, "zec_shielded_zat"), btc_sat: freeOf(role, "btc_sat") },
     chains: {
       btc: { network: chains.btc.network, height: chains.btc.height, ...(coin === "ltc" ? { coin: "ltc", ticker: "LTC" } : {}) },
       zec: { network: chains.zec.network, height: chains.zec.height, pool: chains.zec.pool },

@@ -3,7 +3,7 @@ import type { Maker, Role } from "@/api";
 import { coin, zec } from "@/format";
 import { btcText } from "@/swap/shared";
 import { cn } from "../lib/utils";
-import { ago, capacity, fits, quoteOf, selectable, slotsText, swappable } from "../lib/makers";
+import { ago, capacity, fits, quoteOf, selectable, swappable } from "../lib/makers";
 import { secondsLeft, type FirmQuote } from "../lib/quotes";
 import { arrowKeys } from "./ui/sheet";
 
@@ -11,7 +11,7 @@ import { arrowKeys } from "./ui/sheet";
 // (Ferry picks for the amount) or one partner. Partners for the direction on screen come first
 // (buying ZEC: the ones who sell it); one that is offline, paused, busy (running as many swaps as it
 // takes at once), can't take the amount or only swaps the other way is listed but can't be picked.
-// One that can says how many more swaps it takes right now, when it says.
+// One that can says the range its free funds take now.
 
 export function PartnerList({
   makers,
@@ -93,10 +93,9 @@ function PartnerRow({ m, role, zat, active, onPick, age, firm, now }: { m: Maker
   else meta = q ? `Takes ${zec(q.min)}–${zec(capacity(q))} ZEC` : "Taking swaps";
   // a firm price covers the amount on screen: its countdown says more than the partner's range
   if (firm && can) meta = `Firm price for ${secondsLeft(firm, now)} s`;
-  // how many more swaps it takes right now, when it says: a line of its own, so neither is cut short
-  const slots = can ? slotsText(m) : null;
-  const sub = slots ? slots.charAt(0).toUpperCase() + slots.slice(1) : null;
-  return <Option active={active} can={can} onClick={() => can && onPick(m.name)} title={m.name} rate={rate} meta={meta} sub={sub} dot={m.online && !m.paused && !m.busy ? "bg-emerald-500" : "bg-slate-300"} />;
+  // no "can take 3 more swaps": a free slot isn't a swap its funds cover, and its range above already
+  // says what its free funds take now
+  return <Option active={active} can={can} onClick={() => can && onPick(m.name)} title={m.name} rate={rate} meta={meta} dot={m.online && !m.paused && !m.busy ? "bg-emerald-500" : "bg-slate-300"} />;
 }
 
 function Option({ active, can, onClick, title, rate, meta, sub, dot }: { active: boolean; can: boolean; onClick: () => void; title: string; rate?: string | null; meta: string; sub?: string | null; dot?: string }) {

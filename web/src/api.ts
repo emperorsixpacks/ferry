@@ -10,6 +10,9 @@ export interface Status {
   // balance as a decimal string. Read it with counterBalance().
   // eth_wei (EVM): the account's ETH for gas, as a decimal string.
   balances: { zec_shielded_zat: number; btc_sat: number; token_units?: string; eth_wei?: string };
+  // what a new swap (or a withdrawal) may use: the balances less what live swaps hold, and for a Z
+  // node's ZEC less the notes their locks may take (ferryd's capacity; older daemons leave it out)
+  free?: { zec_shielded_zat: number; btc_sat: number; token_units?: string; eth_wei?: string };
   chains: {
     // the coin swapped against ZEC ("btc" | "ltc"); older daemons leave it out (btc)
     // coin "usdc": an EVM daemon (--counter evm); `time` is the latest block's unix time

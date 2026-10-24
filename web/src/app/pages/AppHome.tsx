@@ -18,7 +18,7 @@ import { CoinPicker, tokenSubtitle } from "../components/TokenPicker";
 import { Sheet } from "../components/ui/sheet";
 import { cn } from "../lib/utils";
 import { useLocal } from "../lib/daemon";
-import { availability, busyFor, busyText, capacity, counterFor, isBusyText, liveQuote, quoteOf, useMakers, type Makers, type Quote } from "../lib/makers";
+import { LOCK_FEE_RESERVE, ZEC_FEE_RESERVE, availability, busyFor, busyText, capacity, counterFor, isBusyText, liveQuote, nodeRoom, quoteOf, useMakers, type Makers, type Quote } from "../lib/makers";
 import { comboSummary, isActive as nearActive, nearSummary, useNear } from "../lib/near";
 import { pairName } from "../lib/pairs";
 import { following, nearAssetOf, usePathCtx, useSelection, type CardProps, type Side } from "../lib/paths";
@@ -44,10 +44,6 @@ import { useActivityRows } from "./Activity";
 // the card, one honest line says what stays private. Beside the card (below it on a phone), "Recent
 // activity": the latest swaps of every kind, each opening its progress page.
 
-// what the ZEC lock's network fee needs on top of the amount (ferry-zec's SEND_FEE_RESERVE)
-const ZEC_FEE_RESERVE = 50_000;
-// what a Bitcoin or Litecoin lock's own fee needs on top of the amount (ferryd's B keeps as much)
-const LOCK_FEE_RESERVE = 10_000;
 // when a swap started (its first timeline entry), for newest first
 const startedAt = (s: SwapView) => Date.parse(s.timeline[0]?.at ?? "") || 0;
 
@@ -286,14 +282,18 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
   // the partner picked in settings went busy or offline: say so, as the quote moves to another
   const picked = partner ? (makers.list?.find((m) => m.name === partner) ?? null) : null;
   const pickedOut = picked && !picked.available && maker && maker.name !== picked.name ? picked : null;
+  const line = availability(quote ? maker : null, about, { status, role, zat: valid ? zat : 0, gross, evm, offline });
 
   // the most ZEC this party can swap: its ZEC (less the lock's fee) when selling, what its coin
-  // buys (less the lock's fee) when buying, within what a partner takes
+  // buys (less the lock's fee) when buying, within what a partner takes; from what its swaps in
+  // progress leave free, when the node says (status.free)
+  const zecFree = status?.free?.zec_shielded_zat ?? zecBal;
+  const coinFree = status?.free ? counterBalance({ ...status, balances: status.free }) : coinBal;
   const most = (() => {
     const partnerMax = cap ?? Infinity;
-    if (!buying) return zecBal == null ? null : Math.max(0, Math.min(zecBal - ZEC_FEE_RESERVE, partnerMax));
-    if (coinBal == null || !quote) return null;
-    const spendable = Math.max(0, coinBal - (evm ? 0 : LOCK_FEE_RESERVE));
+    if (!buying) return zecFree == null ? null : Math.max(0, Math.min(zecFree - ZEC_FEE_RESERVE, partnerMax));
+    if (coinFree == null || !quote) return null;
+    const spendable = Math.max(0, coinFree - (evm ? 0 : LOCK_FEE_RESERVE));
     return Math.max(0, Math.min(Math.floor((spendable * 1e8) / quote.rate), partnerMax));
   })();
   const setMax = () => {
@@ -479,9 +479,9 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
           ) : makers.list === undefined ? (
             <p>Finding the best rate…</p>
           ) : null}
-          {/* is the partner taking swaps now, and how many more; offline while this pair's daemon doesn't
-              answer (it comes back by itself) */}
-          {offline ? <p data-availability>Partner offline</p> : quote && maker ? <p data-availability>{availability(maker, about)}</p> : null}
+          {/* can this swap start now: the partner and the node it runs through, slots and free funds for
+              the amount; offline while this pair's daemon doesn't answer (it comes back by itself) */}
+          {line ? <p data-availability>{line}</p> : null}
           {skipped && quote && maker ? (
             <p>
               {skipped.name} can fill up to {zec(capacity(quoteOf(skipped)!))} ZEC right now, so {maker.name} takes this one.
@@ -548,7 +548,7 @@ function problemOf({
   if (!valid) return "Enter an amount, like 1.00.";
   // this node runs as many swaps as it takes at once (ferryd --max-swaps), or every partner for this
   // way does: there is room again once a swap finishes
-  if (status?.capacity && status.capacity.free_slots === 0) return busyText(about);
+  if (nodeRoom(status, role, zat, gross, evm) === "busy") return busyText(about);
   if (makers.list && !usable.length && makers.list.some((m) => busyFor(m, role))) return busyText(about);
   if (makers.list && !usable.length) return `No partner is ${buying ? "selling" : "buying"} ZEC for ${t} right now. Try again in a minute.`;
   if (!buying && status) {
