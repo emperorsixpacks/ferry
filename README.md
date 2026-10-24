@@ -60,10 +60,12 @@ locks its ZEC, they come back after the deadline.
 
 **Coin to coin through the shielded pool (routes).** `ferry-route` chains a buy and a sell: BTC →
 shielded ZEC → USDC, say. Swap 1's ZEC is swept straight into your other node's shielded wallet,
-and after a random pause swap 2 sells it, never below the price you set. If swap 2 can't finish, you
-keep the shielded ZEC. Timing and the amount ratio can still link the two swaps, and colluding
-partners can link them directly ([crates/ferry-route](crates/ferry-route/README.md),
-[docs/PROTOCOL.md](docs/PROTOCOL.md#routes), `infra/route-demo.sh test`).
+and swap 2 sells it, never below the price you set. Both are split into parts of standard sizes
+(0.1, 0.25, 0.5, 1 ZEC ...), each its own swap after its own random pause, so the outer chains see
+amounts everyone uses rather than one pair in a telling ratio. If swap 2 can't finish, you keep the
+shielded ZEC. The number of parts, timing, your parts sharing an EVM account or bitcoin inputs,
+and colluding partners can still link the sides ([crates/ferry-route](crates/ferry-route/README.md),
+[docs/PROTOCOL.md](docs/PROTOCOL.md#standard-amounts), `infra/route-demo.sh test`).
 
 ## What each chain sees
 

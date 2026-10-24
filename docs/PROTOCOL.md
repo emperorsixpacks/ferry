@@ -144,45 +144,131 @@ scalar-multiplication trick.
 ## Routes
 
 A route moves value between two non-ZEC assets, **coin A → shielded ZEC → coin C** (BTC → USDC,
-say), as two ordinary Ferry swaps run one after the other and joined in the shielded pool. The swap
-protocol is unchanged: each leg is a complete swap with its own maker, terms, deadlines and abort
-paths, and no key, hash or secret is shared between the legs. `ferry-route`
+say), as ordinary Ferry swaps joined in the shielded pool. The swap protocol is unchanged: every
+swap is complete in itself, with its own maker, terms, deadlines and abort paths, and no key, hash
+or secret is shared between swaps. `ferry-route`
 ([crates/ferry-route](../crates/ferry-route/README.md)) runs it over the user's own two daemons,
 holding no keys and no funds:
 
-- **L1**, the user's B daemon on pair A. Leg 1 buys X ZEC from a Z maker with coin A.
-- **L2**, the user's Z daemon on pair C. Leg 2 sells that ZEC to a B maker for coin C.
+- **L1**, the user's B daemon on pair A. Leg 1 buys X ZEC from Z makers with coin A.
+- **L2**, the user's Z daemon on pair C. Leg 2 sells that ZEC to B makers for coin C.
+
+By default each leg is split into **parts of standard sizes**, each part one swap (below). With
+standard amounts off, each leg is one part; everything else is the same.
 
 1. **Start leg 1.** The router reads L2's own shielded address (`GET /api/addresses`) and starts
-   leg 1 on L1 with `sweep_to` set to it, the label `<route>/1` and `max_counter`, its most coin A
-   for X ([API.md](API.md#route-legs)).
-2. **Leg 1** runs as any buy-ZEC swap, except that at step 7 B sweeps the joint note straight into
-   L2's wallet: one Ironwood transaction, built like every sweep with the outgoing viewing key
-   discarded, so leg 1's maker can't see where it went. `sweep_to` is fixed when the swap is created
-   and never sent to the maker. Once the maker's redeem (EVM: claim) is on chain, the ZEC is the
-   user's.
-3. **Settle.** The router waits until leg 1 is swapped, the sweep has 10 confirmations (a note from
-   outside the wallet is spendable only then), and L2 can spend leg 2's amount plus its lock fee
-   reserve. Leg 2 sells X less a sweep-fee allowance and that reserve (X − 60 000 zat by default).
-4. **Pause.** A random privacy pause, drawn once and persisted (default 5 to 30 minutes).
-5. **Leg 2** starts on L2 with the label `<route>/2` and `min_counter`, the least coin C for its
-   amount (kept as a rate, so a smaller amount scales it down), and runs as any sell-ZEC swap. A
-   refusal is retried, through the listed makers, for up to 2 hours; then the route holds the ZEC.
-   If the route request named a `payout_to`, leg 2 carries it, so coin C is paid there (a NEAR
-   Intents deposit address, say) instead of L2's wallet.
+   leg 1's first part on L1 with `sweep_to` set to it, the label `<route>/1/1` and `max_counter`,
+   its most coin A for the part's ZEC ([API.md](API.md#route-legs)).
+2. **Each leg-1 part** runs as any buy-ZEC swap, except that at step 7 B sweeps the joint note
+   straight into L2's wallet: one Ironwood transaction, built like every sweep with the outgoing
+   viewing key discarded, so the maker can't see where it went. `sweep_to` is fixed when the swap
+   is created and never sent to the maker. Once the maker's redeem (EVM: claim) is on chain, that
+   part's ZEC is the user's. The next leg-1 part starts after L1 is free and its own random gap.
+3. **Settle.** A part's ZEC can be sold once its sweep has 10 confirmations (a note from outside
+   the wallet is spendable only then).
+4. **Each leg-2 part** starts on L2, after its own random gap, once leg 1's spendable ZEC covers it
+   and L2 can spend its amount plus the lock fee reserve: label `<route>/2/<n>` and `min_counter`,
+   the least coin C for its amount. It runs as any sell-ZEC swap. A refusal is retried, through the
+   listed makers, for up to 2 hours; then the route holds. If the route request named a
+   `payout_to`, leg 2 is one part and carries it, so coin C is paid there (a NEAR Intents deposit
+   address, say) instead of L2's wallet.
 
-**Each leg starts at most once.** The router saves the start as in flight before it sends it.
+L1 and L2 each run one swap at a time, so one part of each leg can run at once: leg 2 sells while
+leg 1 is still buying. Leg 2 never sells more than leg 1 has delivered and made spendable.
+
+**Each part starts at most once.** The router saves the start as in flight before it sends it.
 ferryd stores the label in the swap record before its first save, refuses a label already in use
 (by a swap, or by a start still being handled: `409 route_label_in_use`), and runs one start at a
 time, so after a lost answer or a restart the router finds the swap by its label instead of
 starting another. Every other error status means no swap was created, including a record that
-could not be saved.
+could not be saved. A part that is tried again after it ended (after `continue`) is a new part
+with a new label.
 
-**Deadlines.** Each leg runs on its own maker's terms. The legs never overlap (leg 2 is not
-negotiated before leg 1's ZEC can be spent: that would lock maker 2's coin before the user's ZEC
-exists), so no timelock of one leg depends on the other.
+**Deadlines.** Each swap runs on its own maker's terms. No leg-2 part is negotiated before the ZEC
+it sells can be spent (that would lock maker 2's coin before the user's ZEC exists), so no
+timelock of one swap depends on another.
 
-**Failure.** Once leg 1's redeem is on chain, every later failure leaves the user holding shielded
-ZEC in L2's wallet, which has no deadline. During leg 1 the user carries the ordinary B risk, so
-L1 needs its own watchtower. What links the two legs (timing, the amount ratio, colluding makers)
-and the full failure table are in [THREAT-MODEL.md](THREAT-MODEL.md#routes-coin-a--shielded-zec--coin-c).
+**Failure.** From the moment a leg-1 part's partner has claimed its coin A, every later failure
+leaves the user holding shielded ZEC in L2's wallet, which has no deadline; before that, coin A
+comes back. During each leg-1 part the user carries the ordinary B risk, so L1 needs its own
+watchtower. What links the legs and the full failure table are in
+[THREAT-MODEL.md](THREAT-MODEL.md#routes-coin-a--shielded-zec--coin-c).
+
+### Standard amounts
+
+Two swaps that each move one ZEC amount X, at public prices, sit in a ratio an observer can test:
+"0.0041 BTC in, then about 40 USDC out a while later" links the legs even though no transaction
+does. Standard amounts take the exact amounts away: each leg is a set of swaps of fixed sizes, and
+an observer sees many swaps of each size, not one matching pair. It is the standard-denomination
+idea of a mixer, applied to both sides of a route.
+
+**The sizes.** The router splits into ferryd's firm-quote buckets, **0.1, 0.25, 0.5, 1, 2.5, 5,
+10, 25, 50 and 100 ZEC** (`quote::BUCKETS_ZAT`; `--denominations` changes them):
+
+- A maker already sees only a bucket in every quote request (the UI server sends nothing finer),
+  and a part of exactly a bucket's size is what the quote was for: the swap's terms tell the
+  maker nothing a quote request didn't.
+- The UI quotes and suggests amounts by bucket, so plain single swaps gather on the same sizes:
+  a route's parts hide among them, not only among other routes.
+- Three sizes a decade (1, 2.5, 5) need at most three parts per decade, where powers of ten alone
+  need up to nine: fewer swaps, fees and hours for one route, for ten pools instead of four. A
+  route has at most `--max-parts` parts a leg (8).
+- ferryd makers take 0.1 to 10 ZEC by default, so the common sizes fit any maker.
+
+**Splitting.** Leg 1 buys the largest standard amount at most the request, in the fewest parts:
+0.85 ZEC is 0.5 + 0.25 + 0.1, 1 ZEC is one part, 0.3 is three 0.1 parts. The split is exact, not
+greedy (greedy would take 0.25 and be stuck with 0.05). The parts run in a random order.
+
+**What doesn't divide.** Pick the most private option that still works for every request:
+
+- **Leg 1 rounds down.** A request of 0.37 ZEC buys 0.35 (0.25 + 0.1): the rest of the user's
+  coin A simply stays in their wallet, and the route says so. Refusing would turn away almost
+  every request typed as coin A, and a last odd-sized part would be the one unique amount on chain
+  A, which is exactly what this hides. Below 0.1 ZEC there is nothing to route.
+- **Leg 2 sells standard sizes too.** Fees make that the hard side: every leg-1 sweep, every
+  leg-2 lock and a reclaim cost a Zcash fee (about 0.0001 ZEC each), and the last lock needs a
+  reserve (0.0005) at its start, so the ZEC that arrives is a little less than what was bought.
+  Selling that remainder as a last odd part would put a unique amount on chain C, and its size
+  ("1 ZEC less six fees") would even tell how many parts the route had. So:
+  - When L2 already holds a little spare ZEC, about 0.0001 ZEC per part plus 0.0004, it pays the
+    fees, and **leg 2 sells exactly the sizes leg 1 bought**. The spare pays only fees: leg 2
+    never sells more than leg 1 bought, and ZEC that another route is holding for its user is not
+    spare.
+  - Without it (a fresh wallet), **leg 2 sells the most standard ZEC that fits after the fees,
+    and the rest stays in the wallet as shielded ZEC**: 1 ZEC sells as 0.5 + 0.25 + 0.1 + 0.1 and
+    keeps about 0.05. Nothing is lost or visible: the route reports it (`left_zat`), and it is
+    the spare that lets the next route sell its full sizes.
+  - A route that pays out to an address (`payout_to`, a NEAR Intents deposit address) sells in
+    one part, everything but the fees: a deposit address takes one deposit before its deadline,
+    and that leg is public on NEAR's side anyway.
+- **Prices are rates.** `max_in` and `min_out` are kept as rates: each part's `max_counter` is
+  `max_in × part ÷ request` rounded down, its `min_counter` is `min_out × part ÷ basis` rounded
+  up, so no part pays more, or takes less, than the user's rate.
+
+**Timing.** Each part waits its own random gap, drawn uniformly from the route's `delay_secs`
+(default 5 to 30 minutes) when it could start (its daemon free and, for leg 2, its ZEC spendable),
+saved once and never drawn again. Only leg 1's first part starts at once. Because a leg-2 part
+starts as soon as enough of leg 1's ZEC can be spent, the legs interleave rather than run as a
+burst of buys followed by a burst of sells. Where a request lists several partners for a leg,
+part n starts with the n-th, so each partner sees only its parts.
+
+**Failure, part by part.** The user ends with shielded ZEC or their own coin, never a stuck
+route:
+
+- A leg-1 part that is refused by every listed partner, called off, refunded or (offline past
+  its deadline) punished stops the buying: no later leg-1 part starts, and leg 2 is planned again
+  for what was bought. If nothing was bought, the route fails, as a single swap would.
+- A leg-2 part that is called off or refunded leaves its ZEC in L2's wallet; the other parts go
+  on, and the route ends `holding` that ZEC ("You received ... so far, and hold about ...").
+  `continue` plans it again as new parts, under new labels.
+- A leg-2 part no partner takes at the user's price within the window (2 hours), or a wallet
+  that can't fund the next lock, holds the route: no new part of either leg starts, parts under
+  way finish, and `continue` resumes both legs.
+- `stop` keeps parts that haven't started from starting. Parts under way finish; the route ends
+  holding what was bought and not sold, or failed if nothing was bought.
+- A restart resumes every part where it was: gaps already drawn, starts in flight looked up by
+  their labels.
+
+**Off.** `--standard-amounts off` (or `"standard_amounts": false` in a request) runs each leg as
+one swap, leg 2 selling X less a sweep-fee allowance and the lock reserve (X − 60 000 zat), with
+optional ZEC jitter (`keep_bps`). It is for testing; its amounts can link the legs.

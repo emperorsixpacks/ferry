@@ -81,13 +81,16 @@ t1 B refunds (publishing b) and Z reclaims; from t2 Z punishes. See [EVM.md](EVM
 
 ## Routes (privacy hub)
 
-`ferry-route` (`crates/ferry-route`) chains two swaps through the shielded pool, coin A → ZEC →
-coin C, over the user's own two daemons: a B daemon on pair A buys the ZEC and sweeps it straight
-into the wallet of a Z daemon on pair C, which sells it after the note can be spent and a random
-pause. It holds no keys and no funds; its only actions are two `POST /api/swaps`, each with a route
-label so it starts at most once (`crates/ferryd/src/route.rs` on the ferryd side). The route's
-state machine is a pure `step(route, observation)`, persisted one JSON file per route. See
-[PROTOCOL.md](PROTOCOL.md#routes); `infra/route-demo.sh` runs three routes on regtest Bitcoin and
+`ferry-route` (`crates/ferry-route`) chains swaps through the shielded pool, coin A → ZEC → coin
+C, over the user's own two daemons: a B daemon on pair A buys the ZEC and sweeps it straight into
+the wallet of a Z daemon on pair C, which sells it once the notes can be spent. By default both
+legs are split into parts of standard sizes (the firm-quote buckets), each part one swap after its
+own random pause, so neither outer chain sees the route's exact amounts
+([standard amounts](PROTOCOL.md#standard-amounts)). It holds no keys and no funds; its only action
+is `POST /api/swaps`, once per part, each with a route label so it starts at most once
+(`crates/ferryd/src/route.rs` on the ferryd side). The route's state machine is a pure
+`step(route, observation)`, persisted one JSON file per route. See
+[PROTOCOL.md](PROTOCOL.md#routes); `infra/route-demo.sh` runs six routes on regtest Bitcoin and
 anvil with one mock Zcash chain.
 
 ## Cross-chain settlement with NEAR Intents
