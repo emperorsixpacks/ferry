@@ -45,6 +45,13 @@ pub trait ZecLeg: Send + Sync {
         amount: u64,
     ) -> impl Future<Output = Result<String, Self::Error>> + Send;
 
+    /// Whether `err`, returned by [`ZecLeg::send`], means the send was refused before anything
+    /// was broadcast and retrying cannot help (for example, too few Ironwood notes to fund it
+    /// shielded-only). Any other send error may have reached the network.
+    fn send_refused(&self, _err: &Self::Error) -> bool {
+        false
+    }
+
     /// Notes received by the joint address, found by scanning with the joint viewing key.
     fn watch(
         &self,

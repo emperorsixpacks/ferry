@@ -4,34 +4,45 @@
 //! One wallet directory per party holds the party's own (seed) account plus one view-only
 //! account per joint key, imported from the joint UFVK. A background task keeps the wallet
 //! synced; [`ZecLeg::watch`] reads the joint account's notes straight from the wallet database.
-//! Sweeping builds a PCZT from the view-only joint account (`pczt create-max`), proves it with
-//! devtool and signs it with `ferry-zec-signer` (`rsk = ask + α`). Confirmations and the public
-//! view of a transaction come from the node's JSON-RPC.
+//! Every transaction is built as a PCZT and checked to be Ironwood-only before it is signed:
+//! the lock with `pczt create --ironwood-only` from our own account (signed by devtool with our
+//! seed), sweeps with `pczt create-max --ironwood-only` from the view-only joint account (signed
+//! by `ferry-zec-signer`, `rsk = ask + α`). Confirmations and the public view of a transaction
+//! come from the node's JSON-RPC.
 //!
 //! # What this relies on
 //!
 //! - **zcash-devtool** (`vendor/zcash-devtool`, librustzcash rev `eb38d7a3`), built with
-//!   `--features regtest_support` and patched with `infra/patches/zcash-devtool-discard-ovk.patch`.
-//!   We use its CLI (`wallet init|import-ufvk|sync|balance|list-addresses|send`, `pczt
-//!   create-max|prove|combine|send`) with `RUST_LOG=error`, reading only: the
+//!   `--features regtest_support` and patched with `infra/patches/zcash-devtool-ferry.patch`.
+//!   We use its CLI (`wallet init|import-ufvk|sync|balance|list-addresses`, `pczt
+//!   create|create-max|prove|sign|combine|send`) with `RUST_LOG=error`, reading only: the
 //!   `Default Address:` and `Ironwood Spendable:` lines, and a transaction id printed alone on
-//!   the last 64-hex line of `send`. Its wallet database is read directly (read-only) for
+//!   the last 64-hex line of `pczt send`. Its wallet database is read directly (read-only) for
 //!   accounts, Ironwood notes and their spends: `accounts`, `ironwood_received_notes`,
 //!   `ironwood_received_note_spends`, `transactions`. Both are unstable interfaces, which is why
 //!   the devtool revision is pinned.
-//! - **The discard-OVK patch.** devtool builds outputs with the sending account's OVK. For the
-//!   joint account that OVK belongs to both parties, so the counterparty could decrypt the
-//!   sweep's outCiphertext and learn where the ZEC went, how much and the memo (audit H4,
-//!   shown by `spikes/zec/h4_ovk.sh`). The patch adds `pczt create-max --discard-ovk`
-//!   (`OvkPolicy::Discard`); [`DevtoolZecLeg::new`] refuses a devtool binary without it.
+//! - **The patch** ([`DevtoolZecLeg::new`] refuses a devtool binary without it):
+//!   - `pczt create-max --discard-ovk` (`OvkPolicy::Discard`). devtool builds outputs with the
+//!     sending account's OVK; for the joint account that OVK belongs to both parties, so the
+//!     counterparty could decrypt the sweep's outCiphertext and learn where the ZEC went, how
+//!     much and the memo (audit H4, shown by `spikes/zec/h4_ovk.sh`).
+//!   - `pczt create|create-max --ironwood-only`: select notes from the Ironwood pool alone. A
+//!     lock is never funded from another pool, and a sweep ignores foreign Sapling/Orchard notes
+//!     that anyone can send to the joint receivers, instead of failing on them (audit H1).
+//!   - `pczt sign` signs Ironwood spends of the seed's accounts (upstream signs Orchard only).
 //! - **`ferry-zec-signer`** (`tools/ferry-zec-signer`, outside the workspace with devtool's
 //!   `Cargo.lock`, so its PCZT types match devtool's and the workspace's pasta_curves 0.5 patch
 //!   stays out of that graph). `ufvk <net> <fvk hex>` turns the 96-byte joint FVK into a UFVK
 //!   and UA; `sign <in> <out>` reads `ask` from stdin (never argv) and signs every spend still
 //!   awaiting a signature, checked against each action's `rk`.
 //! - **Wallet policy.** Notes received from another wallet need 10 confirmations before devtool
-//!   will spend them, so a sweep of the joint note fails (and the daemon retries) until then.
+//!   will spend them. A sweep waits (retryable error) until the joint account's largest note has
+//!   them, then spends only spendable notes (`--only-spendable`), so unconfirmed dust sent to the
+//!   joint address can neither block it nor be all it sweeps.
 //!   Every devtool call that touches the wallet runs under one lock; the database reads do not.
+//! - **Time limits.** Every subprocess is killed past its limit (reads 60 s, sync 5 min, PCZT
+//!   steps and broadcast 10 min), so a stuck light wallet server cannot hold that lock forever.
+//!   A timeout is an ordinary error: sync retries, and a send that timed out is "maybe sent".
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -55,6 +66,13 @@ pub enum ZecError {
     Rpc(String),
     #[error("{0}")]
     Io(#[from] std::io::Error),
+    /// The subprocess ran past its time limit and was killed. Treated like any other failure
+    /// (retryable; a timed-out send counts as "maybe sent", never as refused).
+    #[error("{cmd} timed out after {secs}s and was killed")]
+    Timeout { cmd: String, secs: u64 },
+    /// Refused before anything was broadcast, and retrying cannot help.
+    #[error("refused: {0}")]
+    Refused(String),
     #[error("{0}")]
     Other(String),
 }
@@ -112,14 +130,24 @@ pub struct DevtoolZecLeg(Arc<Inner>);
 impl DevtoolZecLeg {
     /// Opens (or initializes) the wallet and starts the background sync task.
     pub async fn new(cfg: DevtoolConfig) -> Result<Self, ZecError> {
-        let help =
-            run_devtool(&cfg, &["pczt".into(), "create-max".into(), "--help".into()]).await?;
-        if !help.contains("--discard-ovk") {
-            return Err(ZecError::Other(format!(
-                "{} lacks `pczt create-max --discard-ovk`; apply infra/patches/zcash-devtool-discard-ovk.patch \
-                 (sweeping with the joint OVK would show the counterparty where the ZEC went)",
-                cfg.devtool.display()
-            )));
+        for (cmd, flags) in [
+            ("create-max", &["--discard-ovk", "--ironwood-only"][..]),
+            ("create", &["--ironwood-only"][..]),
+        ] {
+            let help = run_devtool(
+                &cfg,
+                &["pczt".into(), cmd.into(), "--help".into()],
+                READ_TIMEOUT,
+            )
+            .await?;
+            if let Some(flag) = flags.iter().find(|f| !help.contains(*f)) {
+                return Err(ZecError::Other(format!(
+                    "{} lacks `pczt {cmd} {flag}`; apply infra/patches/zcash-devtool-ferry.patch \
+                     (without it sweeps can leak their recipient to the counterparty or be blocked \
+                     by foreign notes, and locks could draw on other pools)",
+                    cfg.devtool.display()
+                )));
+            }
         }
         if !cfg.wallet_dir.join("keys.toml").exists() {
             let mut args = vec![
@@ -136,7 +164,7 @@ impl DevtoolZecLeg {
             if let Some(h) = &cfg.activation_heights {
                 args.extend(["--activation-heights".into(), path_str(h)]);
             }
-            run_devtool_wallet(&cfg, &args).await?;
+            run_devtool_wallet(&cfg, &args, SYNC_TIMEOUT).await?;
             tracing::info!(wallet = %cfg.wallet_dir.display(), "initialized a new Zcash wallet");
         }
         let own_account = query(&cfg.wallet_dir, |c| {
@@ -149,8 +177,12 @@ impl DevtoolZecLeg {
         .await
         .map(|u| uuid_str(&u))
         .map_err(|e| ZecError::Other(format!("no spending account in the wallet: {e}")))?;
-        let addrs =
-            run_devtool_wallet(&cfg, &["list-addresses".into(), own_account.clone()]).await?;
+        let addrs = run_devtool_wallet(
+            &cfg,
+            &["list-addresses".into(), own_account.clone()],
+            READ_TIMEOUT,
+        )
+        .await?;
         let own_address = addrs
             .lines()
             .find_map(|l| l.trim().strip_prefix("Default Address:"))
@@ -203,10 +235,15 @@ impl Inner {
         run_devtool_wallet(
             &self.cfg,
             &["sync".into(), "-s".into(), self.cfg.server.clone()],
+            SYNC_TIMEOUT,
         )
         .await?;
-        let out =
-            run_devtool_wallet(&self.cfg, &["balance".into(), self.own_account.clone()]).await?;
+        let out = run_devtool_wallet(
+            &self.cfg,
+            &["balance".into(), self.own_account.clone()],
+            READ_TIMEOUT,
+        )
+        .await?;
         let balance = out
             .lines()
             .find_map(|l| l.trim().strip_prefix("Ironwood Spendable:"))
@@ -223,10 +260,15 @@ impl Inner {
         if let Some(k) = self.cache.lock().unwrap().joint.get(fvk) {
             return Ok(k.clone());
         }
-        let out = std::process::Command::new(&self.cfg.signer)
-            .args(["ufvk", &self.cfg.network, &hex::encode(fvk)])
-            .output()
-            .map_err(|e| tool_err("ferry-zec-signer ufvk", e))?;
+        let out = run_blocking_limited(
+            std::process::Command::new(&self.cfg.signer).args([
+                "ufvk",
+                &self.cfg.network,
+                &hex::encode(fvk),
+            ]),
+            "ferry-zec-signer ufvk",
+            READ_TIMEOUT,
+        )?;
         if !out.status.success() {
             return Err(ZecError::Tool {
                 cmd: "ferry-zec-signer ufvk".into(),
@@ -288,6 +330,7 @@ impl Inner {
                         "-s".into(),
                         self.cfg.server.clone(),
                     ],
+                    SYNC_TIMEOUT,
                 )
                 .await?;
                 tracing::info!(account = %name, birthday, "imported the joint viewing key");
@@ -302,6 +345,40 @@ impl Inner {
             .imported
             .insert(*fvk, uuid.clone());
         Ok(uuid)
+    }
+
+    /// Total value of the account's Ironwood notes with no recorded spend, confirmed or not.
+    async fn unspent_ironwood(&self, account: String) -> Result<u64, ZecError> {
+        Ok(query(&self.cfg.wallet_dir, move |c| {
+            c.query_row(
+                &format!("SELECT COALESCE(SUM(n.value), 0) {UNSPENT_IRONWOOD}"),
+                [account.replace('-', "")],
+                |r| r.get::<_, u64>(0),
+            )
+        })
+        .await?)
+    }
+
+    /// The account's largest unspent Ironwood note: (value, mined height).
+    async fn largest_unspent_ironwood(
+        &self,
+        account: String,
+    ) -> Result<Option<(u64, Option<u64>)>, ZecError> {
+        let row = query(&self.cfg.wallet_dir, move |c| {
+            c.query_row(
+                &format!(
+                    "SELECT n.value, t.mined_height {UNSPENT_IRONWOOD} ORDER BY n.value DESC LIMIT 1"
+                ),
+                [account.replace('-', "")],
+                |r| Ok((r.get::<_, u64>(0)?, r.get::<_, Option<u64>>(1)?)),
+            )
+        })
+        .await;
+        match row {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Pools touched by a transaction our wallet stored (it stores what it builds).
@@ -439,49 +516,78 @@ impl ZecLeg for DevtoolZecLeg {
         let (_, ua) = self.0.joint_keys(fvk)?;
         let _w = self.0.wallet.lock().await;
         self.0.sync_locked().await?;
+        let cfg = &self.0.cfg;
 
-        // Shielded only, checked before anything is broadcast: our Ironwood notes alone must
-        // cover the payment, and devtool's proposal for it must touch nothing but Ironwood.
-        let balance = self.0.cache.lock().unwrap().balance.unwrap_or(0);
-        if balance < amount + SEND_FEE_RESERVE {
-            return Err(ZecError::Other(format!(
-                "spendable Ironwood balance {balance} zat cannot cover {amount} zat plus fees; \
-                 refusing to send (Ferry never funds the lock from transparent or other pools)"
+        // Shielded only, decided before anything is broadcast. Our Ironwood notes alone must be
+        // able to cover the payment; if they only lack confirmations, wait.
+        let need = amount + SEND_FEE_RESERVE;
+        let unspent = self.0.unspent_ironwood(self.0.own_account.clone()).await?;
+        if unspent < need {
+            return Err(ZecError::Refused(format!(
+                "our Ironwood notes total {unspent} zat, short of {amount} zat plus fees, and Ferry \
+                 never funds the lock from transparent or other shielded pools"
             )));
         }
-        let mut args = vec![
-            self.0.own_account.clone(),
-            "--address".into(),
-            ua,
-            "--value".into(),
-            amount.to_string(),
-        ];
-        let proposal = run_devtool_wallet(
-            &self.0.cfg,
-            &[vec!["propose".to_string()], args.clone()].concat(),
+        let spendable = self.0.cache.lock().unwrap().balance.unwrap_or(0);
+        if spendable < need {
+            return Err(ZecError::Other(format!(
+                "only {spendable} of {unspent} zat in Ironwood notes is spendable yet; waiting for confirmations"
+            )));
+        }
+
+        let (created, proven, signed, done) = pczt_paths(cfg, "lock", fvk).await?;
+        run_pczt(
+            cfg,
+            &[
+                "create",
+                &self.0.own_account,
+                "--ironwood-only",
+                "--address",
+                &ua,
+                "--value",
+                &amount.to_string(),
+                "--output",
+                &path_str(&created),
+            ],
         )
         .await?;
-        proposal_ironwood_only(&proposal).map_err(|why| {
-            ZecError::Other(format!("refusing to send: the proposal {why}\n{proposal}"))
-        })?;
+        // The exact transaction that will be signed and broadcast.
+        let p = pools(&cfg.signer, &created).await?;
+        if !p.ironwood_only() {
+            return Err(ZecError::Refused(format!(
+                "the lock transaction would not be Ironwood-only ({p})"
+            )));
+        }
+        run_pczt(
+            cfg,
+            &["prove", &path_str(&created), "--output", &path_str(&proven)],
+        )
+        .await?;
+        run_pczt(
+            cfg,
+            &[
+                "sign",
+                "-i",
+                &path_str(&cfg.identity),
+                &path_str(&created),
+                "--output",
+                &path_str(&signed),
+            ],
+        )
+        .await?;
+        let txid = combine_and_send(cfg, &proven, &signed, &done).await?;
 
-        // `wallet send` re-proposes with the same inputs policy (transfers never spend
-        // transparent UTXOs), builds, stores and broadcasts in one step.
-        args.splice(1..1, ["-i".to_string(), path_str(&self.0.cfg.identity)]);
-        args.extend(["-s".to_string(), self.0.cfg.server.clone()]);
-        let out =
-            run_devtool_wallet(&self.0.cfg, &[vec!["send".to_string()], args].concat()).await?;
-        let txid = last_txid(&out)
-            .ok_or_else(|| ZecError::Other(format!("wallet send printed no txid:\n{out}")))?;
-
-        // And the transaction that actually went out. It is already broadcast, so a violation
-        // can only be reported, loudly; the swap still has to track the lock.
+        // What our wallet stored for it, as a second look (logged only: it is broadcast).
         match self.0.stored_tx_pools(&txid).await {
             Ok(p) if p.ironwood_only() => tracing::info!(%txid, "ZEC lock is Ironwood-only: {p}"),
             Ok(p) => tracing::error!(%txid, "SHIELDED-ONLY VIOLATION in the ZEC lock: {p}"),
-            Err(e) => tracing::error!(%txid, "could not verify the ZEC lock is Ironwood-only: {e}"),
+            Err(e) => tracing::error!(%txid, "could not re-check the ZEC lock's pools: {e}"),
         }
         Ok(txid)
+    }
+
+    fn send_refused(&self, err: &ZecError) -> bool {
+        matches!(err, ZecError::Refused(_))
     }
 
     async fn watch(&self, fvk: &[u8; 96]) -> Result<Vec<ZecNote>, ZecError> {
@@ -530,46 +636,46 @@ impl ZecLeg for DevtoolZecLeg {
     async fn sweep(&self, fvk: &[u8; 96], ask: &[u8; 32]) -> Result<String, ZecError> {
         let account = self.0.joint_account(fvk).await?;
         let cfg = &self.0.cfg;
-        let dir = cfg.wallet_dir.join("pczt");
-        tokio::fs::create_dir_all(&dir).await?;
-        let file = |s: &str| dir.join(format!("{}.{s}.pczt", &Inner::account_name(fvk)[12..]));
-        let (created, proven, signed, done) = (
-            file("created"),
-            file("proven"),
-            file("signed"),
-            file("final"),
-        );
-
         let _w = self.0.wallet.lock().await;
         self.0.sync_locked().await?;
-        run_devtool(
+
+        // The lock note is the joint account's largest; sweep only once it is spendable, so a
+        // sweep never goes out with whatever dust happens to be spendable and leaves it behind.
+        let largest = self.0.largest_unspent_ironwood(account.clone()).await?;
+        let tip = self.0.node_height().await?;
+        match largest {
+            None => {
+                return Err(ZecError::Other(
+                    "no unspent Ironwood notes at the joint address".into(),
+                ))
+            }
+            Some((value, mined)) => {
+                let confs = mined.map_or(0, |h| tip.saturating_sub(h) + 1);
+                if confs < SPENDABLE_CONFIRMATIONS {
+                    return Err(ZecError::Other(format!(
+                        "the joint note ({value} zat) has {confs} of {SPENDABLE_CONFIRMATIONS} confirmations; not yet spendable"
+                    )));
+                }
+            }
+        }
+
+        let (created, proven, signed, done) = pczt_paths(cfg, "sweep", fvk).await?;
+        run_pczt(
             cfg,
             &[
-                "pczt".into(),
-                "-w".into(),
-                path_str(&cfg.wallet_dir),
-                "create-max".into(),
-                account,
+                "create-max",
+                &account,
                 // Both parties hold the joint FVK, so the joint account's OVK would let the
                 // counterparty decrypt outCiphertext and learn our address, amount and memo.
-                "--discard-ovk".into(),
-                "--address".into(),
-                self.0.own_address.clone(),
-                "--output".into(),
-                path_str(&created),
-            ],
-        )
-        .await?;
-        run_devtool(
-            cfg,
-            &[
-                "pczt".into(),
-                "-w".into(),
-                path_str(&cfg.wallet_dir),
-                "prove".into(),
-                path_str(&created),
-                "--output".into(),
-                path_str(&proven),
+                "--discard-ovk",
+                // Anyone can send notes to the joint receivers: foreign Sapling/Orchard notes
+                // are ignored, and unconfirmed ones are left for later rather than waited on.
+                "--ironwood-only",
+                "--only-spendable",
+                "--address",
+                &self.0.own_address,
+                "--output",
+                &path_str(&created),
             ],
         )
         .await?;
@@ -579,37 +685,13 @@ impl ZecLeg for DevtoolZecLeg {
                 "refusing to sign a sweep that is not Ironwood-only: {p}"
             )));
         }
+        run_pczt(
+            cfg,
+            &["prove", &path_str(&created), "--output", &path_str(&proven)],
+        )
+        .await?;
         sign_pczt(&cfg.signer, ask, &created, &signed).await?;
-        run_devtool(
-            cfg,
-            &[
-                "pczt".into(),
-                "-w".into(),
-                path_str(&cfg.wallet_dir),
-                "combine".into(),
-                "-i".into(),
-                path_str(&proven),
-                "-i".into(),
-                path_str(&signed),
-                "-o".into(),
-                path_str(&done),
-            ],
-        )
-        .await?;
-        let out = run_devtool(
-            cfg,
-            &[
-                "pczt".into(),
-                "-w".into(),
-                path_str(&cfg.wallet_dir),
-                "send".into(),
-                path_str(&done),
-                "-s".into(),
-                cfg.server.clone(),
-            ],
-        )
-        .await?;
-        last_txid(&out).ok_or_else(|| ZecError::Other(format!("pczt send printed no txid:\n{out}")))
+        combine_and_send(cfg, &proven, &signed, &done).await
     }
 
     async fn confirmations(&self, txid: &str) -> Result<Option<u32>, ZecError> {
@@ -665,9 +747,80 @@ impl ZecLeg for DevtoolZecLeg {
 
 // ---------------------------------------------------------------------------- helpers
 
+/// Confirmations devtool's default policy wants before it spends a note received from another
+/// wallet (the joint note, for both parties).
+const SPENDABLE_CONFIRMATIONS: u64 = 10;
+
+/// `FROM … WHERE` for an account's (bound as `?1`, UUID hex) Ironwood notes with no spend.
+const UNSPENT_IRONWOOD: &str = "FROM ironwood_received_notes n
+     JOIN accounts a ON a.id = n.account_id
+     JOIN transactions t ON t.id_tx = n.transaction_id
+     WHERE lower(hex(a.uuid)) = ?1 AND n.value > 0
+       AND NOT EXISTS (SELECT 1 FROM ironwood_received_note_spends s
+                       WHERE s.ironwood_received_note_id = n.id)";
+
+/// Where one transaction's PCZT stages go: `<wallet>/pczt/<joint key>.<what>.{created,…}.pczt`.
+async fn pczt_paths(
+    cfg: &DevtoolConfig,
+    what: &str,
+    fvk: &[u8; 96],
+) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), ZecError> {
+    let dir = cfg.wallet_dir.join("pczt");
+    tokio::fs::create_dir_all(&dir).await?;
+    let key = hex::encode(&fvk[..12]);
+    let file = |stage: &str| dir.join(format!("{key}.{what}.{stage}.pczt"));
+    Ok((
+        file("created"),
+        file("proven"),
+        file("signed"),
+        file("final"),
+    ))
+}
+
+/// `zcash-devtool pczt -w <wallet_dir> <args…>`
+async fn run_pczt(cfg: &DevtoolConfig, args: &[&str]) -> Result<String, ZecError> {
+    let mut full = vec!["pczt".to_string(), "-w".into(), path_str(&cfg.wallet_dir)];
+    full.extend(args.iter().map(|a| a.to_string()));
+    run_devtool(cfg, &full, BUILD_TIMEOUT).await
+}
+
+/// Combines the proven and signed PCZTs and broadcasts the result (devtool stores it in the
+/// wallet). Errors from here on may come after the transaction reached the network.
+async fn combine_and_send(
+    cfg: &DevtoolConfig,
+    proven: &Path,
+    signed: &Path,
+    done: &Path,
+) -> Result<String, ZecError> {
+    run_pczt(
+        cfg,
+        &[
+            "combine",
+            "-i",
+            &path_str(proven),
+            "-i",
+            &path_str(signed),
+            "-o",
+            &path_str(done),
+        ],
+    )
+    .await?;
+    let out = run_pczt(cfg, &["send", &path_str(done), "-s", &cfg.server]).await?;
+    last_txid(&out).ok_or_else(|| ZecError::Other(format!("pczt send printed no txid:\n{out}")))
+}
+
 /// Fee headroom required on top of a send (ZIP 317: 5000 zat per action, 2 actions minimum;
 /// ten actions' worth covers a lock spending several notes).
 const SEND_FEE_RESERVE: u64 = 50_000;
+
+const POOL_KEYS: [&str; 6] = [
+    "transparent_inputs",
+    "transparent_outputs",
+    "sapling_spends",
+    "sapling_outputs",
+    "orchard_actions",
+    "ironwood_actions",
+];
 
 /// What a transaction touches, from `ferry-zec-signer pools`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -688,22 +841,26 @@ impl Pools {
             && self.sapling_spends + self.sapling_outputs + self.orchard_actions == 0
     }
 
+    /// Parses `key=count` pairs; every one of the six keys must appear exactly once (a missing
+    /// count must not read as zero).
     fn parse(line: &str) -> Option<Pools> {
-        let mut p = Pools::default();
+        let mut seen: [Option<usize>; 6] = [None; 6];
         for kv in line.split_whitespace() {
             let (k, v) = kv.split_once('=')?;
-            let v: usize = v.parse().ok()?;
-            match k {
-                "transparent_inputs" => p.transparent_inputs = v,
-                "transparent_outputs" => p.transparent_outputs = v,
-                "sapling_spends" => p.sapling_spends = v,
-                "sapling_outputs" => p.sapling_outputs = v,
-                "orchard_actions" => p.orchard_actions = v,
-                "ironwood_actions" => p.ironwood_actions = v,
-                _ => return None,
+            let i = POOL_KEYS.iter().position(|key| *key == k)?;
+            if seen[i].replace(v.parse().ok()?).is_some() {
+                return None;
             }
         }
-        Some(p)
+        let [ti, to, ss, so, oa, ia] = seen;
+        Some(Pools {
+            transparent_inputs: ti?,
+            transparent_outputs: to?,
+            sapling_spends: ss?,
+            sapling_outputs: so?,
+            orchard_actions: oa?,
+            ironwood_actions: ia?,
+        })
     }
 }
 
@@ -723,11 +880,9 @@ impl std::fmt::Display for Pools {
 }
 
 async fn pools(signer: &Path, file: &Path) -> Result<Pools, ZecError> {
-    let out = Command::new(signer)
-        .args(["pools", &path_str(file)])
-        .output()
-        .await
-        .map_err(|e| tool_err("ferry-zec-signer pools", e))?;
+    let mut cmd = Command::new(signer);
+    cmd.args(["pools", &path_str(file)]);
+    let out = run_limited(cmd, "ferry-zec-signer pools", None, READ_TIMEOUT).await?;
     let text = String::from_utf8_lossy(&out.stdout);
     if !out.status.success() {
         return Err(ZecError::Tool {
@@ -737,31 +892,6 @@ async fn pools(signer: &Path, file: &Path) -> Result<Pools, ZecError> {
     }
     Pools::parse(text.trim())
         .ok_or_else(|| ZecError::Other(format!("ferry-zec-signer pools printed {text:?}")))
-}
-
-/// Checks devtool's printed proposal: one step, no transparent inputs, and every input,
-/// payment and change output in the Ironwood pool.
-fn proposal_ironwood_only(text: &str) -> Result<(), String> {
-    let mut steps = 0;
-    for line in text.lines().map(str::trim) {
-        if line.starts_with("Step ") {
-            steps += 1;
-        } else if line.starts_with("Transparent inputs") {
-            return Err("spends transparent inputs".into());
-        } else if let Some(pool) = line.strip_prefix("Pool:") {
-            if pool.trim() != "Ironwood" {
-                return Err(format!("pays into the {} pool", pool.trim()));
-            }
-        } else if let Some(item) = line.strip_prefix("- ") {
-            if !(item.starts_with("Ironwood ") || item.starts_with("Step ")) {
-                return Err(format!("has a non-Ironwood input or change output: {item}"));
-            }
-        }
-    }
-    match steps {
-        1 => Ok(()),
-        n => Err(format!("has {n} steps (expected one Ironwood transaction)")),
-    }
 }
 
 fn path_str(p: &Path) -> String {
@@ -776,26 +906,102 @@ fn tool_err(cmd: &str, e: impl std::fmt::Display) -> ZecError {
 }
 
 /// `zcash-devtool wallet -w <wallet_dir> <args…>`
-async fn run_devtool_wallet(cfg: &DevtoolConfig, args: &[String]) -> Result<String, ZecError> {
+async fn run_devtool_wallet(
+    cfg: &DevtoolConfig,
+    args: &[String],
+    limit: Duration,
+) -> Result<String, ZecError> {
     let mut full = vec!["wallet".to_string(), "-w".into(), path_str(&cfg.wallet_dir)];
     full.extend_from_slice(args);
-    run_devtool(cfg, &full).await
+    run_devtool(cfg, &full, limit).await
+}
+
+/// Time limits for subprocesses. A light wallet server that stops answering must not hold the
+/// wallet lock forever (a testnet `sync` once hung for 11 hours).
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+const SYNC_TIMEOUT: Duration = Duration::from_secs(300);
+/// PCZT building, proving and broadcasting.
+const BUILD_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Runs `cmd` to completion (feeding it `stdin`, if any) and kills it after `limit`.
+async fn run_limited(
+    mut cmd: Command,
+    label: &str,
+    stdin: Option<Vec<u8>>,
+    limit: Duration,
+) -> Result<std::process::Output, ZecError> {
+    cmd.stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    // Dropping the future on timeout drops the child, which kills it.
+    .kill_on_drop(true);
+    let mut child = cmd.spawn().map_err(|e| tool_err(label, e))?;
+    let run = async move {
+        if let Some(bytes) = stdin {
+            let mut pipe = child.stdin.take().expect("piped stdin");
+            pipe.write_all(&bytes).await?;
+            drop(pipe);
+        }
+        child.wait_with_output().await
+    };
+    match tokio::time::timeout(limit, run).await {
+        Ok(out) => out.map_err(|e| tool_err(label, e)),
+        Err(_) => Err(ZecError::Timeout {
+            cmd: label.into(),
+            secs: limit.as_secs(),
+        }),
+    }
+}
+
+/// [`run_limited`] for the one synchronous call site ([`ZecLeg::joint_address`]).
+fn run_blocking_limited(
+    cmd: &mut std::process::Command,
+    label: &str,
+    limit: Duration,
+) -> Result<std::process::Output, ZecError> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| tool_err(label, e))?;
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if child.try_wait().map_err(|e| tool_err(label, e))?.is_some() {
+            return child.wait_with_output().map_err(|e| tool_err(label, e));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ZecError::Timeout {
+                cmd: label.into(),
+                secs: limit.as_secs(),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Runs devtool and returns its stdout; a failure carries the tail of its output.
-async fn run_devtool(cfg: &DevtoolConfig, args: &[String]) -> Result<String, ZecError> {
+async fn run_devtool(
+    cfg: &DevtoolConfig,
+    args: &[String],
+    limit: Duration,
+) -> Result<String, ZecError> {
     let cmd = format!(
         "zcash-devtool {}",
         args.iter().take(4).cloned().collect::<Vec<_>>().join(" ")
     );
-    let out = Command::new(&cfg.devtool)
+    let mut command = Command::new(&cfg.devtool);
+    command
         .args(args)
         .env("RUST_LOG", "error")
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|e| tool_err(&cmd, e))?;
+        .env("NO_COLOR", "1");
+    let out = run_limited(command, &cmd, None, limit).await?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -816,18 +1022,15 @@ async fn sign_pczt(
     input: &Path,
     output: &Path,
 ) -> Result<(), ZecError> {
-    let mut child = Command::new(signer)
-        .args(["sign", &path_str(input), &path_str(output)])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| tool_err("ferry-zec-signer sign", e))?;
-    {
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        stdin.write_all(hex::encode(ask).as_bytes()).await?;
-    }
-    let out = child.wait_with_output().await?;
+    let mut cmd = Command::new(signer);
+    cmd.args(["sign", &path_str(input), &path_str(output)]);
+    let out = run_limited(
+        cmd,
+        "ferry-zec-signer sign",
+        Some(hex::encode(ask).into_bytes()),
+        READ_TIMEOUT,
+    )
+    .await?;
     if !out.status.success() {
         return Err(ZecError::Tool {
             cmd: "ferry-zec-signer sign".into(),
@@ -923,17 +1126,64 @@ mod tests {
             ..p
         }
         .ironwood_only());
+    }
 
-        let ok = "Proposed transfer:\n  Steps (1):\n    Step 0:\n      Shielding: false\n      Payments (1):\n        [0] -> uregtest1x\n            Amount:   5.00000000 REG\n            Pool: Ironwood\n      Shielded inputs (1) at anchor height 111:\n        - Ironwood 3872:0    6.25000000 REG\n      Change outputs (1):\n        - Ironwood   1.24990000 REG\n      Fee:   0.00010000 REG\n";
-        assert_eq!(proposal_ironwood_only(ok), Ok(()));
-        assert!(proposal_ironwood_only(&ok.replace("- Ironwood 3872", "- Orchard 3872")).is_err());
-        assert!(
-            proposal_ironwood_only(&ok.replace("Pool: Ironwood", "Pool: Transparent")).is_err()
+    #[test]
+    fn pools_parse_requires_every_key() {
+        let all = "transparent_inputs=0 transparent_outputs=0 sapling_spends=0 sapling_outputs=0 orchard_actions=0 ironwood_actions=2";
+        assert!(Pools::parse(all).is_some());
+        // A missing count is an error, not a zero.
+        for key in POOL_KEYS {
+            let without: Vec<&str> = all.split(' ').filter(|kv| !kv.starts_with(key)).collect();
+            assert_eq!(Pools::parse(&without.join(" ")), None, "without {key}");
+        }
+        assert_eq!(Pools::parse(""), None);
+        assert_eq!(
+            Pools::parse(&format!("{all} ironwood_actions=3")),
+            None,
+            "duplicate"
         );
-        assert!(proposal_ironwood_only(
-            &ok.replace("Change outputs (1):", "Transparent inputs (1):")
-        )
-        .is_err());
+        assert_eq!(Pools::parse(&format!("{all} extra=1")), None, "unknown key");
+        assert_eq!(Pools::parse(&all.replace("=2", "=x")), None, "not a number");
+    }
+
+    #[tokio::test]
+    async fn hung_subprocesses_are_killed() {
+        let dir = std::env::temp_dir().join(format!("ferry-zec-timeout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pidfile = dir.join("pid");
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            &format!("echo $$ > {}; exec sleep 30", pidfile.display()),
+        ]);
+        let started = std::time::Instant::now();
+        let err = run_limited(cmd, "sleep", None, Duration::from_millis(500))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ZecError::Timeout { .. }), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // The child is gone (or at most an unreaped zombie), not still sleeping.
+        let pid = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .to_string();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let stat = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&stat.stdout);
+        assert!(
+            stat.trim().is_empty() || stat.trim().starts_with('Z'),
+            "still running: {stat}"
+        );
+
+        let mut sync = std::process::Command::new("sleep");
+        sync.arg("30");
+        let err = run_blocking_limited(&mut sync, "sleep", Duration::from_millis(300)).unwrap_err();
+        assert!(matches!(err, ZecError::Timeout { .. }));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

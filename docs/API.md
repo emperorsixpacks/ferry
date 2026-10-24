@@ -131,6 +131,7 @@ of the contract. "Tx" means the entry carries the `txid` and follows the `height
 | `refund_broadcast` | B | btc | yes | refund path. BTC returns to B |
 | `zec_reclaim_broadcast` | Z | zec | yes | refund path, after Z extracts `b`. ZEC returns to Z |
 | `punish_broadcast` | Z | btc | yes | punish path. BTC goes to Z; the ZEC stays in the joint note |
+| `zec_lock_refused` | Z | local | no | Z's wallet refused to fund the ZEC lock shielded-only (e.g. too few Ironwood notes); nothing was sent. Z's state becomes `ZecLockRefused`, then the abort path (B cancels and refunds; Z ends `Refunded`) |
 | `fault_injected` | the stalled party | local | no | shows a "Stalled" badge and disables both fault buttons |
 | `fault_cleared` | the stalled party | local | no | ends the stall started by the last `fault_injected` |
 
@@ -189,4 +190,5 @@ B: `Negotiated → LockBuilt → CancelSigned → BtcLocked → ZecSeen → Rede
    or `→ Cancelled → Refunded` / `→ Punished`
 
 Z: `Negotiated → CancelSigned → BtcLockSeen → ZecLocked → RedeemSigReceived → BtcRedeemed`
-   or `→ Cancelled → ZecReclaimed` / `→ Punished`
+   or `→ Cancelled → ZecReclaimed` / `→ Punished`, or, when its wallet refuses the ZEC lock,
+   `ZecLocked → ZecLockRefused → Cancelled → Refunded`

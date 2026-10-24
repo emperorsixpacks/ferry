@@ -25,6 +25,10 @@ pub enum Event {
     },
     /// The negotiation deadline passed. Aborts only while nothing is locked.
     Timeout,
+    /// Z only: the wallet refused [`Action::SendZec`] before broadcasting anything (for
+    /// example, not enough Ironwood notes to fund it shielded-only). No ZEC is locked; the
+    /// swap waits for tx_cancel and B's refund.
+    ZecLockRefused,
 }
 
 /// What the chain watchers report. Emitted again whenever the confirmation count changes.

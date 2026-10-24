@@ -27,6 +27,9 @@ pub enum ZState {
     BtcLockSeen,
     /// ZEC sent to the joint address; waiting for B's redeem adaptor.
     ZecLocked,
+    /// Our wallet refused to fund the ZEC lock and nothing was sent; waiting for tx_cancel,
+    /// after which B's refund moves us to `Refunded`.
+    ZecLockRefused,
     /// B's redeem adaptor verified.
     RedeemSigReceived,
     /// tx_redeem broadcast.
@@ -63,6 +66,7 @@ impl ZState {
             ZState::CancelSigned
                 | ZState::BtcLockSeen
                 | ZState::ZecLocked
+                | ZState::ZecLockRefused
                 | ZState::RedeemSigReceived
         )
     }
@@ -151,6 +155,15 @@ impl ZSwap {
                 self.on_message(msg)
             }
             Event::LockFunded { .. } => Err(self.unexpected("LockFunded")),
+            Event::ZecLockRefused => {
+                if self.state != ZState::ZecLocked {
+                    return Err(self.unexpected("ZecLockRefused"));
+                }
+                // Nothing reached the joint address, so a refund leaves nothing to reclaim.
+                self.zec_locked = false;
+                self.state = ZState::ZecLockRefused;
+                Ok(vec![])
+            }
             Event::Chain(c) => self.on_chain(c),
             Event::Timeout => {
                 if matches!(
@@ -294,7 +307,22 @@ impl ZSwap {
                 }
                 Ok(vec![])
             }
-            ChainEvent::ZecNoteSeen { .. } => Ok(vec![]),
+            ChainEvent::ZecNoteSeen { value, .. } => {
+                // A refused send that went out after all: the note is our lock again. Before
+                // cancel the swap simply carries on; after it, B's refund still reveals b and we
+                // reclaim instead of leaving the note stranded.
+                if !self.zec_locked && value >= self.session.params.zec_amount {
+                    match self.state {
+                        ZState::ZecLockRefused => {
+                            self.zec_locked = true;
+                            self.state = ZState::ZecLocked;
+                        }
+                        ZState::Cancelled => self.zec_locked = true,
+                        _ => {}
+                    }
+                }
+                Ok(vec![])
+            }
         }
     }
 

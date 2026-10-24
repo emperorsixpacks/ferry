@@ -1,0 +1,144 @@
+diff -ru a/src/commands/pczt/create.rs b/src/commands/pczt/create.rs
+--- a/src/commands/pczt/create.rs
++++ b/src/commands/pczt/create.rs
+@@ -51,6 +51,12 @@
+     #[arg(long)]
+     memo: Option<String>,
+ 
++    /// Spend only Ironwood notes. Ferry uses this so its ZEC legs never touch another pool:
++    /// a lock is funded from Ironwood alone, and a sweep of a joint address ignores (rather
++    /// than chokes on) foreign Sapling or Orchard notes sent to its receivers.
++    #[arg(long)]
++    ironwood_only: bool,
++
+     /// Note management: the number of notes to maintain in the wallet
+     #[arg(long)]
+     #[arg(default_value_t = 4)]
+@@ -116,7 +122,11 @@
+             ConfirmationsPolicy::default(),
+             // Preserve the pre-upgrade behavior: transfers never spend
+             // transparent UTXOs; they must be shielded first.
+-            &SpendPolicy::default(),
++            &if self.ironwood_only {
++                SpendPolicy::shielded_pools([ShieldedPool::Ironwood])
++            } else {
++                SpendPolicy::default()
++            },
+             None,
+             None,
+         )
+diff -ru a/src/commands/pczt/create_max.rs b/src/commands/pczt/create_max.rs
+--- a/src/commands/pczt/create_max.rs
++++ b/src/commands/pczt/create_max.rs
+@@ -52,6 +52,18 @@
+     #[arg(long)]
+     only_spendable: bool,
+ 
++    /// Encrypt the outputs' outCiphertext to no one (OvkPolicy::Discard) instead of the
++    /// sending account's OVK. For accounts whose viewing key is shared with others, who could
++    /// otherwise recover the recipient, amount and memo of what this account sends.
++    #[arg(long)]
++    discard_ovk: bool,
++
++    /// Spend only Ironwood notes. Ferry uses this so its ZEC legs never touch another pool:
++    /// a lock is funded from Ironwood alone, and a sweep of a joint address ignores (rather
++    /// than chokes on) foreign Sapling or Orchard notes sent to its receivers.
++    #[arg(long)]
++    ironwood_only: bool,
++
+     /// Path to a file to which to write the PCZT. If not provided, writes to stdout.
+     #[arg(long)]
+     output: Option<PathBuf>,
+@@ -84,11 +96,15 @@
+             &mut db_data,
+             &params,
+             account.id(),
+-            &[
+-                ShieldedPool::Sapling,
+-                ShieldedPool::Orchard,
+-                ShieldedPool::Ironwood,
+-            ],
++            if self.ironwood_only {
++                &[ShieldedPool::Ironwood][..]
++            } else {
++                &[
++                    ShieldedPool::Sapling,
++                    ShieldedPool::Orchard,
++                    ShieldedPool::Ironwood,
++                ][..]
++            },
+             &StandardFeeRule::Zip317,
+             recipient,
+             memo,
+@@ -105,7 +121,11 @@
+             &SystemClock,
+             &mut UnwrapErr(SysRng),
+             account.id(),
+-            OvkPolicy::Sender,
++            if self.discard_ovk {
++                OvkPolicy::Discard
++            } else {
++                OvkPolicy::Sender
++            },
+             &proposal,
+             // Use the builder-derived expiry and a standard Orchard-pool bundle.
+             None,
+diff -ru a/src/commands/pczt/sign.rs b/src/commands/pczt/sign.rs
+--- a/src/commands/pczt/sign.rs
++++ b/src/commands/pczt/sign.rs
+@@ -66,6 +66,9 @@
+             Orchard {
+                 index: usize,
+             },
++            Ironwood {
++                index: usize,
++            },
+             Sapling {
+                 index: usize,
+             },
+@@ -103,6 +106,27 @@
+                 Ok(())
+             })
+             .map_err(|e| anyhow!("Invalid PCZT: {:?}", e))?
++            .with_ironwood::<Infallible, _>(|bundle| {
++                for (index, action) in bundle.actions().iter().enumerate() {
++                    if let Some(account_index) = action
++                        .spend()
++                        .zip32_derivation()
++                        .as_ref()
++                        .and_then(|derivation| {
++                            derivation.extract_account_index(
++                                &seed_fp,
++                                zip32::ChildIndex::hardened(params.network_type().coin_type()),
++                            )
++                        })
++                    {
++                        keys.entry(account_index)
++                            .or_default()
++                            .push(KeyRef::Ironwood { index });
++                    }
++                }
++                Ok(())
++            })
++            .map_err(|e| anyhow!("Invalid PCZT: {:?}", e))?
+             .with_sapling::<Infallible, _>(|bundle| {
+                 for (index, spend) in bundle.spends().iter().enumerate() {
+                     if let Some(account_index) =
+@@ -173,6 +197,17 @@
+                             )
+                             .map_err(|e| {
+                                 anyhow!("Failed to sign Orchard spend {index}: {:?}", e)
++                            })?;
++                    }
++                    KeyRef::Ironwood { index } => {
++                        signer
++                            .sign_ironwood(
++                                UnwrapErr(SysRng),
++                                index,
++                                &orchard::keys::SpendAuthorizingKey::from(usk.orchard()),
++                            )
++                            .map_err(|e| {
++                                anyhow!("Failed to sign Ironwood spend {index}: {:?}", e)
+                             })?;
+                     }
+                     KeyRef::Sapling { index } => {

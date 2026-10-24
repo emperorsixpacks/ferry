@@ -46,6 +46,12 @@ struct Faults {
     b_offline_after_lock: bool,
     /// Z's wallet never actually sends the ZEC.
     z_never_sends_zec: bool,
+    /// Z's wallet refuses to send the ZEC (and says so), e.g. too few Ironwood notes.
+    z_wallet_refuses_zec: bool,
+    /// ...but the note reaches the joint address anyway (the refusal was wrong).
+    refused_zec_lands_anyway: bool,
+    /// ...and only shows up once tx_cancel is mined (B will not redeem by then).
+    refused_zec_lands_after_cancel: bool,
     /// Deliver the redeem adaptor only after this many lock confirmations.
     delay_redeem_adaptor_until: Option<u32>,
     /// B ignores the chain while the mined cancel has fewer confirmations than this.
@@ -66,6 +72,7 @@ struct Sim {
     sweeps: Vec<(Role, [u8; 96], [u8; 32])>,
     rejected: Vec<String>,
     b_lock_broadcast: bool,
+    refused_amount: Option<u64>,
 }
 
 impl Sim {
@@ -95,6 +102,7 @@ impl Sim {
             sweeps: vec![],
             rejected: vec![],
             b_lock_broadcast: false,
+            refused_amount: None,
         };
         sim.exec(Role::Z, z_actions[1..].to_vec());
         sim.exec(Role::B, b_actions);
@@ -161,7 +169,13 @@ impl Sim {
                 Action::SendZec { joint_fvk, amount } => {
                     assert_eq!(from, Role::Z);
                     assert_eq!(joint_fvk, self.b.session().joint_fvk().unwrap());
-                    if !self.faults.z_never_sends_zec {
+                    if self.faults.z_wallet_refuses_zec {
+                        self.to_z.push_back(Event::ZecLockRefused);
+                        if self.faults.refused_zec_lands_anyway {
+                            self.zec_note = Some((amount, self.height));
+                        }
+                        self.refused_amount = Some(amount);
+                    } else if !self.faults.z_never_sends_zec {
                         self.zec_note = Some((amount, self.height));
                     }
                 }
@@ -278,6 +292,14 @@ impl Sim {
             let h = self.height;
             for (_, mined) in self.chain.values_mut() {
                 mined.get_or_insert(h);
+            }
+            if self.faults.refused_zec_lands_after_cancel && self.zec_note.is_none() {
+                if let Some(amount) = self.refused_amount {
+                    let cancel = self.txid(ferry_core::Spend::Cancel);
+                    if self.mined(&cancel) {
+                        self.zec_note = Some((amount, h));
+                    }
+                }
             }
             for role in [Role::Z, Role::B] {
                 let swap = match role {
@@ -447,6 +469,56 @@ fn refund_when_z_never_locks() {
     });
     // Z believes it locked (its wallet lied); reclaiming is still safe and harmless.
     assert!(sim.mined(&sim.txid(ferry_core::Spend::Refund)));
+}
+
+#[test]
+fn refund_when_z_wallet_refuses_the_lock() {
+    let mut sim = Sim::new(Faults {
+        z_wallet_refuses_zec: true,
+        ..Default::default()
+    });
+    sim.mine_until(10, |s| s.z_state() == ZState::ZecLockRefused);
+    let Swap::Z(z) = &sim.z else { unreachable!() };
+    assert!(!z.zec_locked(), "a refused lock is not a lock");
+    sim.mine_until(40, |s| {
+        s.b_state() == BState::Refunded && s.z_state() == ZState::Refunded
+    });
+    assert!(sim.mined(&sim.txid(ferry_core::Spend::Refund)));
+    // Nothing reached the joint address, so nobody tries to sweep it.
+    assert!(sim.sweeps.is_empty());
+    // Both parties broadcast tx_cancel at T1; the second copy is merely a duplicate.
+    assert!(
+        sim.rejected.iter().all(|r| r.ends_with("already known")),
+        "{:?}",
+        sim.rejected
+    );
+}
+
+#[test]
+fn refused_lock_that_lands_anyway_still_completes() {
+    let mut sim = Sim::new(Faults {
+        z_wallet_refuses_zec: true,
+        refused_zec_lands_anyway: true,
+        ..Default::default()
+    });
+    // Z sees the note, takes its lock back, and the swap completes normally.
+    sim.mine_until(40, |s| {
+        s.b_state() == BState::ZecSwept && s.z_state() == ZState::BtcRedeemed
+    });
+    sim.assert_sweep_valid(Role::B);
+}
+
+#[test]
+fn refused_lock_that_lands_after_cancel_is_reclaimed() {
+    let mut sim = Sim::new(Faults {
+        z_wallet_refuses_zec: true,
+        refused_zec_lands_after_cancel: true,
+        ..Default::default()
+    });
+    sim.mine_until(40, |s| {
+        s.b_state() == BState::Refunded && s.z_state() == ZState::ZecReclaimed
+    });
+    sim.assert_sweep_valid(Role::Z);
 }
 
 #[test]

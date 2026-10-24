@@ -91,7 +91,7 @@ Environment (defaults in brackets):
       ($ZAINO_CONTAINER, :$ZAINO_PORT). A miner wallet takes the (Ironwood) coinbase and pays Z
       ZEC_BALANCE_ZAT; a ZEC block every ~ZEC_BLOCK_SECS+2s (blocks take ~2s under amd64 emulation).
       Setup mines ~125 blocks first (coinbase maturity), a few minutes. Needs ZEC_DEVTOOL
-      [vendor/zcash-devtool + infra/patches/zcash-devtool-discard-ovk.patch, built with --features regtest_support]; builds ZEC_SIGNER
+      [vendor/zcash-devtool + infra/patches/zcash-devtool-ferry.patch, built with --features regtest_support]; builds ZEC_SIGNER
       [tools/ferry-zec-signer] if missing. Extra ferryd flags: ZEC_ARGS_Z / ZEC_ARGS_B
   FERRYD_ARGS (extra flags for both daemons)   FERRY_DEMO_DIR [$STATE]
 EOF
@@ -261,11 +261,13 @@ TOML
 # Zebra + Zaino on a fresh chain; a miner wallet takes the coinbase (which lands in Ironwood),
 # then pays Z its starting balance. Z's and B's wallets are created here too.
 start_zec() {
+  local build_devtool="(cd vendor/zcash-devtool && patch -p1 < ../../infra/patches/zcash-devtool-ferry.patch && cargo build --release --features regtest_support)"
   [ -x "$ZEC_DEVTOOL" ] || die "ZEC_DEVTOOL not found: $ZEC_DEVTOOL
-  build it: (cd vendor/zcash-devtool && patch -p1 < ../../infra/patches/zcash-devtool-discard-ovk.patch \\
-    && cargo build --release --features regtest_support)"
-  "$ZEC_DEVTOOL" pczt create-max --help 2>/dev/null | grep -q -- --discard-ovk ||
-    die "$ZEC_DEVTOOL lacks create-max --discard-ovk: (cd vendor/zcash-devtool && patch -p1 < ../../infra/patches/zcash-devtool-discard-ovk.patch && cargo build --release --features regtest_support)"
+  build it: $build_devtool"
+  "$ZEC_DEVTOOL" pczt create-max --help 2>/dev/null | grep -q -- --discard-ovk &&
+    "$ZEC_DEVTOOL" pczt create-max --help 2>/dev/null | grep -q -- --ironwood-only &&
+    "$ZEC_DEVTOOL" pczt create --help 2>/dev/null | grep -q -- --ironwood-only ||
+    die "$ZEC_DEVTOOL lacks Ferry's patch (create/create-max --ironwood-only, create-max --discard-ovk, Ironwood signing): $build_devtool"
   if [ ! -x "$ZEC_SIGNER" ]; then
     log "building ferry-zec-signer"
     (cd "$ROOT/tools/ferry-zec-signer" && cargo build -q --release) || die "building ferry-zec-signer failed"
@@ -313,15 +315,22 @@ TOML
   docker run -d --name "$ZAINO_CONTAINER" --platform linux/amd64 --network "$ZEC_NET" \
     -p "127.0.0.1:$ZAINO_PORT:8137" -v "$STATE/zec/zainod.toml:/app/config/zainod.toml:ro" \
     "$ZAINO_IMAGE" start -c /app/config/zainod.toml >/dev/null
+  # Ready = a wallet can be created against it (zainod also has to index block 1 first, which
+  # under amd64 emulation can take a while). Each attempt is time-boxed; the last error is kept.
   local ok=
-  for _ in $(seq 1 60); do
-    if with_timeout 20 "$ZEC_DEVTOOL" wallet -w "$STATE/zec/miner" init --name miner -i "$STATE/zec/miner.age" \
+  for _ in $(seq 1 90); do
+    if with_timeout 30 "$ZEC_DEVTOOL" wallet -w "$STATE/zec/miner" init --name miner -i "$STATE/zec/miner.age" \
       -n regtest --activation-heights "$STATE/zec/activation_heights.toml" -s "localhost:$ZAINO_PORT" \
-      >/dev/null 2>&1; then ok=1; break; fi
+      >"$STATE/zec/probe.log" 2>&1; then ok=1; break; fi
     rm -rf "$STATE/zec/miner"
-    sleep 2
+    sleep 3
   done
-  [ -n "$ok" ] || { docker logs --tail 30 "$ZAINO_CONTAINER" >&2; die "zainod did not come up"; }
+  if [ -z "$ok" ]; then
+    docker logs --tail 15 "$ZAINO_CONTAINER" >&2
+    echo "[demo] last wallet init attempt:" >&2
+    tail -n 5 "$STATE/zec/probe.log" >&2
+    die "zainod did not come up (zebrad height $(zheight 2>/dev/null || echo '?'))"
+  fi
   start_zebra "$(zwallet_ua miner)"
   log "mining 105 ZEC blocks (coinbase maturity is 100; ~2s a block under emulation)"
   zmine 105

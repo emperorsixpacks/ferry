@@ -858,6 +858,21 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                         );
                         Ok(None)
                     }
+                    Err(e) if self.leg.send_refused(&e) => {
+                        // Refused before broadcasting: nothing is locked, and asking again
+                        // would be refused again. The BTC side cancels and B refunds.
+                        rec.zec_send_intent = false;
+                        tracing::error!(id = %rec.id, "zec lock refused: {e}");
+                        rec.log(
+                            "local",
+                            "zec_lock_refused",
+                            format!(
+                                "Refused to lock ZEC, nothing was sent: {e}. The swap now waits for tx_cancel and B's refund"
+                            ),
+                            None,
+                        );
+                        Ok(Some(Event::ZecLockRefused))
+                    }
                     Err(e) => {
                         // Whether it went out is unknown: the intent stays set (see above).
                         tracing::warn!(id = %rec.id, "zec send: {e}");
