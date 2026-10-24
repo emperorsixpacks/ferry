@@ -24,3 +24,5 @@ HANDOFF.md
 .ferry-node/
 .ferry-node-mainnet/
 ferry-node-backup-*.enc
+.vercel
+.env*
