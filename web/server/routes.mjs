@@ -147,6 +147,18 @@ export function buildRoute(body, { list, resolve, legs, maxZat = Infinity, minZa
 export const RUNNING = ["leg1", "settling", "pausing", "leg2"];
 export const running = (v) => RUNNING.includes(v?.state);
 
+// What a moving route keeps out of a direct start on `pair` (`side`: "sell" or "buy"), as the
+// sentence to answer, or null. The ZEC a route bought waits in the daemon that sells it on (the
+// route's `to` pair), and that daemon counts it as free: no direct sell there may spend it. If that
+// daemon is also a partner others buy ZEC from (`sellerMakes`: started with --maker-offer), a buy on
+// the pair could reach it too, so none starts either.
+export function routeBlocks(routes, { pair, side, sellerMakes = false }) {
+  if (!Array.isArray(routes) || !routes.some((v) => running(v) && v.to === pair)) return null;
+  if (side === "sell") return "A private swap is selling ZEC on this pair right now. Try again when it finishes.";
+  if (side === "buy" && sellerMakes) return "A private swap is using this pair's ZEC right now. Try again when it finishes.";
+  return null;
+}
+
 // The router's views as a browser gets them: without the partners' URLs (GET /api/makers never
 // shows one either).
 export function publicRoute(v) {

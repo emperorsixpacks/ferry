@@ -289,8 +289,17 @@ impl Starts {
                 "Another withdrawal is being sent; try again in a moment".into(),
             ));
         }
+        // The turn too: a maker taking a Propose holds it from its funds check until the swap
+        // is recorded, and may let go of the state in between.
+        let turn = self
+            .turn
+            .try_lock()
+            .map_err(|_| ApiError(409, "A swap is being taken; try again in a moment".into()))?;
         slot.withdrawing = true;
-        Ok(WithdrawGuard(self))
+        Ok(WithdrawGuard {
+            starts: self,
+            _turn: turn,
+        })
     }
 
     /// A start or a withdrawal is in progress.
@@ -326,11 +335,14 @@ impl Drop for StartGuard<'_> {
 }
 
 /// Frees the slot when the withdrawal request ends, however it ends.
-pub struct WithdrawGuard<'s>(&'s Starts);
+pub struct WithdrawGuard<'s> {
+    starts: &'s Starts,
+    _turn: tokio::sync::MutexGuard<'s, ()>,
+}
 
 impl Drop for WithdrawGuard<'_> {
     fn drop(&mut self) {
-        if let Ok(mut slot) = self.0.slot.lock() {
+        if let Ok(mut slot) = self.starts.slot.lock() {
             slot.withdrawing = false;
         }
     }
@@ -448,7 +460,14 @@ mod tests {
         let e = starts.begin_withdrawal().err().unwrap();
         assert!(e.1.contains("swap is being started"), "{}", e.1);
         drop(s);
+        // A Propose being taken holds the turn: no withdrawal meanwhile (its funds check and
+        // the swap's record belong together), and none while it is held.
+        let propose = starts.try_turn().unwrap();
+        let e = starts.begin_withdrawal().err().unwrap();
+        assert!(e.1.contains("swap is being taken"), "{}", e.1);
+        drop(propose);
         let _w = starts.begin_withdrawal().unwrap();
+        assert!(starts.try_turn().is_none(), "the withdrawal holds the turn");
         assert!(FEATURES.contains(&"withdraw"));
     }
 

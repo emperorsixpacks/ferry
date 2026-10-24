@@ -27,6 +27,16 @@ pub struct ZecStatus {
     pub shielded_balance: u64,
 }
 
+/// Our own unspent Ironwood notes ([`ZecLeg::notes`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ZecNotes {
+    /// The values of the largest ones (zatoshi), largest first: as many as were asked for, or
+    /// all there are.
+    pub largest: Vec<u64>,
+    /// How many there are in all, confirmed or not.
+    pub count: u64,
+}
+
 /// How a failed [`ZecLeg::send`] left things.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SendFailure {
@@ -101,17 +111,14 @@ pub trait ZecLeg: Send + Sync {
         0
     }
 
-    /// The values of our own `n` largest unspent Ironwood notes (zatoshi, largest first,
-    /// confirmed or not). A wallet picks whole notes for a lock until they cover it, so a lock
-    /// can take up to one note more than it needs; with several locks to fund, the daemon
-    /// counts that overshoot against what is spendable (`crate`'s caller: ferryd's capacity
-    /// check). Empty when the backend's balance is not made of notes (the mock): then only the
-    /// value counts.
-    fn largest_notes(
-        &self,
-        _n: usize,
-    ) -> impl Future<Output = Result<Vec<u64>, Self::Error>> + Send {
-        async { Ok(vec![]) }
+    /// Our own unspent Ironwood notes, as much as ferryd's capacity check needs: the values of
+    /// the `largest` largest (confirmed or not) and how many there are. A wallet picks whole
+    /// notes for a lock until they cover it and its fee, and the fee grows with every note it
+    /// spends, so with several locks to fund the daemon counts both the overshoot and the
+    /// per-note fees against what is spendable. Empty when the backend's balance is not made of
+    /// notes (the mock): then only the value counts.
+    fn notes(&self, _largest: usize) -> impl Future<Output = Result<ZecNotes, Self::Error>> + Send {
+        async { Ok(ZecNotes::default()) }
     }
 
     /// Whether a lock of ours to the joint address provably never landed and never will: no

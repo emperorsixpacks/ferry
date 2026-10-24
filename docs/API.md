@@ -98,7 +98,8 @@ they can't take reaches the browser as `409 {"error": "Every partner is busy rig
 once one of their swaps finishes.", "code": "busy"}` (the app adds a swap's usual time for the pair,
 from `web/server/paths.mjs`). While a private swap is moving, a direct sell on the pair it
 sells ZEC on is refused (`409`): the ZEC its first swap bought waits in that daemon's wallet, which
-the daemon counts as free.
+the daemon counts as free. So is a buy on that pair when that daemon is also a partner (started
+with `--maker-offer`), since the buy could reach it.
 
 `GET /api/pairs` says which of the user's daemons the server fronts:
 
@@ -518,8 +519,9 @@ the code is new, one slot open while another swap runs long.
 - **ZEC notes.** A wallet spends whole notes and change waits for confirmations. With several ZEC
   locks still to send, ferryd counts that each may take up to one note more than it needs: a new
   swap is taken only if the spendable balance covers every pending lock plus the largest notes they
-  may overshoot into. A Z node whose ZEC is in one big note takes one swap at a time until the
-  change of a sent lock confirms; split the ZEC into several notes for more.
+  may overshoot into, plus 5000 zat (ZIP-317's fee) for every note the wallet holds, since every
+  note a lock spends adds that to its fee. A Z node whose ZEC is in one big note takes one swap at
+  a time until the change of a sent lock confirms; split the ZEC into several notes for more.
 - **The cap counts** every swap that isn't over, except a **late** one: its counterparty has locked
   nothing by `--negotiation-timeout-secs` (default 30 min). One where nothing is locked at all is
   aborted then anyway; one where we locked first (a B whose Z never locks) only waits for its
@@ -532,7 +534,15 @@ the code is new, one slot open while another swap runs long.
   simply short, with nothing held, still gets the plain `400` "does not have enough".
 - **One funds check at a time.** Starts queue for their turn; a Propose that arrives while a start
   or another Propose has the turn is answered busy at once (try again in a moment); a withdrawal
-  and a start exclude each other. So two checks never count the same free coins.
+  takes the turn too, and refuses (409) while a start or a Propose has it. So two checks never
+  count the same free coins.
+- **Coin locks.** ferryd takes its bitcoind (litecoind) wallet to be its own: when it starts, and
+  before it funds a lock, it unlocks every coin no unbroadcast lock of a live swap needs, and
+  locks the ones that are needed.
+- **Deadlines first.** Each round of the daemon's loop does every swap's deadline steps before any
+  slow work (funding, ZEC locks and sweeps, EVM locks), and again every 20 s while the slow work
+  runs; a Zcash call that takes a minute or more puts the round's other Zcash work off to the next
+  round (docs/THREAT-MODEL.md, "Several swaps at once").
 - **Shown:** `free_slots` in `/peer/offer` and in `/api/status` (`offer.free_slots`), and
   `capacity` and `free` in `/api/status`.
 

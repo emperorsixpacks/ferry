@@ -57,7 +57,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use ferry_core::{SendFailure, ZecLeg, ZecNote, ZecStatus, ZecTxState, ZecWithdrawal};
+use ferry_core::{SendFailure, ZecLeg, ZecNote, ZecNotes, ZecStatus, ZecTxState, ZecWithdrawal};
 use rusqlite::OpenFlags;
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -426,6 +426,18 @@ impl Inner {
                 r.get::<_, u64>(0)
             })?;
             rows.collect::<Result<Vec<u64>, _>>()
+        })
+        .await?)
+    }
+
+    /// How many unspent Ironwood notes the account has, confirmed or not.
+    async fn unspent_count(&self, account: String) -> Result<u64, ZecError> {
+        Ok(query(&self.cfg.wallet_dir, move |c| {
+            c.query_row(
+                &format!("SELECT COUNT(*) {}", unspent_ironwood_sql()),
+                [account.replace('-', "")],
+                |r| r.get::<_, u64>(0),
+            )
         })
         .await?)
     }
@@ -997,13 +1009,18 @@ impl ZecLeg for DevtoolZecLeg {
         SEND_FEE_RESERVE
     }
 
-    async fn largest_notes(&self, n: usize) -> Result<Vec<u64>, ZecError> {
-        if n == 0 {
-            return Ok(vec![]);
-        }
-        self.0
-            .largest_unspent_values(self.0.own_account.clone(), n)
-            .await
+    async fn notes(&self, largest: usize) -> Result<ZecNotes, ZecError> {
+        let account = self.0.own_account.clone();
+        Ok(ZecNotes {
+            largest: if largest == 0 {
+                vec![]
+            } else {
+                self.0
+                    .largest_unspent_values(account.clone(), largest)
+                    .await?
+            },
+            count: self.0.unspent_count(account).await?,
+        })
     }
 
     /// Built (Ironwood in, Ironwood out), signed and its txid read from the finished PCZT, all
@@ -2228,6 +2245,11 @@ Version: V5
             vec![300_000_000, 200_000_000]
         );
         assert_eq!(
+            w.unspent_count(own.clone()).await.unwrap(),
+            3,
+            "the note our lock spends is not counted"
+        );
+        assert_eq!(
             w.largest_unspent_values(own.clone(), 9)
                 .await
                 .unwrap()
@@ -2237,9 +2259,10 @@ Version: V5
         // The lock expired unmined: its note is unspent again.
         exec(&dir, "INSERT INTO blocks VALUES (160);");
         assert_eq!(
-            w.largest_unspent_values(own, 1).await.unwrap(),
+            w.largest_unspent_values(own.clone(), 1).await.unwrap(),
             vec![500_000_000]
         );
+        assert_eq!(w.unspent_count(own).await.unwrap(), 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

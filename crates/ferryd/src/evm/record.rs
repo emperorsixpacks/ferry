@@ -61,6 +61,13 @@ impl EvmPending {
             EvmPending::SendZec { .. } | EvmPending::SweepZec { .. }
         )
     }
+
+    /// Work that can take minutes (B's approve and lock, waiting for their receipts; a ZEC lock
+    /// or sweep): the tick runs it only after every swap's deadline calls (claim, refund,
+    /// punish), so one swap's slow work never delays another's (`EvmDaemon::tick`).
+    pub fn is_slow(&self) -> bool {
+        matches!(self, EvmPending::Lock { .. }) || self.is_zec()
+    }
 }
 
 impl From<EvmAction> for EvmPending {

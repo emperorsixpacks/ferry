@@ -43,6 +43,43 @@ impl Pending {
     pub fn is_local(&self) -> bool {
         matches!(self, Pending::Send { .. })
     }
+
+    /// Work that can take minutes (funding a lock from the wallet, building and proving a ZEC
+    /// transaction): the tick runs it only after every swap's deadline actions
+    /// (`Daemon::tick`), so one swap's slow work never delays another's cancel, refund, punish
+    /// or redeem.
+    pub fn is_slow(&self) -> bool {
+        matches!(
+            self,
+            Pending::FundLock { .. } | Pending::SendZec { .. } | Pending::SweepZec { .. }
+        )
+    }
+
+    pub fn is_zec(&self) -> bool {
+        matches!(self, Pending::SendZec { .. } | Pending::SweepZec { .. })
+    }
+}
+
+/// What the tick does with a pending action right now (both daemon types' `tick`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Now {
+    Run,
+    /// Leave it queued and go on with the actions after it (a Zcash action, which never holds
+    /// up what follows it).
+    Skip,
+    /// Leave it and everything after it queued.
+    Stop,
+}
+
+/// Slow work waits for the tick's second pass (`slow_ok`), and Zcash work for the next tick
+/// while the wallet server is stuck (`zec_paused`), as if they had to retry.
+pub fn now_for(slow: bool, zec: bool, slow_ok: bool, zec_paused: bool) -> Now {
+    let later = (slow && !slow_ok) || (zec && zec_paused);
+    match (later, zec) {
+        (false, _) => Now::Run,
+        (true, true) => Now::Skip,
+        (true, false) => Now::Stop,
+    }
 }
 
 impl From<Action> for Pending {
@@ -413,6 +450,34 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// The tick's first pass runs deadline actions and leaves slow work queued: a slow Bitcoin
+    /// action stops the queue there (as a retry would), a Zcash one is stepped over. The second
+    /// pass runs everything, except Zcash work while the wallet server is stuck.
+    #[test]
+    fn deadlines_first_then_slow_work() {
+        // (slow, zec): a broadcast or message, FundLock, SendZec/SweepZec
+        let (fast, fund, zec) = ((false, false), (true, false), (true, true));
+        let pass1 = |(s, z): (bool, bool)| now_for(s, z, false, false);
+        assert_eq!(pass1(fast), Now::Run);
+        assert_eq!(pass1(fund), Now::Stop);
+        assert_eq!(pass1(zec), Now::Skip);
+        let pass2 = |(s, z): (bool, bool), stuck: bool| now_for(s, z, true, stuck);
+        assert_eq!(pass2(fast, false), Now::Run);
+        assert_eq!(pass2(fund, false), Now::Run);
+        assert_eq!(pass2(zec, false), Now::Run);
+        assert_eq!(
+            pass2(zec, true),
+            Now::Skip,
+            "a stuck wallet server waits for the next tick"
+        );
+        assert_eq!(
+            pass2(fund, true),
+            Now::Run,
+            "Bitcoin work doesn't wait for Zcash"
+        );
+        assert_eq!(pass2(fast, true), Now::Run);
+    }
+
     use super::*;
 
     pub(crate) fn sample_record() -> SwapRecord {
