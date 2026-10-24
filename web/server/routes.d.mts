@@ -24,11 +24,12 @@ export interface RouterBody {
   max_in: number;
   min_out: number;
   delay_secs: [number, number];
+  payout_to?: string;
 }
 
 export function buildRoute(
   body: unknown,
-  opts: { list: MakerSummary[]; resolve: (ref: unknown) => MakerEntry | null; legs: RouteLegs | null; maxZat?: number; minZat?: number },
+  opts: { list: MakerSummary[]; resolve: (ref: unknown) => MakerEntry | null; legs: RouteLegs | null; maxZat?: number; minZat?: number; payout?: boolean },
 ): { body: RouterBody; status?: undefined; error?: undefined } | { status: number; error: string; body?: undefined };
 
 export interface RouterLink {

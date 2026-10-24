@@ -71,14 +71,16 @@ const zecText = (zat) => (zat / 1e8).toFixed(2);
 const coinOf = (pair) => pairLabel(pair)?.pair.split("/")[1] ?? pair;
 
 // Rebuild a browser's POST /api/routes for the router.
-//   in:  {from, to, zec_zat, maker1: name|index, maker2?: name|index|[...], max_in, min_out, pause?}
+//   in:  {from, to, zec_zat, maker1: name|index, maker2?: name|index|[...], max_in, min_out, pause?,
+//         payout_to?}
 //   out: {body} for the router, or {status, error}
 // `list` is the maker directory's summaries, `resolve` maps a client's reference to an allowlisted
 // entry ({name, url}), `legs` is routeLegs() of the router (null: none), and maxZat/minZat are the
-// public demo's limits. Leg 2's partners are the ones asked for (if they take swaps), then every
+// public demo's limits. `payout`: the person owns the node (own.mjs), so `payout_to` (where swap 2
+// pays coin C: their own wallet) goes through; otherwise it is dropped, as on a public demo. Leg 2's partners are the ones asked for (if they take swaps), then every
 // other partner who buys ZEC for coin C, best rate first and paused ones last, never one that is the
 // same partner as leg 1's, at most 8.
-export function buildRoute(body, { list, resolve, legs, maxZat = Infinity, minZat = 0 }) {
+export function buildRoute(body, { list, resolve, legs, maxZat = Infinity, minZat = 0, payout = false }) {
   const bad = (error) => ({ status: 400, error });
   if (!legs) return { status: 503, error: "Private swaps aren't available right now." };
   const from = body?.from;
@@ -95,6 +97,9 @@ export function buildRoute(body, { list, resolve, legs, maxZat = Infinity, minZa
   if (!maxIn || !minOut) return bad("max_in and min_out must be positive whole numbers of the coins' smallest units");
   const pause = body?.pause ?? "standard";
   if (typeof pause !== "string" || !Object.hasOwn(PAUSES, pause)) return bad('pause must be "off", "standard" or "long"');
+  // the router takes 1 to 100 ASCII letters and digits; the leg-2 daemon checks it for its chain
+  const payoutTo = payout && body?.payout_to != null && body.payout_to !== "" ? String(body.payout_to).trim() : null;
+  if (payoutTo !== null && !/^[A-Za-z0-9]{8,100}$/.test(payoutTo)) return bad(`That ${coinOf(to)} address doesn't look right. Check it and try again.`);
 
   const summary = (e) => list.find((m) => m.name === e.name);
   const e1 = resolve(body?.maker1);
@@ -133,6 +138,7 @@ export function buildRoute(body, { list, resolve, legs, maxZat = Infinity, minZa
       max_in: maxIn,
       min_out: minOut,
       delay_secs: PAUSES[pause],
+      ...(payoutTo ? { payout_to: payoutTo } : {}),
     },
   };
 }

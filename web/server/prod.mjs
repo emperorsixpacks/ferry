@@ -38,6 +38,17 @@
 //                           guards as sell starts: the caps, both rate limits, the maker allowlist and
 //                           one live swap per pair
 //   PUBLIC_ORIGIN [unset]   e.g. https://ferry.example: POSTs whose Origin is something else get 403
+//                           (with FERRY_OWN_NODE=1, a loopback origin's other loopback name passes too:
+//                           http://127.0.0.1:7865 and http://localhost:7865)
+//   FERRY_OWN_NODE [0]      1: the daemons behind this server are the person's own node, opened from
+//                           their own machine (the node installer sets it). The browser may then say
+//                           where a swap's coins go (payout_to on a sell, sweep_to on a buy, a private
+//                           swap's payout_to, a NEAR buy's sweep_to, a NEAR-first private swap's
+//                           payout_to), send coins out (POST /daemon/<key>/api/withdraw), and read
+//                           GET /api/addresses and /api/withdrawals. Each such request must carry a
+//                           loopback Host header and no foreign Origin (own.mjs). Off (a public demo),
+//                           those fields are dropped from swap starts, and withdraw, withdrawals and
+//                           addresses get 403. GET /api/pairs says which ("node": {"own"})
 //   TRUST_PROXY [0]         1 behind a reverse proxy: the client IP is the last X-Forwarded-For hop
 //   DEMO_MAX_ZAT [50000000] largest swap a visitor may start (0.5 ZEC)
 //   DEMO_MIN_ZAT [unset]    smallest; the maker's own minimum applies anyway
@@ -102,6 +113,7 @@ import { quoteDesk, rateLimit } from "./quotes.mjs";
 import { extraDaemons, mainSide, pairsBody, samePair } from "./pairs.mjs";
 import { buildRoute, publicRoute, routerLink } from "./routes.mjs";
 import { ONE_CLICK_PUBKEY, ONE_CLICK_URL, nearDesk, nearRoutes, oneClick, ownDaemons, requestJson } from "./near.mjs";
+import { originAllowed, ownProblem, receiveFields, withdrawBody } from "./own.mjs";
 
 const env = process.env;
 const PORT = Number(env.PORT ?? 5300);
@@ -109,6 +121,11 @@ const HOST = env.HOST ?? "0.0.0.0";
 const DIST = resolve(env.DIST ?? join(fileURLToPath(new URL(".", import.meta.url)), "..", "dist"));
 const TRUST_PROXY = env.TRUST_PROXY === "1";
 const PUBLIC_ORIGIN = env.PUBLIC_ORIGIN?.replace(/\/+$/, "") || null;
+const OWN_NODE = env.FERRY_OWN_NODE === "1";
+// a POST's Origin may post here (PUBLIC_ORIGIN, or its other loopback name on the own node)
+const foreignOrigin = (req) => !originAllowed(req.headers.origin, PUBLIC_ORIGIN, OWN_NODE);
+// null when this request may say where coins go or move them (own.mjs), else why not
+const ownRefusal = (req) => ownProblem(req, OWN_NODE);
 const MAKER_URL = env.FERRY_MAKER_URL ?? "http://127.0.0.1:7112";
 const DEMO_MAX_ZAT = Number(env.DEMO_MAX_ZAT ?? 50_000_000);
 const DEMO_MIN_ZAT = env.DEMO_MIN_ZAT ? Number(env.DEMO_MIN_ZAT) : 0;
@@ -386,7 +403,9 @@ setInterval(() => {
   for (const [ip, ts] of rates) if (!ts.some((t) => now - t < 3_600_000)) rates.delete(ip);
 }, 600_000).unref();
 
-const READ_ONLY = [/^\/api\/status$/, /^\/api\/swaps$/, /^\/api\/swaps\/[0-9a-fA-F]+$/, /^\/api\/events$/, /^\/api\/addresses$/];
+const READ_ONLY = [/^\/api\/status$/, /^\/api\/swaps$/, /^\/api\/swaps\/[0-9a-fA-F]+$/, /^\/api\/events$/];
+// the node's own addresses and what it sent out: its owner's business, on their own node only
+const OWN_READ = [/^\/api\/addresses$/, /^\/api\/withdrawals$/];
 
 function readBody(req, limit = 4096) {
   return new Promise((ok, fail) => {
@@ -412,6 +431,12 @@ async function guard(key, path, req, res) {
   const method = req.method;
   if (method === "GET" || method === "HEAD") {
     if (READ_ONLY.some((r) => r.test(path))) return null;
+    if (OWN_READ.some((r) => r.test(path))) {
+      const no = ownRefusal(req);
+      if (!no) return null;
+      deny(res, no);
+      return false;
+    }
     deny(res, "Not available on the public demo");
     return false;
   }
@@ -419,12 +444,54 @@ async function guard(key, path, req, res) {
     deny(res, "Not available on the public demo");
     return false;
   }
-  if (PUBLIC_ORIGIN) {
-    const origin = req.headers.origin;
-    if (origin && origin !== PUBLIC_ORIGIN) {
-      deny(res, "This origin may not use the Ferry demo");
+  if (foreignOrigin(req)) {
+    deny(res, "This origin may not use the Ferry demo");
+    return false;
+  }
+
+  // sending coins out of the node: its owner only, rebuilt field by field (own.mjs)
+  if (path === "/api/withdraw") {
+    const no = ownRefusal(req);
+    if (no) {
+      deny(res, no);
       return false;
     }
+    let body;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      json(res, 400, { error: 'Send a JSON body like {"asset": "zec", "amount": 10000000, "to": "u1…"}' });
+      return false;
+    }
+    // a fee preview only from a daemon that says it previews: any other would send for real
+    let preview = false;
+    if (body?.dry_run === true) {
+      try {
+        const s = await daemonJson(key, "/api/status");
+        preview = s.status === 200 && Array.isArray(s.body?.features) && s.body.features.includes("withdraw_preview");
+      } catch {
+        json(res, 502, { error: "Can't reach the daemon. Is it running?" });
+        return false;
+      }
+    }
+    const built = withdrawBody(body, { preview });
+    if (built.error) {
+      json(res, built.status ?? 400, { error: built.error });
+      return false;
+    }
+    if (!built.body.dry_run) {
+      // coins NEAR Intents delivered for a swap that is about to start, or a private swap's ZEC
+      // between its two swaps: the daemon counts both as free, but they are spoken for
+      if (NEAR?.holds().has(key)) {
+        json(res, 409, { error: "A NEAR Intents swap is about to use this node's coins. Try again when it has started." });
+        return false;
+      }
+      if (ROUTER && (await ROUTER.busy())) {
+        json(res, 409, { error: "A private swap is using your node's coins. Try again when it finishes." });
+        return false;
+      }
+    }
+    return JSON.stringify(built.body);
   }
 
   if (TAKERS.has(key) && path === "/api/swaps") {
@@ -470,6 +537,17 @@ async function guard(key, path, req, res) {
       json(res, 400, { error: "The amount is outside that firm price's range. Get a new one." });
       return false;
     }
+    // where the coins go: the person's own wallet, on their own node only (own.mjs); a public
+    // demo's daemons pay their own wallets, whatever a browser says
+    let receive = "";
+    if (!ownRefusal(req)) {
+      const f = receiveFields(body, key === "z" ? "sell" : key === "b" ? "buy" : (EXTRA.find((d) => d.key === key)?.side ?? "sell"));
+      if (f.error) {
+        json(res, 400, { error: f.error });
+        return false;
+      }
+      receive = f.json;
+    }
     // one live swap per pair, whichever way: a start waits for every swap on the pair's daemons
     // (in a local demo one is the other's maker, which finishes a moment after the taker)
     let lists;
@@ -491,8 +569,8 @@ async function guard(key, path, req, res) {
     if (!takeStarts(req, res, 1)) return false;
     if (quote) QUOTES.take(quote);
     // the signed quote is forwarded as the maker sent it (its integers exact)
-    if (quote) return `{"maker":${JSON.stringify(maker.url)},"zec_zat":${zat},"quote":${quote.json}}`;
-    return JSON.stringify({ maker: maker.url, zec_zat: zat });
+    if (quote) return `{"maker":${JSON.stringify(maker.url)},"zec_zat":${zat},"quote":${quote.json}${receive}}`;
+    return `{"maker":${JSON.stringify(maker.url)},"zec_zat":${zat}${receive}}`;
   }
 
   if (/^\/api\/swaps\/[0-9a-fA-F]+\/fault$/.test(path)) {
@@ -668,7 +746,7 @@ async function routerGuard(path, req, res) {
     deny(res, "Not available on the public demo");
     return false;
   }
-  if (PUBLIC_ORIGIN && req.headers.origin && req.headers.origin !== PUBLIC_ORIGIN) {
+  if (foreignOrigin(req)) {
     deny(res, "This origin may not use the Ferry demo");
     return false;
   }
@@ -698,7 +776,8 @@ async function routerGuard(path, req, res) {
       json(res, 400, { error: 'Send a JSON body like {"from": "btc", "to": "usdc-base", "zec_zat": 10000000, ...}' });
       return false;
     }
-    const built = buildRoute(body, { list: await MAKERS.list(), resolve: MAKERS.resolve, legs: await ROUTER.legs(), maxZat: DEMO_MAX_ZAT, minZat: DEMO_MIN_ZAT });
+    // payout_to (swap 2 pays the person's own wallet) on their own node only
+    const built = buildRoute(body, { list: await MAKERS.list(), resolve: MAKERS.resolve, legs: await ROUTER.legs(), maxZat: DEMO_MAX_ZAT, minZat: DEMO_MIN_ZAT, payout: !ownRefusal(req) });
     if (built.error) {
       json(res, built.status, { error: built.error });
       return false;
@@ -800,7 +879,7 @@ async function serveMakers(req, res) {
 
 async function serveQuotes(req, res) {
   if (req.method !== "POST") return json(res, 405, { error: "Method not allowed" });
-  if (PUBLIC_ORIGIN && req.headers.origin && req.headers.origin !== PUBLIC_ORIGIN) return deny(res, "This origin may not use the Ferry demo");
+  if (foreignOrigin(req)) return deny(res, "This origin may not use the Ferry demo");
   let body;
   try {
     body = JSON.parse(await readBody(req, 1024));
@@ -827,7 +906,8 @@ const nearHttp = NEAR
   ? nearRoutes(NEAR, {
       send: json,
       readBody,
-      origin: (req) => (PUBLIC_ORIGIN && req.headers.origin && req.headers.origin !== PUBLIC_ORIGIN ? "This origin may not use the Ferry demo" : null),
+      origin: (req) => (foreignOrigin(req) ? "This origin may not use the Ferry demo" : null),
+      own: (req) => !ownRefusal(req),
       limit: (req) => nearPerIp(clientIp(req)) || nearInAll("all"),
       admit: nearAdmit,
     })
@@ -910,8 +990,9 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === "/api/pairs") {
-    // routes: what the router can run (null without one, or while it can't be reached)
-    (ROUTER ? ROUTER.legs() : Promise.resolve(null)).then((routes) => json(res, 200, { ...PAIRS_BODY, routes }));
+    // routes: what the router can run (null without one, or while it can't be reached); node.own: this
+    // page may say where coins go and send them out (FERRY_OWN_NODE=1, opened on loopback; own.mjs)
+    (ROUTER ? ROUTER.legs() : Promise.resolve(null)).then((routes) => json(res, 200, { ...PAIRS_BODY, routes, node: { own: !ownRefusal(req) } }));
     return;
   }
   if (url.pathname === "/api/quotes") {
@@ -935,6 +1016,11 @@ server.listen(PORT, HOST, () => {
   console.log(`ferry-ui on http://${HOST}:${PORT}  dist ${DIST}`);
   console.log(`  Z ${DAEMONS.z.url.origin}${MAIN_SELL === false ? " (no sell starts)" : ""}  B ${DAEMONS.b.url.origin}${MAIN_BUY === false ? " (no buy starts)" : ""}${EXTRA.map((d) => `  ${d.key.toUpperCase()} ${d.url}`).join("")}  makers ${MAKERS.makers.map((m) => `${m.name} (${m.pair})`).join(", ") || "none"}`);
   if (ROUTER) console.log(`  router ${ROUTER.url} (private swaps)`);
+  console.log(
+    OWN_NODE
+      ? "  own node (FERRY_OWN_NODE=1): pages opened on loopback may choose where coins go and send them out"
+      : "  public demo: swaps pay the daemons' own wallets, and nothing is sent out (FERRY_OWN_NODE=1 on your own node)",
+  );
   if (NEAR) console.log(`  NEAR Intents ${env.FERRY_NEAR_URL || ONE_CLICK_URL}: quotes${NEAR_RUN ? ", swaps (FERRY_NEAR=1: your own node only)" : " only (FERRY_NEAR=1 runs swaps)"}${NEAR_JWT() ? ", with a JWT" : ""}`);
   console.log(`  demo: max ${zec(DEMO_MAX_ZAT)} ZEC, ${RATE_PER_HOUR} swaps/IP/hour, ${SWAPS_PER_HOUR} swaps/hour in all, ${SSE_PER_IP} streams/IP, ${SSE_TOTAL} streams in all, faults ${FAULTS ? "on" : "off"}${PUBLIC_ORIGIN ? `, origin ${PUBLIC_ORIGIN}` : ""}`);
 });

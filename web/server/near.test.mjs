@@ -846,3 +846,50 @@ test("HTTP: the private swaps' routes", async () => {
   await routes(req("POST"), {}, "/api/near/combos/c0123456789abcdef/retry");
   assert.equal(sent.at(-1)[0], 404);
 });
+
+test("on the person's own node, a buy's ZEC can go to their own shielded wallet (sweep_to)", async () => {
+  const { n, one, d } = desk();
+  const UA = "utest1qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqgqqqqqqqqqqqqqqqqqqqqq";
+  const buy = { direction: "buy", zec_zat: 100_000_000, asset: "nep141:sol.omft.near", address: SOL, max_in: "100000000000" };
+  assert.equal((await n.start({ ...buy, sweep_to: "utest1 nope" })).body.field, "sweep_to");
+  const r = await n.start({ ...buy, sweep_to: UA });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(r.body.sweep_to, UA);
+  const real = one.calls.find((c) => c.body?.dry === false).body;
+  Object.assign(one.deposits.get(r.body.near.deposit_address), { status: "SUCCESS", details: { amountOut: real.amount } });
+  d.statuses.b.balances.btc_sat = 500_000;
+  await n.tick();
+  await n.tick();
+  assert.equal(d.swaps[0]?.body.sweep_to, UA, "the Ferry buy sweeps to it");
+});
+
+test("on the person's own node, NEAR asset → coin can pay coin C to their own wallet (payout_to)", async () => {
+  const { n, one, d, router } = comboDesk();
+  const to = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
+  assert.equal((await n.startCombo({ ...nearRoute(), payout_to: "0x90;F7" })).body.field, "payout_to");
+  const r = await n.startCombo({ ...nearRoute(), payout_to: to });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(r.body.payout_to, to);
+  Object.assign(one.deposits.get(r.body.front.deposit_address), { status: "SUCCESS", details: { amountOut: "500000" } });
+  await n.tick();
+  d.statuses.b.balances.btc_sat = 600_000;
+  await n.tick();
+  assert.equal(router.posts[0]?.payout_to, to);
+});
+
+test("HTTP: receive addresses reach the desk on the person's own node only", async () => {
+  const seen = [];
+  const fake = { start: async (b) => (seen.push(b), { status: 201, body: {} }), startCombo: async (b) => (seen.push(b), { status: 201, body: {} }) };
+  const call = async (own, path, body) => {
+    const routes = nearRoutes(fake, { send: () => {}, readBody: async () => JSON.stringify(body), own: () => own });
+    await routes({ method: "POST", headers: {} }, {}, path);
+  };
+  await call(false, "/api/near/swap", { direction: "buy", sweep_to: "utest1abcdefgh" });
+  await call(true, "/api/near/swap", { direction: "buy", sweep_to: "utest1abcdefgh" });
+  await call(false, "/api/near/combo", { kind: "near-route", payout_to: "bc1qabcdefgh" });
+  await call(true, "/api/near/combo", { kind: "near-route", payout_to: "bc1qabcdefgh" });
+  assert.deepEqual(
+    seen.map((b) => b.sweep_to ?? b.payout_to ?? null),
+    [null, "utest1abcdefgh", null, "bc1qabcdefgh"],
+  );
+});
