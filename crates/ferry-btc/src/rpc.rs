@@ -75,6 +75,185 @@ pub struct FundedPayment {
     pub fee: Amount,
 }
 
+/// The node's fee floors, in satoshis per 1000 vbytes (the node's own unit, so a 0.1 sat/vB
+/// floor, as Bitcoin Core 30 uses, is exact). Always read from the node, never assumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeeFloors {
+    /// `minrelaytxfee`: the static floor for relaying a transaction.
+    pub min_relay: u64,
+    /// `mempoolminfee`: the floor now, which rises above `min_relay` when the mempool is full.
+    pub mempool_min: u64,
+    /// `incrementalrelayfee`: what a replacement must add per vbyte of its own size (BIP125).
+    pub incremental: u64,
+}
+
+impl FeeFloors {
+    /// The lowest fee rate the mempool takes now.
+    pub fn floor(&self) -> u64 {
+        self.min_relay.max(self.mempool_min)
+    }
+}
+
+/// A transaction in the node's mempool (`getmempoolentry`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MempoolEntry {
+    pub vsize: u64,
+    /// The transaction's own fee.
+    pub base_fee: Amount,
+    /// Fee and vsize of the transaction and its unconfirmed ancestors.
+    pub ancestor_fee: Amount,
+    pub ancestor_vsize: u64,
+    /// Fee and vsize of the transaction and its unconfirmed descendants.
+    pub descendant_fee: Amount,
+    pub descendant_vsize: u64,
+    /// Unconfirmed parents, and the unconfirmed transactions that spend it.
+    pub depends: Vec<Txid>,
+    pub spent_by: Vec<Txid>,
+}
+
+/// One transaction's verdict from `testmempoolaccept`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcceptResult {
+    pub txid: Txid,
+    pub allowed: bool,
+    pub vsize: Option<u64>,
+    pub fee: Option<Amount>,
+    /// Why the node would refuse it (`reject-reason`, or the package's `package-error`).
+    pub reject_reason: Option<String>,
+}
+
+/// The outcome of `submitpackage`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageResult {
+    /// `package_msg` was "success": every transaction is in the mempool.
+    pub success: bool,
+    pub message: String,
+    /// Per-transaction errors the node reported.
+    pub errors: Vec<(Txid, String)>,
+    /// Transactions the package replaced.
+    pub replaced: Vec<Txid>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PackageError {
+    /// This node has no package submission (Litecoin Core 0.21).
+    #[error("this node does not take packages")]
+    Unsupported,
+    #[error(transparent)]
+    Rpc(#[from] RpcError),
+}
+
+/// JSON-RPC "Method not found".
+const RPC_METHOD_NOT_FOUND: i64 = -32601;
+
+/// Satoshis per 1000 vbytes of a rate the node writes in coin per 1000 vbytes.
+fn sat_per_kvb(coin_per_kvb: f64) -> Option<u64> {
+    Amount::from_btc(coin_per_kvb).ok().map(|a| a.to_sat())
+}
+
+/// A coin amount the node writes as a JSON number.
+fn amount_of(v: &Value) -> Option<Amount> {
+    v.as_f64().and_then(|f| Amount::from_btc(f).ok())
+}
+
+fn txids_of(v: &Value) -> Option<Vec<Txid>> {
+    v.as_array()?
+        .iter()
+        .map(|t| t.as_str()?.parse().ok())
+        .collect()
+}
+
+/// `maxfeerate` as the node takes it: coin per 1000 vbytes, written as text so no float
+/// formatting (1e-5) reaches the node.
+fn max_fee_rate_param(sat_per_kvb: u64) -> Value {
+    json!(Amount::from_sat(sat_per_kvb).to_string_in(bitcoin::Denomination::Bitcoin))
+}
+
+/// The floors in a `getmempoolinfo` reply. `incremental_fallback` is `getnetworkinfo`'s
+/// `incrementalfee`, for a node whose `getmempoolinfo` does not carry it.
+fn parse_floors(info: &Value, incremental_fallback: Option<f64>) -> Result<FeeFloors, String> {
+    let field = |k: &str| {
+        info[k]
+            .as_f64()
+            .and_then(sat_per_kvb)
+            .ok_or_else(|| format!("no {k} in {info}"))
+    };
+    let incremental = match info["incrementalrelayfee"]
+        .as_f64()
+        .or(incremental_fallback)
+    {
+        Some(f) => sat_per_kvb(f).ok_or_else(|| format!("bad incremental relay fee {f}"))?,
+        None => return Err("the node reports no incremental relay fee".into()),
+    };
+    Ok(FeeFloors {
+        min_relay: field("minrelaytxfee")?,
+        mempool_min: field("mempoolminfee")?,
+        incremental,
+    })
+}
+
+fn parse_mempool_entry(v: &Value) -> Result<MempoolEntry, String> {
+    let bad = |k: &str| format!("no {k} in {v}");
+    let fee = |k: &str| amount_of(&v["fees"][k]).ok_or_else(|| bad(k));
+    let size = |k: &str| v[k].as_u64().ok_or_else(|| bad(k));
+    Ok(MempoolEntry {
+        vsize: size("vsize")?,
+        base_fee: fee("base")?,
+        ancestor_fee: fee("ancestor")?,
+        ancestor_vsize: size("ancestorsize")?,
+        descendant_fee: fee("descendant")?,
+        descendant_vsize: size("descendantsize")?,
+        depends: txids_of(&v["depends"]).ok_or_else(|| bad("depends"))?,
+        spent_by: txids_of(&v["spentby"]).ok_or_else(|| bad("spentby"))?,
+    })
+}
+
+fn parse_accept(v: &Value) -> Result<Vec<AcceptResult>, String> {
+    v.as_array()
+        .ok_or_else(|| format!("not an array: {v}"))?
+        .iter()
+        .map(|r| {
+            Ok(AcceptResult {
+                txid: r["txid"]
+                    .as_str()
+                    .and_then(|t| t.parse().ok())
+                    .ok_or_else(|| format!("no txid in {r}"))?,
+                allowed: r["allowed"].as_bool() == Some(true),
+                vsize: r["vsize"].as_u64(),
+                fee: amount_of(&r["fees"]["base"]),
+                reject_reason: r["reject-reason"]
+                    .as_str()
+                    .or_else(|| r["package-error"].as_str())
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+fn parse_package(v: &Value) -> Result<PackageResult, String> {
+    let message = v["package_msg"]
+        .as_str()
+        .ok_or_else(|| format!("no package_msg in {v}"))?
+        .to_owned();
+    let mut errors = vec![];
+    if let Some(results) = v["tx-results"].as_object() {
+        for r in results.values() {
+            if let (Some(txid), Some(err)) = (
+                r["txid"].as_str().and_then(|t| t.parse().ok()),
+                r["error"].as_str(),
+            ) {
+                errors.push((txid, err.to_owned()));
+            }
+        }
+    }
+    Ok(PackageResult {
+        success: message == "success",
+        message,
+        errors,
+        replaced: txids_of(&v["replaced-transactions"]).unwrap_or_default(),
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct BitcoinRpc {
     http: reqwest::Client,
@@ -671,6 +850,111 @@ impl BitcoinRpc {
             .await
     }
 
+    /// [`BitcoinRpc::broadcast`] for a transaction whose fee rate must stay at or below
+    /// `max_fee_rate` (sat per 1000 vbytes): the node refuses it (`max-fee-exceeded`) otherwise,
+    /// as a second guard beside the caller's own cap.
+    pub async fn broadcast_capped(
+        &self,
+        tx: &Transaction,
+        max_fee_rate: u64,
+    ) -> Result<Txid, RpcError> {
+        self.call(
+            "sendrawtransaction",
+            json!([serialize_hex(tx), max_fee_rate_param(max_fee_rate)]),
+        )
+        .await
+    }
+
+    /// What the node would say to `txs` (`testmempoolaccept`) without taking them. One
+    /// transaction is tested alone; several are tested as one package (a child with its
+    /// parents), which only a node with package support can do. Replacements are not predicted
+    /// for a package. `max_fee_rate`: sat per 1000 vbytes.
+    pub async fn test_accept(
+        &self,
+        txs: &[Transaction],
+        max_fee_rate: Option<u64>,
+    ) -> Result<Vec<AcceptResult>, PackageError> {
+        if txs.len() > 1 && !self.coin.supports_packages() {
+            return Err(PackageError::Unsupported);
+        }
+        let hexes: Vec<String> = txs.iter().map(serialize_hex).collect();
+        let mut params = vec![json!(hexes)];
+        params.extend(max_fee_rate.map(max_fee_rate_param));
+        let v: Value = self.call("testmempoolaccept", Value::Array(params)).await?;
+        parse_accept(&v).map_err(|detail| {
+            PackageError::Rpc(RpcError::Decode {
+                method: "testmempoolaccept".into(),
+                detail,
+            })
+        })
+    }
+
+    /// Submit `txs`, a child last and every unconfirmed parent before it, as one package
+    /// (`submitpackage`): the child's fee can then pay for a parent that is below the mempool's
+    /// floor. Only where [`Coin::supports_packages`]; Litecoin Core 0.21 answers
+    /// [`PackageError::Unsupported`] without being asked. `max_fee_rate`: sat per 1000 vbytes.
+    pub async fn submit_package(
+        &self,
+        txs: &[Transaction],
+        max_fee_rate: Option<u64>,
+    ) -> Result<PackageResult, PackageError> {
+        if !self.coin.supports_packages() {
+            return Err(PackageError::Unsupported);
+        }
+        let hexes: Vec<String> = txs.iter().map(serialize_hex).collect();
+        let mut params = vec![json!(hexes)];
+        params.extend(max_fee_rate.map(max_fee_rate_param));
+        let v: Value = match self.call("submitpackage", Value::Array(params)).await {
+            Ok(v) => v,
+            Err(e) if e.code() == Some(RPC_METHOD_NOT_FOUND) => {
+                return Err(PackageError::Unsupported)
+            }
+            Err(e) => return Err(e.into()),
+        };
+        parse_package(&v).map_err(|detail| {
+            PackageError::Rpc(RpcError::Decode {
+                method: "submitpackage".into(),
+                detail,
+            })
+        })
+    }
+
+    /// `txid` in the node's mempool (`getmempoolentry`); None if it is not there (confirmed,
+    /// evicted, replaced or never seen).
+    pub async fn mempool_entry(&self, txid: &Txid) -> Result<Option<MempoolEntry>, RpcError> {
+        match self
+            .call::<Value>("getmempoolentry", json!([txid.to_string()]))
+            .await
+        {
+            Ok(v) => parse_mempool_entry(&v)
+                .map(Some)
+                .map_err(|detail| RpcError::Decode {
+                    method: "getmempoolentry".into(),
+                    detail,
+                }),
+            Err(e) if e.code() == Some(RPC_INVALID_ADDRESS_OR_KEY) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The node's fee floors now: `minrelaytxfee`, `mempoolminfee` and `incrementalrelayfee`,
+    /// all read from the node (`getmempoolinfo`, and `getnetworkinfo` for a node whose mempool
+    /// info lacks the incremental fee). Nothing is assumed: Core 30 lowers all three to
+    /// 0.1 sat/vB, and the mempool floor moves with congestion.
+    pub async fn fee_floors(&self) -> Result<FeeFloors, RpcError> {
+        let info: Value = self.call("getmempoolinfo", json!([])).await?;
+        let fallback = if info["incrementalrelayfee"].is_null() {
+            let net: Value = self.call("getnetworkinfo", json!([])).await?;
+            net["incrementalfee"].as_f64()
+        } else {
+            None
+        };
+        parse_floors(&info, fallback).map_err(|detail| RpcError::Decode {
+            method: "getmempoolinfo".into(),
+            detail,
+        })
+    }
+
     /// A transaction from the watch wallet, the mempool or (with `-txindex`) the chain; None if
     /// unknown.
     pub async fn raw_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, RpcError> {
@@ -735,9 +1019,48 @@ impl BitcoinRpc {
     }
 }
 
+impl crate::child::ChildWallet for BitcoinRpc {
+    async fn locked_coins(&self) -> Result<Vec<OutPoint>, RpcError> {
+        BitcoinRpc::locked_coins(self).await
+    }
+
+    /// `signrawtransactionwithwallet` with the previous output handed over (`prevtxs`), so a
+    /// parent that has left the mempool can still be spent. `tx` has one input.
+    async fn sign_child(
+        &self,
+        tx: &Transaction,
+        prevout: &bitcoin::TxOut,
+    ) -> Result<(Transaction, bool), RpcError> {
+        let decode = |detail: String| RpcError::Decode {
+            method: "signrawtransactionwithwallet".into(),
+            detail,
+        };
+        let spent = tx
+            .input
+            .first()
+            .ok_or_else(|| decode("no input to sign".into()))?
+            .previous_output;
+        let prev = json!([{
+            "txid": spent.txid.to_string(),
+            "vout": spent.vout,
+            "scriptPubKey": prevout.script_pubkey.to_hex_string(),
+            "amount": prevout.value.to_string_in(bitcoin::Denomination::Bitcoin),
+        }]);
+        let signed: Value = self
+            .wallet_call(
+                "signrawtransactionwithwallet",
+                json!([serialize_hex(tx), prev]),
+            )
+            .await?;
+        let signed_tx: Transaction = deserialize_hex(signed["hex"].as_str().unwrap_or_default())
+            .map_err(|e| decode(e.to_string()))?;
+        Ok((signed_tx, signed["complete"].as_bool() == Some(true)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::per_kvb_to_sat_vb;
+    use super::*;
 
     #[test]
     fn node_fee_rates_in_sat_per_vbyte() {
@@ -746,5 +1069,201 @@ mod tests {
         assert_eq!(per_kvb_to_sat_vb(0.000015), Some(2), "rounded up");
         assert_eq!(per_kvb_to_sat_vb(0.0), None);
         assert_eq!(per_kvb_to_sat_vb(-1.0), None);
+    }
+
+    fn json(s: &str) -> Value {
+        serde_json::from_str(s).unwrap()
+    }
+
+    // Replies recorded from Bitcoin Core 28.1 on regtest (docker bitcoin/bitcoin:28.1).
+
+    #[test]
+    fn floors_are_read_in_satoshis_per_kvb() {
+        let info = json(
+            r#"{"loaded": true, "size": 0, "maxmempool": 300000000, "mempoolminfee": 0.00001000,
+                "minrelaytxfee": 0.00001000, "incrementalrelayfee": 0.00001000, "fullrbf": true}"#,
+        );
+        let f = parse_floors(&info, None).unwrap();
+        assert_eq!(
+            f,
+            FeeFloors {
+                min_relay: 1_000,
+                mempool_min: 1_000,
+                incremental: 1_000
+            }
+        );
+        assert_eq!(f.floor(), 1_000);
+        // A full mempool raises the floor above the relay minimum; Core 30 lowers all three to
+        // 0.1 sat/vB, which is exact in sat/kvB.
+        let busy = json(
+            r#"{"mempoolminfee": 0.00012345, "minrelaytxfee": 0.000001,
+                "incrementalrelayfee": 0.000001}"#,
+        );
+        let f = parse_floors(&busy, None).unwrap();
+        assert_eq!(
+            (f.min_relay, f.mempool_min, f.incremental, f.floor()),
+            (100, 12_345, 100, 12_345)
+        );
+        // No incremental fee in the mempool info: the network info's is used, else an error.
+        let old = json(r#"{"mempoolminfee": 0.00001, "minrelaytxfee": 0.00001}"#);
+        assert_eq!(
+            parse_floors(&old, Some(0.00001)).unwrap().incremental,
+            1_000
+        );
+        assert!(parse_floors(&old, None).is_err());
+        // Anything missing is an error, never a default.
+        assert!(parse_floors(&json(r#"{"minrelaytxfee": 0.00001}"#), Some(0.00001)).is_err());
+        assert!(parse_floors(&json("{}"), Some(0.00001)).is_err());
+    }
+
+    #[test]
+    fn mempool_entry_with_and_without_a_child() {
+        let alone = json(
+            r#"{"vsize": 154, "weight": 616, "time": 1792700609, "height": 101,
+                "descendantcount": 1, "descendantsize": 154, "ancestorcount": 1,
+                "ancestorsize": 154,
+                "wtxid": "9852fd4d9048e8f361b001a98a11e9394c31b4f8cef5e020d791ad3cb74761a8",
+                "fees": {"base": 0.00000310, "modified": 0.00000310, "ancestor": 0.00000310,
+                         "descendant": 0.00000310},
+                "depends": [], "spentby": [], "bip125-replaceable": true, "unbroadcast": true}"#,
+        );
+        let e = parse_mempool_entry(&alone).unwrap();
+        assert_eq!(e.vsize, 154);
+        assert_eq!(e.base_fee, Amount::from_sat(310));
+        assert_eq!(e.descendant_fee, Amount::from_sat(310));
+        assert!(e.spent_by.is_empty() && e.depends.is_empty());
+
+        let with_child = json(
+            r#"{"vsize": 154, "descendantcount": 2, "descendantsize": 265, "ancestorcount": 1,
+                "ancestorsize": 154,
+                "fees": {"base": 0.00000310, "modified": 0.00000310, "ancestor": 0.00000310,
+                         "descendant": 0.00003310},
+                "depends": [],
+                "spentby": ["4ee66cb92c6b923c31052c8e5391cd9e013bb4ee40b169695def7f84f2081640"],
+                "bip125-replaceable": true}"#,
+        );
+        let e = parse_mempool_entry(&with_child).unwrap();
+        assert_eq!(e.descendant_fee, Amount::from_sat(3_310));
+        assert_eq!(e.descendant_vsize, 265);
+        assert_eq!(e.ancestor_fee, Amount::from_sat(310));
+        assert_eq!(e.spent_by.len(), 1);
+        assert_eq!(
+            e.spent_by[0].to_string(),
+            "4ee66cb92c6b923c31052c8e5391cd9e013bb4ee40b169695def7f84f2081640"
+        );
+        assert!(parse_mempool_entry(&json(r#"{"vsize": 1}"#)).is_err());
+    }
+
+    #[test]
+    fn accept_results() {
+        let ok = json(
+            r#"[{"txid": "4ee66cb92c6b923c31052c8e5391cd9e013bb4ee40b169695def7f84f2081640",
+                 "wtxid": "43431444f176f3811a5fb2ea8bf57f781bfa95f53101658d8f7797bb78b3b357",
+                 "allowed": true, "vsize": 111,
+                 "fees": {"base": 0.00003000, "effective-feerate": 0.00027027,
+                          "effective-includes": ["43431444f176f3811a5fb2ea8bf57f781bfa95f53101658d8f7797bb78b3b357"]}}]"#,
+        );
+        let r = parse_accept(&ok).unwrap();
+        assert_eq!(r.len(), 1);
+        assert!(r[0].allowed);
+        assert_eq!(
+            (r[0].vsize, r[0].fee),
+            (Some(111), Some(Amount::from_sat(3_000)))
+        );
+        assert_eq!(r[0].reject_reason, None);
+
+        let no = json(
+            r#"[{"txid": "4ee66cb92c6b923c31052c8e5391cd9e013bb4ee40b169695def7f84f2081640",
+                 "wtxid": "43431444f176f3811a5fb2ea8bf57f781bfa95f53101658d8f7797bb78b3b357",
+                 "allowed": false, "reject-reason": "max-fee-exceeded"}]"#,
+        );
+        let r = parse_accept(&no).unwrap();
+        assert!(!r[0].allowed);
+        assert_eq!(r[0].reject_reason.as_deref(), Some("max-fee-exceeded"));
+        assert_eq!(r[0].fee, None);
+
+        // A package that fails as a whole carries `package-error`, and no `allowed` at all.
+        let pkg = json(
+            r#"[{"txid": "4ee66cb92c6b923c31052c8e5391cd9e013bb4ee40b169695def7f84f2081640",
+                 "wtxid": "43431444f176f3811a5fb2ea8bf57f781bfa95f53101658d8f7797bb78b3b357",
+                 "package-error": "package-not-child-with-parents"}]"#,
+        );
+        let r = parse_accept(&pkg).unwrap();
+        assert!(!r[0].allowed);
+        assert_eq!(
+            r[0].reject_reason.as_deref(),
+            Some("package-not-child-with-parents")
+        );
+        assert!(parse_accept(&json(r#"{"not": "an array"}"#)).is_err());
+    }
+
+    #[test]
+    fn package_results() {
+        let ok = json(
+            r#"{"package_msg": "success",
+                "tx-results": {
+                  "9852fd4d9048e8f361b001a98a11e9394c31b4f8cef5e020d791ad3cb74761a8": {
+                    "txid": "633fd32121ea37e1eda217eae4d0e109d212d9af87445aef7b1f50970f03b780",
+                    "vsize": 154, "fees": {"base": 0.00000310}},
+                  "43431444f176f3811a5fb2ea8bf57f781bfa95f53101658d8f7797bb78b3b357": {
+                    "txid": "4ee66cb92c6b923c31052c8e5391cd9e013bb4ee40b169695def7f84f2081640",
+                    "vsize": 111, "fees": {"base": 0.00003000, "effective-feerate": 0.00027027}}},
+                "replaced-transactions": []}"#,
+        );
+        let r = parse_package(&ok).unwrap();
+        assert!(r.success && r.errors.is_empty() && r.replaced.is_empty());
+
+        // The shape of a failure follows rpc/mempool.cpp (`package_msg` plus a per-transaction
+        // `error`); the text of the error here is made up, not a recorded reply.
+        let bad = json(
+            r#"{"package_msg": "transaction failed",
+                "tx-results": {
+                  "43431444f176f3811a5fb2ea8bf57f781bfa95f53101658d8f7797bb78b3b357": {
+                    "txid": "4ee66cb92c6b923c31052c8e5391cd9e013bb4ee40b169695def7f84f2081640",
+                    "error": "mempool min fee not met, 1 < 2"}},
+                "replaced-transactions": ["633fd32121ea37e1eda217eae4d0e109d212d9af87445aef7b1f50970f03b780"]}"#,
+        );
+        let r = parse_package(&bad).unwrap();
+        assert!(!r.success);
+        assert_eq!(r.message, "transaction failed");
+        assert_eq!(r.errors.len(), 1);
+        assert_eq!(r.errors[0].1, "mempool min fee not met, 1 < 2");
+        assert_eq!(r.replaced.len(), 1);
+        assert!(parse_package(&json("{}")).is_err());
+    }
+
+    #[test]
+    fn max_fee_rate_is_sent_as_plain_decimal_text() {
+        // 100 sat/vB is 0.001 BTC per kvB; one sat/vB would be 1e-5 as a float.
+        assert_eq!(max_fee_rate_param(100_000), json("\"0.001\""));
+        assert_eq!(max_fee_rate_param(1_000), json("\"0.00001\""));
+        assert_eq!(max_fee_rate_param(100), json("\"0.000001\""));
+    }
+
+    #[tokio::test]
+    async fn litecoin_is_never_asked_for_packages() {
+        // A URL nothing listens on: the answer must come before any request is made.
+        let ltc = BitcoinRpc::new("http://127.0.0.1:1", "u", "p").with_coin(Coin::Ltc);
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
+        assert!(matches!(
+            ltc.submit_package(&[tx.clone(), tx.clone()], None).await,
+            Err(PackageError::Unsupported)
+        ));
+        assert!(matches!(
+            ltc.test_accept(&[tx.clone(), tx.clone()], None).await,
+            Err(PackageError::Unsupported)
+        ));
+        assert!(!Coin::Ltc.supports_packages());
+        assert!(Coin::Btc.supports_packages());
+        // A single transaction is tested alone on Litecoin: it does try the node.
+        assert!(matches!(
+            ltc.test_accept(&[tx], None).await,
+            Err(PackageError::Rpc(_))
+        ));
     }
 }

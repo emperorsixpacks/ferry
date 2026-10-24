@@ -20,6 +20,8 @@ pub mod scripts;
 pub mod tx;
 
 #[cfg(feature = "rpc")]
+pub mod child;
+#[cfg(feature = "rpc")]
 pub mod rpc;
 
 pub use adaptor::{BtcKey, EncryptionKey};
