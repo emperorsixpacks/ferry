@@ -128,6 +128,9 @@ armed**, and the timeline gets a `watchtower_armed` entry. The same flags work w
 - **B arms only a tower marked as its own** (`--watchtower-own`). Without the flag, B logs why,
   marks the tower `refused` in the swap view, and adds a `watchtower_refused` timeline entry.
   Z's package holds no secret, so Z arms any tower.
+- **B reaches its tower over https, or plain http only on this machine** (127.0.0.0/8, ::1,
+  `localhost`). B's package lets whoever reads it publish `b`, so ferryd refuses to start with
+  `--watchtower-own` and a remote `http://` URL. Z may use plain http.
 - **B never sends the redeem adaptor once the ZEC lock note is spent.** B has not swept, so a spent
   note means someone else already holds the joint key, for example Z after learning `b` from a
   leaked refund. Sending the adaptor would then hand Z the BTC as well, so B withholds it and the

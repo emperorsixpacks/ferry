@@ -85,6 +85,39 @@ pub const B_NOT_OWN_EVM: &str = "Not armed: to call refund, the tower needs B's 
 /// A timeline entry for the record: (kind, label).
 type Logged = Option<(&'static str, String)>;
 
+/// At startup: B arms its own tower (`--watchtower-own`) only over https, or plain http to this
+/// machine. B's package lets the tower publish `b` (the completed refund on Bitcoin and Litecoin,
+/// `b` itself on EVM), so it must not cross a network in the clear. Z's package holds no secret.
+pub fn check_url(cli: &Cli) -> anyhow::Result<()> {
+    match &cli.watchtower {
+        Some(url) if Role::from(cli.role) == Role::B && cli.watchtower_own => {
+            own_tower_url(url).map_err(anyhow::Error::msg)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// https anywhere, or http to a loopback host (127.0.0.0/8, ::1, localhost).
+fn own_tower_url(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("--watchtower {url}: {e}"))?;
+    let host = parsed.host_str().unwrap_or_default();
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if loopback => Ok(()),
+        "http" => Err(format!(
+            "--watchtower {url}: a remote watchtower for B must use https, since its package \
+             lets the tower publish b (plain http is fine only to 127.0.0.1, ::1 or localhost)"
+        )),
+        other => Err(format!("--watchtower {url}: unsupported scheme {other}")),
+    }
+}
+
 /// Called every tick; does nothing without `--watchtower`, once armed, or once refused.
 pub async fn arm(cli: &Cli, rec: &mut SwapRecord) {
     let Some(url) = &cli.watchtower else { return };
@@ -625,5 +658,62 @@ mod tests {
             assert!(st.note.contains("FerryLock lock"), "{}", st.note);
             assert!(rec.timeline.is_empty());
         }
+    }
+
+    #[test]
+    fn b_reaches_its_own_tower_only_over_https_or_loopback() {
+        for ok in [
+            "https://tower.example.org",
+            "https://203.0.113.7:7700",
+            "http://127.0.0.1:7731",
+            "http://127.8.9.10:7700",
+            "http://[::1]:7700",
+            "http://localhost:7700",
+            "http://LOCALHOST",
+        ] {
+            assert_eq!(own_tower_url(ok), Ok(()), "{ok}");
+        }
+        for bad in [
+            "http://tower.example.org",
+            "http://192.168.1.20:7700",
+            "http://[2001:db8::1]:7700",
+            "http://localhost.example.org",
+            "ftp://127.0.0.1",
+            "not a url",
+        ] {
+            assert!(own_tower_url(bad).is_err(), "{bad}");
+        }
+        let err = own_tower_url("http://10.0.0.5:7700").unwrap_err();
+        assert!(
+            err.contains("must use https") && err.contains("publish b"),
+            "{err}"
+        );
+
+        // Only B's own tower: B without --watchtower-own never uploads, and Z's package holds
+        // no secret.
+        let remote = "http://10.0.0.5:7700";
+        assert!(check_url(&cli(&["--watchtower", remote, "--watchtower-own"])).is_err());
+        assert!(check_url(&cli(&[
+            "--counter",
+            "evm",
+            "--watchtower",
+            remote,
+            "--watchtower-own"
+        ]))
+        .is_err());
+        assert!(check_url(&cli(&["--watchtower", remote])).is_ok());
+        let z = Cli::parse_from([
+            "ferryd",
+            "--role",
+            "z",
+            "--name",
+            "t",
+            "--data-dir",
+            "/nonexistent",
+            "--watchtower",
+            remote,
+        ]);
+        assert!(check_url(&z).is_ok());
+        assert!(check_url(&cli(&[])).is_ok());
     }
 }
