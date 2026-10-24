@@ -92,6 +92,8 @@ infra/demo-ltc.sh up            # the same demo against litecoind regtest (ZEC/L
 infra/evm-demo.sh test          # ZEC/USDC on anvil: happy, refund and punish
 infra/evm-testnet.sh fork test  # ZEC/USDC rehearsal on a Base Sepolia fork; without `fork`, the
                                 # real Base Sepolia + Zcash testnet run (docs/EVM.md)
+infra/mainnet-demo.sh fork test # the small Ferry + NEAR Intents mainnet demo, rehearsed on a fork
+                                # of Base mainnet; without `fork`, the real run (docs/MAINNET-DEMO.md)
 ```
 
 ## Deploying
