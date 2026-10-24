@@ -4,40 +4,22 @@ import { cn } from "../../lib/utils";
 import { Mark, type MarkId } from "./marks";
 import { useOnScreen } from "./motion";
 
-// How it works, in three steps, each with a small loop: the coin you pick keeps changing, a lock
-// closes on both coins, a coin drops into a wallet with a tick. A line of light runs through the
-// steps and fills as they scroll past.
+// How it works, in three steps, each with a small slow loop: the coin you pick keeps changing, a
+// lock closes between both coins, a coin drops into a wallet and a tick appears. A hairline runs
+// through the steps and fills in ink as they scroll past.
 
 const delay = (ms: number) => ({ "--lp-delay": `${ms}ms` }) as CSSProperties;
 
-const STEPS: { title: string; body: string; art: ReactNode; c1: string; c2: string }[] = [
-  {
-    title: "Pick",
-    body: "Choose what you have and what you want. Ferry finds the best rate from its swap partners.",
-    art: <PickArt />,
-    c1: "var(--lp-violet)",
-    c2: "var(--lp-cyan)",
-  },
-  {
-    title: "Lock",
-    body: "Each side locks its own coins. Nobody else can move them, and a deadline sends them back if anything stalls.",
-    art: <LockArt />,
-    c1: "var(--lp-gold)",
-    c2: "var(--lp-violet)",
-  },
-  {
-    title: "Receive",
-    body: "The swap releases both sides together, and your coins arrive on the chain you chose.",
-    art: <ReceiveArt />,
-    c1: "var(--lp-cyan)",
-    c2: "var(--lp-magenta)",
-  },
+const STEPS: { title: string; body: string; art: ReactNode }[] = [
+  { title: "Pick", body: "Choose what you have and what you want. Ferry finds the best rate from its swap partners.", art: <PickArt /> },
+  { title: "Lock", body: "Each side locks its own coins. Nobody else can move them, and a deadline sends them back if anything stalls.", art: <LockArt /> },
+  { title: "Receive", body: "The swap releases both sides together, and your coins arrive on the chain you chose.", art: <ReceiveArt /> },
 ];
 
 export function Steps() {
   const ref = useRef<HTMLOListElement>(null);
   const on = useOnScreen(ref);
-  // the line's fill: from the list's top reaching the middle of the screen to its bottom doing so
+  // the line fills from the list's top reaching 60% down the screen to its bottom doing so
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -45,8 +27,7 @@ export function Steps() {
     const update = () => {
       queued = false;
       const r = el.getBoundingClientRect();
-      const mid = window.innerHeight * 0.6;
-      el.style.setProperty("--lp-fill", String(Math.min(1, Math.max(0, (mid - r.top) / r.height))));
+      el.style.setProperty("--lp-fill", String(Math.min(1, Math.max(0, (window.innerHeight * 0.6 - r.top) / r.height))));
     };
     const onScroll = () => {
       if (queued) return;
@@ -58,22 +39,19 @@ export function Steps() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
   return (
-    <ol ref={ref} className={cn("relative grid gap-6 md:grid-cols-3 md:gap-5", !on && "lp-paused")}>
-      {/* the line through the steps */}
-      <span className="pointer-events-none absolute top-[50px] right-[calc(33.333%-46px)] left-[50px] z-10 hidden h-px bg-white/10 md:block" aria-hidden>
-        <span className="lp-progress absolute inset-0 bg-gradient-to-r from-[var(--lp-violet)] via-[var(--lp-gold)] to-[var(--lp-cyan)] shadow-[0_0_16px_rgb(244_183_40/0.8)]" />
+    <ol ref={ref} className={cn("relative grid gap-5 md:grid-cols-3", !on && "lp-paused")}>
+      <span className="pointer-events-none absolute top-[50px] right-[calc(33.333%-46px)] left-[50px] z-10 hidden h-px bg-slate-200 md:block" aria-hidden>
+        <span className="lp-progress absolute inset-0 bg-slate-900" />
       </span>
       {STEPS.map((s, i) => (
-        <li key={s.title} data-reveal style={delay(i * 160)}>
-          <div style={{ "--c1": s.c1, "--c2": s.c2 } as CSSProperties} className="lp-card relative h-full p-6 sm:p-7">
-            <span className="relative z-20 flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-white/20 bg-[var(--lp-night-2)] text-[15px] font-semibold text-white tabular-nums shadow-[0_0_24px_-4px_var(--c1)]">
-              {i + 1}
-            </span>
-            <div className="mt-4 flex h-[96px] items-center justify-center" aria-hidden>
+        <li key={s.title} data-reveal style={delay(i * 140)}>
+          <div className="lp-card relative h-full rounded-[28px] border border-slate-200 bg-white p-6 sm:p-7">
+            <span className="relative z-20 flex h-11 w-11 items-center justify-center rounded-full bg-slate-900 text-[15px] font-semibold text-white tabular-nums">{i + 1}</span>
+            <div className="mt-4 flex h-[92px] items-center justify-center" aria-hidden>
               {s.art}
             </div>
-            <h3 className="mt-5 text-2xl font-semibold tracking-tight text-white">{s.title}</h3>
-            <p className="mt-2 text-[15px] leading-relaxed text-[var(--lp-muted)]">{s.body}</p>
+            <h3 className="mt-4 text-xl font-semibold tracking-tight text-slate-900">{s.title}</h3>
+            <p className="mt-2 text-[15px] leading-relaxed text-slate-600">{s.body}</p>
           </div>
         </li>
       ))}
@@ -85,21 +63,21 @@ const PICKS: MarkId[] = ["btc", "eth", "usdc", "sol"];
 
 function PickArt() {
   return (
-    <div className="flex items-center gap-3">
-      <span className="flex h-12 items-center gap-2 rounded-full border border-white/15 bg-white/5 pr-4 pl-1.5">
-        <span className="lp-pick relative block h-9 w-9">
+    <div className="flex items-center gap-2.5">
+      <span className="flex h-11 items-center gap-2 rounded-full border border-slate-200 bg-white pr-3.5 pl-1.5">
+        <span className="lp-pick relative block h-8 w-8">
           {PICKS.map((id) => (
             <span key={id} className="block">
-              <Mark id={id} size={36} />
+              <Mark id={id} size={32} />
             </span>
           ))}
         </span>
-        <span className="text-sm whitespace-nowrap text-[var(--lp-muted)]">You have</span>
+        <span className="text-sm whitespace-nowrap text-slate-600">You have</span>
       </span>
-      <ArrowRight size={18} weight="bold" className="text-[var(--lp-gold)]" />
-      <span className="flex h-12 items-center gap-2 rounded-full border border-[var(--lp-gold)]/40 bg-[var(--lp-gold)]/10 pr-4 pl-1.5">
-        <Mark id="zec" size={36} />
-        <span className="text-sm whitespace-nowrap text-[var(--lp-gold-hi)]">Shielded</span>
+      <ArrowRight size={16} weight="bold" className="text-slate-400" />
+      <span className="flex h-11 items-center gap-2 rounded-full border border-slate-200 bg-white pr-3.5 pl-1.5">
+        <Mark id="zec" size={32} />
+        <span className="text-sm whitespace-nowrap text-slate-600">Shielded</span>
       </span>
     </div>
   );
@@ -108,33 +86,33 @@ function PickArt() {
 function LockArt() {
   return (
     <div className="flex items-center gap-4">
-      <Mark id="btc" size={36} />
-      <span className="lp-lockbox relative flex h-16 w-14 items-end justify-center rounded-2xl">
-        <svg viewBox="0 0 56 64" className="absolute inset-0 h-full w-full overflow-visible">
+      <Mark id="btc" size={32} />
+      <span className="relative block h-[60px] w-[52px]">
+        <svg viewBox="0 0 52 60" className="absolute inset-0 h-full w-full overflow-visible">
           <g className="lp-shackle">
-            <path d="M17 30V20a11 11 0 0 1 22 0v10" fill="none" stroke="#FFE7A3" strokeWidth="5" strokeLinecap="round" />
+            <path d="M15 28V19a11 11 0 0 1 22 0v9" fill="none" stroke="#18181b" strokeWidth="3.5" strokeLinecap="round" />
           </g>
-          <rect x="6" y="28" width="44" height="34" rx="10" fill="#2a2108" stroke="#F4B728" strokeWidth="2.5" />
-          <circle cx="28" cy="43" r="4" fill="#F4B728" />
-          <path d="M28 46v7" stroke="#F4B728" strokeWidth="3" strokeLinecap="round" />
+          <rect x="5" y="26" width="42" height="32" rx="9" fill="#fff" stroke="#18181b" strokeWidth="2" />
+          <circle cx="26" cy="40" r="3.5" fill="#18181b" />
+          <path d="M26 43v6" stroke="#18181b" strokeWidth="2.5" strokeLinecap="round" />
         </svg>
       </span>
-      <Mark id="zec" size={36} />
+      <Mark id="zec" size={32} />
     </div>
   );
 }
 
 function ReceiveArt() {
   return (
-    <div className="relative flex h-20 w-24 items-end justify-center">
-      <span className="lp-drop absolute top-0 left-1/2 -ml-[18px] rounded-full shadow-[0_0_24px_rgb(39_117_202/0.7)]">
-        <Mark id="usdc" size={36} />
+    <div className="relative flex h-[84px] w-24 items-end justify-center">
+      <span className="lp-drop absolute top-0 left-1/2 -ml-4 rounded-full">
+        <Mark id="usdc" size={32} />
       </span>
-      <span className="flex h-12 w-20 items-center justify-center rounded-2xl border border-white/15 bg-white/5 text-[var(--lp-muted)]">
-        <Wallet size={24} />
+      <span className="flex h-11 w-[72px] items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-500">
+        <Wallet size={22} />
       </span>
-      <span className="lp-tick absolute -right-1 bottom-7 flex h-7 w-7 items-center justify-center rounded-full bg-emerald-400 text-[#05210f] shadow-[0_0_20px_rgb(52_211_153/0.8)]">
-        <Check size={15} weight="bold" />
+      <span className="lp-tick absolute -right-1 bottom-6 flex h-6 w-6 items-center justify-center rounded-full bg-slate-900 text-white">
+        <Check size={13} weight="bold" />
       </span>
     </div>
   );
