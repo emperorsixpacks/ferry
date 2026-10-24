@@ -66,6 +66,8 @@ pub struct EvmDaemon<L> {
     logs: std::sync::Mutex<HashMap<String, LogCache>>,
     /// Our firm quotes, when making offers (crate::quote).
     pub quotes: Option<crate::quote::QuoteBook>,
+    /// The `POST /api/swaps` in progress, if any (crate::route).
+    starts: crate::route::Starts,
 }
 
 /// A swap's events in the blocks before `next`.
@@ -262,6 +264,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             proposals: std::sync::Mutex::new(VecDeque::new()),
             logs: std::sync::Mutex::new(HashMap::new()),
             quotes,
+            starts: crate::route::Starts::default(),
             cli,
         };
         if daemon.offer.making {
@@ -370,6 +373,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 account: self.client.address().to_checksum(None),
             },
             balances,
+            features: crate::route::FEATURES.to_vec(),
         })
     }
 
@@ -463,18 +467,40 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
 
     // ------------------------------------------------------------------ negotiation
 
-    /// Taker: propose a swap to `maker`, at its offer's rate or at a firm quote it signed.
+    /// Taker: propose a swap to `maker`, at its offer's rate or at a firm quote it signed. A
+    /// route leg adds a label, B's sweep destination and a price limit (crate::route). An error
+    /// means no swap was created.
     pub async fn create_swap(
         &self,
         maker: String,
         zec_zat: u64,
         quote: Option<crate::quote::SignedQuote>,
+        route: crate::route::RouteArgs,
     ) -> Result<String, ApiError> {
         let maker = maker.trim_end_matches('/').to_string();
         if maker.is_empty() {
             return Err(ApiError(400, "maker URL is required".into()));
         }
-        self.check_idle().await?;
+        route.check(self.role)?;
+        // One start at a time, one swap per route label, and none while a swap runs. Held until
+        // this request ends, however it ends.
+        let _start = {
+            let st = self.state.lock().await;
+            self.starts.begin(
+                route.route.as_deref(),
+                st.swaps.values().map(|r| crate::route::Held {
+                    id: &r.id,
+                    route: r.route.as_deref(),
+                    finished: r.swap.is_final(),
+                }),
+            )?
+        };
+        if let Some(to) = &route.sweep_to {
+            self.leg
+                .check_address(to)
+                .await
+                .map_err(|e| ApiError(400, format!("sweep_to: {e}")))?;
+        }
         let offer: EvmOffer = self
             .http
             .get(format!("{maker}/peer/offer"))
@@ -534,6 +560,9 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 offer.swap_cap()
             ));
         };
+        route.check_price(self.role, token_amount, &zec_str(zec_zat), |u| {
+            self.token(u)
+        })?;
         let (head, now) = self
             .client
             .latest_block()
@@ -597,6 +626,9 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             .map_err(|e| ApiError(502, format!("maker's Accept rejected: {e}")))?;
         let id = hex::encode(sid);
         let mut rec = self.new_record(id.clone(), swap, maker, true, head)?;
+        // Before the first save: a router that lost our answer finds the swap by its label.
+        rec.route = route.route;
+        rec.sweep_to = route.sweep_to;
         rec.peer_seen = 1;
         let p = rec.role().peer().as_str();
         rec.log(
@@ -619,6 +651,9 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             "Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines",
             None,
         );
+        if let Some(note) = crate::route::leg_note(rec.route.as_deref(), rec.sweep_to.as_deref()) {
+            rec.log("local", "route_leg", note, None);
+        }
         rec.pending
             .extend(actions.into_iter().map(EvmPending::from));
         // In memory and on disk before anything moves funds: B's lock is sent by the tick loop,
@@ -627,6 +662,11 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         let mut st = self.state.lock().await;
         self.drive_local(&mut rec).await;
         if !self.save(&rec) {
+            // Refused: no swap. An earlier save may have left the record on disk, where a
+            // restart would resume it, so it goes too.
+            if let Err(e) = self.store.remove(&id) {
+                tracing::error!(%id, "removing the unsaved swap's file: {e}");
+            }
             return Err(ApiError(500, "could not save the swap".into()));
         }
         st.swaps.insert(id.clone(), rec);
@@ -646,14 +686,6 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             },
             "zec": { "address": self.leg.receive_address() },
         }))
-    }
-
-    async fn check_idle(&self) -> Result<(), ApiError> {
-        let st = self.state.lock().await;
-        if st.swaps.values().any(|r| !r.swap.is_final()) {
-            return Err(ApiError(409, "A swap is already in progress".into()));
-        }
-        Ok(())
     }
 
     async fn check_funds(&self, params: &EvmParams) -> Result<(), ApiError> {
@@ -768,7 +800,8 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 .cloned()
                 .ok_or_else(|| ApiError(409, "swap id in use".into()));
         }
-        if st.swaps.values().any(|r| !r.swap.is_final()) {
+        // A swap of ours (or one being started as taker) is still running: one at a time.
+        if st.swaps.values().any(|r| !r.swap.is_final()) || self.starts.busy() {
             return Err(ApiError(409, "A swap is already in progress".into()));
         }
         let bad = |m: &str| Err(ApiError(400, m.to_string()));
@@ -1248,17 +1281,33 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 }
                 let fvk = fvk_from_hex(&fvk);
                 let lock_value = rec.swap.session().params.zec_amount;
-                match self.leg.sweep(&fvk, ask.expose(), lock_value).await {
+                // B's sweep pays the address this swap was given, if any; Z reclaims to itself.
+                let to = match rec.role() {
+                    Role::B => rec.sweep_to.clone(),
+                    Role::Z => None,
+                };
+                match self
+                    .leg
+                    .sweep(&fvk, ask.expose(), lock_value, to.as_deref())
+                    .await
+                {
                     Ok(txid) => {
                         rec.zec_sweep_txid = Some(txid.clone());
-                        let (kind, label) = match rec.role() {
-                            Role::B => (
+                        let (kind, label) = match (rec.role(), &to) {
+                            (Role::B, None) => (
                                 "zec_sweep_broadcast",
-                                "Swept the joint note to B's own shielded address, signing with ask = σ(z + b)",
+                                "Swept the joint note to B's own shielded address, signing with ask = σ(z + b)".to_string(),
                             ),
-                            Role::Z => (
+                            (Role::B, Some(to)) => (
+                                "zec_sweep_broadcast",
+                                format!(
+                                    "Swept the joint note to {}, the shielded address given for this swap, signing with ask = σ(z + b)",
+                                    crate::route::short_address(to)
+                                ),
+                            ),
+                            (Role::Z, _) => (
                                 "zec_reclaim_broadcast",
-                                "Swept the joint note back to Z's own shielded address",
+                                "Swept the joint note back to Z's own shielded address".to_string(),
                             ),
                         };
                         rec.log("zec", kind, label, Some(txid));
@@ -1602,15 +1651,20 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 "t1 passed without a claim: the swap is called off. Refunding from FerryLock",
                 None,
             ),
-            (Role::B, "ZecSwept") => rec.log(
-                "local",
-                "swap_complete",
-                format!(
-                    "Swap complete. B holds {} in its own Ironwood notes",
-                    zec_str(p.zec_amount)
-                ),
-                None,
-            ),
+            (Role::B, "ZecSwept") => {
+                let label = match &rec.sweep_to {
+                    None => format!(
+                        "Swap complete. B holds {} in its own Ironwood notes",
+                        zec_str(p.zec_amount)
+                    ),
+                    Some(to) => format!(
+                        "Swap complete. {} went to {}, the shielded address given for this swap",
+                        zec_str(p.zec_amount),
+                        crate::route::short_address(to)
+                    ),
+                };
+                rec.log("local", "swap_complete", label, None)
+            }
             (Role::B, "Refunded") => rec.log(
                 "local",
                 "refunded",

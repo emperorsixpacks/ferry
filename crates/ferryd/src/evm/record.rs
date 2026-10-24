@@ -171,6 +171,13 @@ pub struct EvmRecord {
     /// Our package at the watchtower (--watchtower), if one is configured.
     #[serde(default)]
     pub watchtower: Option<crate::tower::TowerState>,
+    /// The route label this swap was started with (crate::route), set before the first save.
+    #[serde(default)]
+    pub route: Option<String>,
+    /// B taker only: where our sweep pays the ZEC instead of our own wallet (never sent to the
+    /// peer).
+    #[serde(default)]
+    pub sweep_to: Option<String>,
 }
 
 impl EvmRecord {
@@ -214,6 +221,8 @@ impl EvmRecord {
             observer_evm: vec![],
             observer_zec: vec![],
             watchtower: None,
+            route: None,
+            sweep_to: None,
         }
     }
 
@@ -327,6 +336,11 @@ impl EvmStore {
         write_private(&tmp, &serde_json::to_vec_pretty(rec)?)?;
         std::fs::rename(tmp, self.dir.join(format!("{}.json", rec.id)))?;
         std::fs::File::open(&self.dir)?.sync_all()
+    }
+
+    /// Forget a swap that was refused before it existed (a record no one may resume).
+    pub fn remove(&self, id: &str) -> std::io::Result<()> {
+        crate::record::remove_record(&self.dir, id)
     }
 
     pub fn load_all(&self) -> std::io::Result<Vec<EvmRecord>> {

@@ -751,6 +751,18 @@ impl ZecLeg for DevtoolZecLeg {
         Some(self.own_address().to_string())
     }
 
+    /// `ferry-zec-signer address <net> <ua>`: a unified address of our network with an Orchard
+    /// receiver (Ironwood shares it). This crate decodes no addresses itself (it has no Zcash
+    /// crates); the signer is pinned to devtool's librustzcash.
+    async fn check_address(&self, address: &str) -> Result<(), String> {
+        let mut cmd = Command::new(&self.0.cfg.signer);
+        cmd.args(["address", &self.0.cfg.network, address]);
+        let out = run_limited(cmd, "ferry-zec-signer address", None, READ_TIMEOUT)
+            .await
+            .map_err(|e| format!("could not check the address: {e}"))?;
+        address_verdict(out.status.success(), &out.stdout, &out.stderr)
+    }
+
     fn joint_address(&self, fvk: &[u8; 96]) -> Result<String, ZecError> {
         Ok(self.0.joint_keys(fvk)?.1)
     }
@@ -822,6 +834,7 @@ impl ZecLeg for DevtoolZecLeg {
         fvk: &[u8; 96],
         ask: &[u8; 32],
         lock_value: u64,
+        to: Option<&str>,
     ) -> Result<String, ZecError> {
         let account = self.0.joint_account(fvk).await?;
         let cfg = &self.0.cfg;
@@ -872,8 +885,10 @@ impl ZecLeg for DevtoolZecLeg {
                 // are ignored, and unconfirmed ones are left for later rather than waited on.
                 "--ironwood-only",
                 "--only-spendable",
+                // Our own wallet, or the address this swap was given (checked by
+                // `check_address` when the swap was created).
                 "--address",
-                &self.0.own_address,
+                to.unwrap_or(&self.0.own_address),
                 "--output",
                 &path_str(&created),
             ],
@@ -1061,6 +1076,25 @@ async fn spend_values(signer: &Path, file: &Path) -> Result<Vec<u64>, ZecError> 
     }
     parse_spends(text.trim())
         .ok_or_else(|| ZecError::Other(format!("ferry-zec-signer spends printed {text:?}")))
+}
+
+/// What `ferry-zec-signer address` said: `ADDRESS_OK`, or why the address is refused.
+fn address_verdict(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<(), String> {
+    if success
+        && String::from_utf8_lossy(stdout)
+            .lines()
+            .any(|l| l.trim() == "ADDRESS_OK")
+    {
+        return Ok(());
+    }
+    let why = String::from_utf8_lossy(stderr);
+    // anyhow prints `Error: <message>`.
+    let why = why.trim().trim_start_matches("Error:").trim();
+    Err(if why.is_empty() {
+        "not a usable shielded address".into()
+    } else {
+        why.to_string()
+    })
 }
 
 /// `ironwood=500000000,0 orchard=` -> the Ironwood values.
@@ -1730,6 +1764,42 @@ mod tests {
         ] {
             assert!(!node_has_tx(&rejected), "{rejected}");
         }
+    }
+
+    /// A route's sweep destination is checked by the signer (`address <net> <ua>`), with our
+    /// network; only its `ADDRESS_OK` accepts, and its error is what the caller sees.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sweep_destinations_are_checked_by_the_signer() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_dir("address-check");
+        let signer = dir.join("fake-signer");
+        std::fs::write(
+            &signer,
+            "#!/bin/sh\n\
+             echo \"$@\" > \"$(dirname \"$0\")/args\"\n\
+             if [ \"$1 $2 $3\" = \"address regtest uregtest1good\" ]; then echo ADDRESS_OK; exit 0; fi\n\
+             echo 'Error: not a unified address of the regtest network' >&2; exit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&signer, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut inner = fake_wallet(&dir);
+        inner.cfg.signer = signer;
+        let leg = DevtoolZecLeg(Arc::new(inner));
+        assert_eq!(leg.check_address("uregtest1good").await, Ok(()));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("args")).unwrap().trim(),
+            "address regtest uregtest1good"
+        );
+        assert_eq!(
+            leg.check_address("utest1other").await,
+            Err("not a unified address of the regtest network".into())
+        );
+        // Exit 0 without the marker is not an acceptance.
+        assert!(address_verdict(true, b"", b"").is_err());
+        assert!(address_verdict(true, b"ADDRESS_OK\n", b"").is_ok());
+        assert!(address_verdict(false, b"ADDRESS_OK\n", b"").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

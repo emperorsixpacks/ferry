@@ -11,6 +11,10 @@
 //!       The values of the notes a PCZT's Ironwood and Orchard actions spend, as
 //!       `ironwood=<v>,<v>… orchard=<v>,…` (zatoshi; dummy spends show as 0). Used to make sure
 //!       a sweep includes the lock note.
+//!   ferry-zec-signer address <regtest|test|main> <ua>
+//!       Whether a sweep may pay this address: a unified address of that network with an Orchard
+//!       receiver (Ironwood shares it). Prints `ADDRESS_OK`, or fails saying why not. Used to
+//!       check a route's sweep destination (`sweep_to`) before a swap starts.
 //!   ferry-zec-signer pools <file>
 //!       What a PCZT or a raw transaction (binary or hex) touches, as one line of `key=count`:
 //!       transparent_inputs, transparent_outputs, sapling_spends, sapling_outputs,
@@ -30,6 +34,7 @@ use pczt::{
     roles::low_level_signer::{OrchardParseError, Signer},
 };
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
+use zcash_keys::address::UnifiedAddress;
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey};
 use zcash_primitives::transaction::{
     Transaction, TxVersion, sighash::SignableInput, sighash_v5::v5_signature_hash,
@@ -64,19 +69,41 @@ fn ufvk(network: &str, fvk_hex: &str) -> anyhow::Result<()> {
         .map_err(|_| anyhow!("FVK must be 96 bytes"))?;
     let fvk = FullViewingKey::from_bytes(&raw)
         .ok_or_else(|| anyhow!("not a valid Orchard FVK (ak must have ỹ = 0)"))?;
-    let ufvk =
-        UnifiedFullViewingKey::from_orchard_fvk(fvk).map_err(|e| anyhow!("UFVK: {e:?}"))?;
+    let ufvk = UnifiedFullViewingKey::from_orchard_fvk(fvk).map_err(|e| anyhow!("UFVK: {e:?}"))?;
     let (ua, _) = ufvk
         .default_address(UnifiedAddressRequest::ALLOW_ALL)
         .map_err(|e| anyhow!("UA: {e:?}"))?;
     let (ufvk, ua) = match network {
         "regtest" => (ufvk.encode(&regtest()), ua.encode(&regtest())),
-        "test" => (ufvk.encode(&Network::TestNetwork), ua.encode(&Network::TestNetwork)),
-        "main" => (ufvk.encode(&Network::MainNetwork), ua.encode(&Network::MainNetwork)),
+        "test" => (
+            ufvk.encode(&Network::TestNetwork),
+            ua.encode(&Network::TestNetwork),
+        ),
+        "main" => (
+            ufvk.encode(&Network::MainNetwork),
+            ua.encode(&Network::MainNetwork),
+        ),
         n => bail!("unknown network {n}"),
     };
     println!("UFVK={}", ufvk.map_err(|e| anyhow!("UFVK encode: {e:?}"))?);
     println!("UA={ua}");
+    Ok(())
+}
+
+/// A sweep may pay `ua`: a unified address of `network` with an Orchard receiver (an Ironwood
+/// output goes to the Orchard receiver). A sweep is Ironwood-only, so an address without one
+/// could not be paid shielded.
+fn check_address(network: &str, ua: &str) -> anyhow::Result<()> {
+    let decoded = match network {
+        "regtest" => UnifiedAddress::decode(&regtest(), ua),
+        "test" => UnifiedAddress::decode(&Network::TestNetwork, ua),
+        "main" => UnifiedAddress::decode(&Network::MainNetwork, ua),
+        n => bail!("unknown network {n}"),
+    }
+    .map_err(|e| anyhow!("not a unified address of the Zcash {network} network ({e})"))?;
+    if !decoded.has_orchard() {
+        bail!("the address has no Orchard receiver, so an Ironwood sweep can't pay it");
+    }
     Ok(())
 }
 
@@ -185,7 +212,8 @@ fn pools(path: &str) -> anyhow::Result<()> {
             tx.transparent_bundle().map_or(0, |b| b.vin.len()),
             tx.transparent_bundle().map_or(0, |b| b.vout.len()),
             tx.sapling_bundle().map_or(0, |b| b.shielded_spends().len()),
-            tx.sapling_bundle().map_or(0, |b| b.shielded_outputs().len()),
+            tx.sapling_bundle()
+                .map_or(0, |b| b.shielded_outputs().len()),
             tx.orchard_bundle().map_or(0, |b| b.actions().len()),
             tx.ironwood_bundle().map_or(0, |b| b.actions().len()),
         ]
@@ -225,13 +253,69 @@ fn spends(path: &str) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
-    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+    match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         [_, "ufvk", network, fvk] => ufvk(network, fvk),
         [_, "sign", input, output] => sign(input, output),
+        [_, "address", network, ua] => {
+            check_address(network, ua)?;
+            println!("ADDRESS_OK");
+            Ok(())
+        }
         [_, "pools", path] => pools(path),
         [_, "spends", path] => spends(path),
         _ => bail!(
-            "usage: ferry-zec-signer ufvk <regtest|test|main> <fvk hex> | sign <in.pczt> <out.pczt> (ask hex on stdin) | pools <pczt or tx> | spends <pczt>"
+            "usage: ferry-zec-signer ufvk <regtest|test|main> <fvk hex> | sign <in.pczt> <out.pczt> (ask hex on stdin) | address <regtest|test|main> <ua> | pools <pczt or tx> | spends <pczt>"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orchard::keys::SpendingKey;
+
+    /// The default UA of a fixed Orchard key, encoded for `network`.
+    fn orchard_ua(network: &str) -> String {
+        let sk = Option::<SpendingKey>::from(SpendingKey::from_bytes([7; 32])).unwrap();
+        let ufvk = UnifiedFullViewingKey::from_orchard_fvk(FullViewingKey::from(&sk)).unwrap();
+        let (ua, _) = ufvk
+            .default_address(UnifiedAddressRequest::ALLOW_ALL)
+            .unwrap();
+        match network {
+            "regtest" => ua.encode(&regtest()),
+            "test" => ua.encode(&Network::TestNetwork),
+            _ => ua.encode(&Network::MainNetwork),
+        }
+    }
+
+    #[test]
+    fn sweep_destinations() {
+        for net in ["regtest", "test", "main"] {
+            check_address(net, &orchard_ua(net)).unwrap();
+        }
+        // Another network's address, in every direction.
+        assert!(check_address("test", &orchard_ua("regtest")).is_err());
+        assert!(check_address("regtest", &orchard_ua("test")).is_err());
+        let err = check_address("main", &orchard_ua("test"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not a unified address of the Zcash main network"),
+            "{err}"
+        );
+        assert!(check_address("other", &orchard_ua("main")).is_err());
+        // A mainnet UA with transparent and Sapling receivers only (a ZIP 316 test vector).
+        let no_orchard = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
+        let err = check_address("main", no_orchard).unwrap_err().to_string();
+        assert!(err.contains("no Orchard receiver"), "{err}");
+        // Not a unified address at all.
+        for bad in ["", "tmWxWwf15vYpBNP82EJ2vNWSS5CaikXYbjb", "-h", "uregtest1"] {
+            assert!(check_address("regtest", bad).is_err(), "{bad:?}");
+        }
     }
 }

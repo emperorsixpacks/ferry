@@ -413,8 +413,14 @@ fn state(v: &Value) -> &str {
 async fn check_api_guard(w: &World) {
     // Each status says whether its daemon is a maker (a UI keeps a maker out of the user's own
     // daemons to swap on).
-    assert_eq!(w.get(&w.maker().url, "/api/status").await["offer"]["maker"], true);
-    assert_eq!(w.get(&w.taker().url, "/api/status").await["offer"]["maker"], false);
+    assert_eq!(
+        w.get(&w.maker().url, "/api/status").await["offer"]["maker"],
+        true
+    );
+    assert_eq!(
+        w.get(&w.taker().url, "/api/status").await["offer"]["maker"],
+        false
+    );
     let bare = reqwest::Client::new();
     let status = |r: reqwest::Response| r.status().as_u16();
     let url = format!("{}/api/status", w.z.url);
@@ -975,4 +981,91 @@ async fn dust_note_does_not_stop_z_locking() {
         entry(&z, "zec_lock_broadcast")["txid"].as_str().unwrap(),
         dust
     );
+}
+
+/// The mock chain's address of `owner`'s wallet (crates/ferryd/src/mock_zec.rs).
+fn mock_wallet(owner: &str) -> String {
+    format!("uregtest1mockwallet{}", hex::encode(owner))
+}
+
+/// Leg 1 of a route on Bitcoin (the user is a B taker buying ZEC from a Z maker): ferryd
+/// advertises routes and its shielded address, refuses a maker asking more than `max_counter`,
+/// a bad `sweep_to` and a reused label, sweeps to the address it was given, and refuses a swap
+/// whose record it can't save, leaving nothing to resume.
+#[tokio::test]
+#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+async fn route_leg_buys_zec_into_another_wallet() {
+    let w = World::start_as(1, Role::Z, &[]).await;
+    let (user, maker) = (w.taker().url.clone(), w.maker().peer_url());
+    let status = w.get(&user, "/api/status").await;
+    assert_eq!(status["features"], json!(["route"]), "{status}");
+    let addresses = w.get(&user, "/api/addresses").await;
+    assert_eq!(addresses["zec"]["address"], mock_wallet("bram"));
+
+    let to = mock_wallet("user-z");
+    let leg = json!({"maker": maker, "zec_zat": 100_000_000u64, "route": "r7/1",
+                     "sweep_to": to, "max_counter": 410_000});
+    let mut over = leg.clone();
+    over["max_counter"] = json!(409_999);
+    let (code, body) = w.post(&user, "/api/swaps", over).await;
+    assert_eq!(code, 400, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("above your limit"),
+        "{body}"
+    );
+    let mut bad = leg.clone();
+    bad["sweep_to"] = json!("utest1mockwallet7573");
+    let (code, body) = w.post(&user, "/api/swaps", bad).await;
+    assert_eq!(code, 400, "{body}");
+    assert_eq!(w.get(&user, "/api/swaps").await, json!([]));
+
+    let (code, body) = w.post(&user, "/api/swaps", leg.clone()).await;
+    assert_eq!(code, 201, "{body}\nB:\n{}", w.b.logs());
+    let id = body["id"].as_str().unwrap().to_string();
+    let (code, body) = w.post(&user, "/api/swaps", leg.clone()).await;
+    assert_eq!(
+        (code, body["code"].as_str()),
+        (409, Some("route_label_in_use")),
+        "{body}"
+    );
+    let v = w.swap(&user, &id).await;
+    assert_eq!(
+        (v["route"].as_str(), v["sweep_to"].as_str()),
+        (Some("r7/1"), Some(to.as_str()))
+    );
+    w.run_until(&id, 700, 40, |z, b| {
+        z["outcome"] == "swapped" && b["outcome"] == "swapped"
+    })
+    .await;
+    let chain: Value = serde_json::from_slice(&std::fs::read(w.zec_file()).unwrap()).unwrap();
+    assert_eq!(
+        chain["balances"]["user-z"], 100_000_000,
+        "the sweep paid user-z"
+    );
+    assert_eq!(chain["balances"]["bram"], 0, "not the sweeper's own wallet");
+    let (code, _) = w.post(&user, "/api/swaps", leg).await;
+    assert_eq!(code, 409, "a finished swap keeps its label");
+
+    // B's record can't be written: refused, nothing in memory or on disk.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let swaps = w._dir.path().join("bram").join("swaps");
+        let before = std::fs::read_dir(&swaps).unwrap().count();
+        std::fs::set_permissions(&swaps, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let (code, body) = w
+            .post(
+                &user,
+                "/api/swaps",
+                json!({"maker": maker, "zec_zat": 100_000_000u64, "route": "r8/1"}),
+            )
+            .await;
+        std::fs::set_permissions(&swaps, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(code, 500, "{body}");
+        assert_eq!(
+            w.get(&user, "/api/swaps").await.as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(std::fs::read_dir(&swaps).unwrap().count(), before);
+    }
 }

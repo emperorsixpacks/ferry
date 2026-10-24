@@ -136,6 +136,14 @@ pub struct SwapRecord {
     /// Our package at the watchtower (--watchtower), if one is configured.
     #[serde(default)]
     pub watchtower: Option<crate::tower::TowerState>,
+    /// The route label this swap was started with (crate::route): set at creation, before the
+    /// first save, so a router can find the swap again after losing the answer.
+    #[serde(default)]
+    pub route: Option<String>,
+    /// B taker only: where our sweep pays the ZEC instead of our own wallet. Set at creation,
+    /// checked by the Zcash backend, never sent to the peer.
+    #[serde(default)]
+    pub sweep_to: Option<String>,
 }
 
 impl SwapRecord {
@@ -179,6 +187,8 @@ impl SwapRecord {
             observer_btc: vec![],
             observer_zec: vec![],
             watchtower: None,
+            route: None,
+            sweep_to: None,
         }
     }
 
@@ -296,6 +306,11 @@ impl Store {
         std::fs::File::open(&self.dir)?.sync_all()
     }
 
+    /// Forget a swap that was refused before it existed (a record no one may resume).
+    pub fn remove(&self, id: &str) -> std::io::Result<()> {
+        remove_record(&self.dir, id)
+    }
+
     pub fn load_all(&self) -> std::io::Result<Vec<SwapRecord>> {
         let mut out = vec![];
         for entry in std::fs::read_dir(&self.dir)? {
@@ -310,6 +325,17 @@ impl Store {
         }
         Ok(out)
     }
+}
+
+/// Remove `<dir>/<id>.json` (and a leftover temporary file), durably; a missing file is fine.
+pub fn remove_record(dir: &Path, id: &str) -> std::io::Result<()> {
+    for name in [format!("{id}.json"), format!(".{id}.json.tmp")] {
+        match std::fs::remove_file(dir.join(name)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    std::fs::File::open(dir)?.sync_all()
 }
 
 /// Create `dir` (and parents) and restrict it to the owner.
@@ -526,6 +552,37 @@ pub(crate) mod tests {
         let mut early = late.clone();
         early.outbox.truncate(2);
         assert_eq!(early.deliverable(), 2);
+    }
+
+    /// Records written before routes still load (no label, our own wallet); a route leg's
+    /// label and sweep destination survive a save and show in the view; a refused swap's file
+    /// can be removed, and removing a missing one is fine.
+    #[test]
+    fn route_fields_load_save_and_show() {
+        let mut rec = sample_record();
+        let mut old = serde_json::to_value(&rec).unwrap();
+        let obj = old.as_object_mut().unwrap();
+        obj.remove("route");
+        obj.remove("sweep_to");
+        let loaded: SwapRecord = serde_json::from_value(old).unwrap();
+        assert_eq!((loaded.route, loaded.sweep_to), (None, None));
+
+        rec.route = Some("r0011223344556677/1".into());
+        rec.sweep_to = Some("uregtest1mockwallet757365722d7a".into());
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        store.save(&rec).unwrap();
+        let back = store.load_all().unwrap().remove(0);
+        assert_eq!(back.route.as_deref(), Some("r0011223344556677/1"));
+        let view = serde_json::to_value(crate::view::swap_view(&back)).unwrap();
+        assert_eq!(view["route"], "r0011223344556677/1");
+        assert_eq!(view["sweep_to"], "uregtest1mockwallet757365722d7a");
+        let direct = serde_json::to_value(crate::view::swap_view(&sample_record())).unwrap();
+        assert!(direct["route"].is_null() && direct["sweep_to"].is_null());
+
+        store.remove(&rec.id).unwrap();
+        assert!(store.load_all().unwrap().is_empty());
+        store.remove(&rec.id).unwrap();
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod pricefeed;
 mod quote;
 mod rebroadcast;
 mod record;
+mod route;
 mod tower;
 mod view;
 

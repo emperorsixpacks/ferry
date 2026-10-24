@@ -1,7 +1,11 @@
 //! A stand-in Zcash chain shared by daemons through one JSON file (both parties must see the
 //! same notes, and they run as separate processes). Blocks are produced by the clock: the
-//! height advances every `block_secs`. A sweep only succeeds when `ask` really is the
-//! discrete log of the joint `ak`, so the mock still checks the cryptography that matters.
+//! height advances every `block_secs`, so every daemon sharing a file must use the same
+//! `block_secs`. A sweep only succeeds when `ask` really is the discrete log of the joint `ak`,
+//! so the mock still checks the cryptography that matters.
+//!
+//! Each wallet (one per daemon `--name`) has an address, `u<network>1mockwallet<hex name>`, and
+//! a sweep can pay it instead of the sweeper's own wallet (a route's `sweep_to`).
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -39,6 +43,9 @@ struct MockTx {
     value: u64,
     owner: String,
     height: u64,
+    /// A sweep that paid another wallet (`sweep_to`): that wallet's owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paid_to: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -146,6 +153,39 @@ impl MockZecLeg {
         OsRng.fill_bytes(&mut b);
         hex::encode(b)
     }
+
+    /// `u` on main, `u<network>` elsewhere (like a real unified address's HRP).
+    fn hrp(&self) -> String {
+        if self.network == "main" {
+            "u".into()
+        } else {
+            format!("u{}", self.network)
+        }
+    }
+
+    /// The address of `owner`'s wallet on this mock chain.
+    pub fn wallet_address(&self, owner: &str) -> String {
+        format!("{}1mockwallet{}", self.hrp(), hex::encode(owner))
+    }
+
+    /// The owner a wallet address of this network names.
+    fn wallet_owner(&self, address: &str) -> Result<String, String> {
+        let bad = || {
+            format!(
+                "not a wallet address of the mock Zcash {} chain ({}1mockwallet…)",
+                self.network,
+                self.hrp()
+            )
+        };
+        let hex_name = address
+            .strip_prefix(&format!("{}1mockwallet", self.hrp()))
+            .ok_or_else(bad)?;
+        hex::decode(hex_name)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .filter(|o| !o.is_empty())
+            .ok_or_else(bad)
+    }
 }
 
 impl ZecLeg for MockZecLeg {
@@ -170,6 +210,14 @@ impl ZecLeg for MockZecLeg {
         Ok(format!("{hrp}1mock{}", hex::encode(&fvk[..24])))
     }
 
+    fn receive_address(&self) -> Option<String> {
+        Some(self.wallet_address(&self.owner))
+    }
+
+    async fn check_address(&self, address: &str) -> Result<(), String> {
+        self.wallet_owner(address).map(|_| ())
+    }
+
     async fn send(&self, fvk: &[u8; 96], amount: u64) -> Result<String, MockZecError> {
         self.with_chain(|c, height| {
             let bal = c.balances.entry(self.owner.clone()).or_default();
@@ -187,6 +235,7 @@ impl ZecLeg for MockZecLeg {
                 value: amount,
                 owner: self.owner.clone(),
                 height: height + 1,
+                paid_to: None,
             });
             Ok(txid)
         })
@@ -228,7 +277,12 @@ impl ZecLeg for MockZecLeg {
         fvk: &[u8; 96],
         ask: &[u8; 32],
         lock_value: u64,
+        to: Option<&str>,
     ) -> Result<String, MockZecError> {
+        let payee = match to {
+            Some(address) => self.wallet_owner(address).map_err(MockZecError::Rejected)?,
+            None => self.owner.clone(),
+        };
         let scalar = ferry_dleq::pallas_scalar_from_bytes(ask)
             .ok_or_else(|| MockZecError::Rejected("ask is not a canonical Pallas scalar".into()))?;
         let ak = ferry_dleq::pallas_bytes(&(ferry_dleq::spend_auth_g() * scalar));
@@ -262,7 +316,7 @@ impl ZecLeg for MockZecLeg {
                     "the sweep would leave the lock note behind".into(),
                 ));
             }
-            *c.balances.entry(self.owner.clone()).or_default() += value;
+            *c.balances.entry(payee.clone()).or_default() += value;
             let txid = Self::txid();
             c.txs.push(MockTx {
                 txid: txid.clone(),
@@ -271,6 +325,7 @@ impl ZecLeg for MockZecLeg {
                 value,
                 owner: self.owner.clone(),
                 height: height + 1,
+                paid_to: (payee != self.owner).then_some(payee),
             });
             Ok(txid)
         })
@@ -338,12 +393,75 @@ mod tests {
         assert!(b.confirmations(&txid).await.unwrap().unwrap() >= 1);
 
         let wrong = ferry_dleq::random_mutual_scalar(&mut OsRng);
-        assert!(b.sweep(&fvk, &wrong.to_repr(), 600).await.is_err());
-        assert!(b.sweep(&fvk, &ask.to_repr(), 601).await.is_err(), "lock note missing");
-        let sweep = b.sweep(&fvk, &ask.to_repr(), 600).await.unwrap();
+        assert!(b.sweep(&fvk, &wrong.to_repr(), 600, None).await.is_err());
+        assert!(
+            b.sweep(&fvk, &ask.to_repr(), 601, None).await.is_err(),
+            "lock note missing"
+        );
+        let sweep = b.sweep(&fvk, &ask.to_repr(), 600, None).await.unwrap();
         assert_eq!(z.watch(&fvk).await.unwrap()[0].spent_by, Some(sweep));
-        assert!(z.sweep(&fvk, &ask.to_repr(), 600).await.is_err(), "double spend");
+        assert!(
+            z.sweep(&fvk, &ask.to_repr(), 600, None).await.is_err(),
+            "double spend"
+        );
         assert_eq!(b.status().await.unwrap().shielded_balance, 600);
+        assert_eq!(z.status().await.unwrap().shielded_balance, 400);
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use ferry_dleq::pasta_curves::group::ff::PrimeField;
+
+    /// A route's leg 1: B's sweep pays another wallet's address (the leg-2 daemon's), which is
+    /// credited; B's own balance is untouched. An address of another network, or not a wallet
+    /// address at all, is refused before anything moves.
+    #[tokio::test]
+    async fn a_sweep_can_pay_another_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zec.json");
+        let z = MockZecLeg::new(path.clone(), "maker-z".into(), 0.05, 1_000).unwrap();
+        let b = MockZecLeg::new(path.clone(), "user-b".into(), 0.05, 0).unwrap();
+        let l2 = MockZecLeg::new(path.clone(), "user-z".into(), 0.05, 0).unwrap();
+        let other_net = MockZecLeg::new(path, "x".into(), 0.05, 0)
+            .unwrap()
+            .with_network("test");
+
+        let to = l2.receive_address().unwrap();
+        assert_eq!(to, format!("uregtest1mockwallet{}", hex::encode("user-z")));
+        assert_eq!(b.check_address(&to).await, Ok(()));
+        assert!(other_net.check_address(&to).await.is_err(), "wrong network");
+        assert!(other_net
+            .check_address(&other_net.receive_address().unwrap())
+            .await
+            .is_ok());
+        for bad in [
+            "",
+            "uregtest1mockwallet",
+            "uregtest1mockwalletzz",
+            "uregtest1mock0011",
+            "utest1mockwallet7573",
+        ] {
+            assert!(b.check_address(bad).await.is_err(), "{bad:?}");
+        }
+
+        let ask = ferry_dleq::random_mutual_scalar(&mut OsRng);
+        let mut fvk = [0u8; 96];
+        fvk[..32].copy_from_slice(&ferry_dleq::pallas_bytes(
+            &(ferry_dleq::spend_auth_g() * *ask),
+        ));
+        z.send(&fvk, 600).await.unwrap();
+        assert!(
+            b.sweep(&fvk, &ask.to_repr(), 600, Some("utest1mockwallet7573"))
+                .await
+                .is_err(),
+            "a bad destination moves nothing"
+        );
+        let txid = b.sweep(&fvk, &ask.to_repr(), 600, Some(&to)).await.unwrap();
+        assert_eq!(z.watch(&fvk).await.unwrap()[0].spent_by, Some(txid));
+        assert_eq!(l2.status().await.unwrap().shielded_balance, 600);
+        assert_eq!(b.status().await.unwrap().shielded_balance, 0);
         assert_eq!(z.status().await.unwrap().shielded_balance, 400);
     }
 }

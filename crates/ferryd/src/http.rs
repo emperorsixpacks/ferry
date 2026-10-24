@@ -30,8 +30,12 @@ use crate::view;
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let code = StatusCode::from_u16(self.0).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        (code, Json(json!({ "error": self.1 }))).into_response()
+        let status = StatusCode::from_u16(self.0).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let body = match self.code() {
+            Some(code) => json!({ "error": self.1, "code": code }),
+            None => json!({ "error": self.1 }),
+        };
+        (status, Json(body)).into_response()
     }
 }
 
@@ -150,13 +154,18 @@ struct CreateSwap {
     /// A firm quote from this maker (crate::quote), as `POST /peer/quote` returned it.
     #[serde(default)]
     quote: Option<crate::quote::SignedQuote>,
+    /// A route leg's label, sweep destination and price limit (crate::route).
+    #[serde(flatten)]
+    route: crate::route::RouteArgs,
 }
 
 async fn create_swap<L: ZecLeg + 'static>(
     State(d): D<L>,
     ApiJson(req): ApiJson<CreateSwap>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let id = d.create_swap(req.maker, req.zec_zat, req.quote).await?;
+    let id = d
+        .create_swap(req.maker, req.zec_zat, req.quote, req.route)
+        .await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
