@@ -24,7 +24,7 @@ pub use secret::Secret32;
 pub use session::Session;
 pub use swap::{accept, Action, ChainEvent, Event, Proposal, Swap};
 pub use z::{ZState, ZSwap};
-pub use zec::{ZecLeg, ZecNote};
+pub use zec::{ZecLeg, ZecNote, ZecStatus};
 
 pub use ferry_btc::{Role, Spend};
 

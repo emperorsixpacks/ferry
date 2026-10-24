@@ -1,0 +1,193 @@
+//! HTTP routes: the UI API (docs/API.md) and the peer protocol.
+//!
+//! Peer protocol (maker side; the taker initiates every request):
+//! - `GET  /peer/offer`                       terms, rate and the maker's role
+//! - `POST /peer/swaps`                       `{envelope: Propose, taker_url}` → `Accept` envelope
+//! - `POST /peer/swaps/:id/messages`          one taker envelope (retries are acknowledged once)
+//! - `GET  /peer/swaps/:id/messages?after=n`  the maker's envelopes from index n
+
+use std::convert::Infallible;
+use std::sync::Arc;
+
+use axum::extract::{FromRequest, Path, Query, Request, State};
+use axum::http::StatusCode;
+use axum::response::sse::{Event as SseFrame, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use ferry_core::{Envelope, ZecLeg};
+use futures_util::stream::{self, Stream, StreamExt};
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde_json::json;
+use tokio_stream::wrappers::BroadcastStream;
+use tower_http::cors::CorsLayer;
+
+use crate::config::ProposeRequest;
+use crate::daemon::{ApiError, Daemon, SseEvent};
+use crate::view;
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let code = StatusCode::from_u16(self.0).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (code, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+type D<L> = State<Arc<Daemon<L>>>;
+
+/// `Json` whose rejections are `{"error": ...}` bodies like every other error.
+struct ApiJson<T>(T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for ApiJson<T> {
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, ApiError> {
+        Json::<T>::from_request(req, state)
+            .await
+            .map(|Json(v)| ApiJson(v))
+            .map_err(|e| ApiError(400, e.body_text()))
+    }
+}
+
+pub fn router<L: ZecLeg + 'static>(daemon: Arc<Daemon<L>>) -> Router {
+    Router::new()
+        .route("/api/status", get(status::<L>))
+        .route("/api/swaps", get(list_swaps::<L>).post(create_swap::<L>))
+        .route("/api/swaps/{id}", get(get_swap::<L>))
+        .route("/api/swaps/{id}/fault", post(fault::<L>))
+        .route("/api/events", get(events::<L>))
+        .route("/peer/offer", get(offer::<L>))
+        .route("/peer/swaps", post(propose::<L>))
+        .route(
+            "/peer/swaps/{id}/messages",
+            post(deliver::<L>).get(outbox::<L>),
+        )
+        .fallback(|| async { ApiError(404, "not found".into()) })
+        .layer(CorsLayer::permissive())
+        .with_state(daemon)
+}
+
+async fn status<L: ZecLeg + 'static>(State(d): D<L>) -> Result<Json<view::StatusView>, ApiError> {
+    if let Some(s) = d.state.lock().await.status.clone() {
+        return Ok(Json(s));
+    }
+    d.status_view()
+        .await
+        .map(Json)
+        .map_err(|e| ApiError(503, e.to_string()))
+}
+
+async fn list_swaps<L: ZecLeg + 'static>(State(d): D<L>) -> Json<Vec<view::SwapView>> {
+    Json(
+        d.state
+            .lock()
+            .await
+            .swaps
+            .values()
+            .map(view::swap_view)
+            .collect(),
+    )
+}
+
+async fn get_swap<L: ZecLeg + 'static>(
+    State(d): D<L>,
+    Path(id): Path<String>,
+) -> Result<Json<view::SwapView>, ApiError> {
+    let st = d.state.lock().await;
+    st.swaps
+        .get(&id)
+        .map(|r| Json(view::swap_view(r)))
+        .ok_or(ApiError(404, "no such swap".into()))
+}
+
+#[derive(Deserialize)]
+struct CreateSwap {
+    maker: String,
+    zec_zat: u64,
+}
+
+async fn create_swap<L: ZecLeg + 'static>(
+    State(d): D<L>,
+    ApiJson(req): ApiJson<CreateSwap>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let id = d.create_swap(req.maker, req.zec_zat).await?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+}
+
+#[derive(Deserialize)]
+struct Fault {
+    fault: String,
+}
+
+async fn fault<L: ZecLeg + 'static>(
+    State(d): D<L>,
+    Path(id): Path<String>,
+    ApiJson(f): ApiJson<Fault>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    d.fault(&id, &f.fault).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn events<L: ZecLeg + 'static>(
+    State(d): D<L>,
+) -> Sse<impl Stream<Item = Result<SseFrame, Infallible>>> {
+    // Subscribe before taking the snapshot so nothing falls between the two.
+    let rx = d.events.subscribe();
+    let mut initial = vec![];
+    {
+        let st = d.state.lock().await;
+        if let Some(s) = &st.status {
+            initial.push(SseEvent {
+                event: "status",
+                data: serde_json::to_string(s).expect("serializes"),
+            });
+        }
+        for rec in st.swaps.values() {
+            let data = serde_json::to_string(&view::swap_view(rec)).expect("serializes");
+            initial.push(SseEvent {
+                event: "swap",
+                data,
+            });
+        }
+    }
+    let live = BroadcastStream::new(rx).filter_map(|m| async move { m.ok() });
+    let frames = stream::iter(initial)
+        .chain(live)
+        .map(|e| Ok(SseFrame::default().event(e.event).data(e.data)));
+    Sse::new(frames).keep_alive(KeepAlive::default())
+}
+
+async fn offer<L: ZecLeg + 'static>(State(d): D<L>) -> Json<crate::config::Offer> {
+    Json(d.offer.clone())
+}
+
+async fn propose<L: ZecLeg + 'static>(
+    State(d): D<L>,
+    ApiJson(req): ApiJson<ProposeRequest>,
+) -> Result<(StatusCode, Json<Envelope>), ApiError> {
+    let reply = d.accept_proposal(req).await?;
+    Ok((StatusCode::CREATED, Json(reply)))
+}
+
+async fn deliver<L: ZecLeg + 'static>(
+    State(d): D<L>,
+    Path(id): Path<String>,
+    ApiJson(env): ApiJson<Envelope>,
+) -> Result<Json<crate::config::Delivery>, ApiError> {
+    d.peer_deliver(&id, env).await.map(Json)
+}
+
+#[derive(Deserialize)]
+struct After {
+    #[serde(default)]
+    after: usize,
+}
+
+async fn outbox<L: ZecLeg + 'static>(
+    State(d): D<L>,
+    Path(id): Path<String>,
+    Query(q): Query<After>,
+) -> Result<Json<Vec<Envelope>>, ApiError> {
+    d.peer_outbox(&id, q.after).await.map(Json)
+}

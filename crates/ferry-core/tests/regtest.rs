@@ -10,7 +10,7 @@ use ferry_btc::bitcoin::{Address, Amount, Network, OutPoint, Txid};
 use ferry_btc::rpc::BitcoinRpc;
 use ferry_core::{
     accept, Action, BState, ChainEvent, Envelope, Event, Message, Proposal, Role, Spend, Swap,
-    SwapParams, ZState, ZecLeg, ZecNote,
+    SwapParams, ZState, ZecLeg, ZecNote, ZecStatus,
 };
 use rand_core::{OsRng, RngCore};
 
@@ -63,6 +63,15 @@ impl MockZec {
 impl ZecLeg for MockZec {
     type Error = MockError;
 
+    async fn status(&self) -> Result<ZecStatus, MockError> {
+        let s = self.0.lock().unwrap();
+        Ok(ZecStatus {
+            network: "regtest".into(),
+            height: s.height.into(),
+            shielded_balance: 0,
+        })
+    }
+
     fn joint_address(&self, fvk: &[u8; 96]) -> Result<String, MockError> {
         Ok(format!("uregtest-mock-{}", hex::encode(&fvk[..8])))
     }
@@ -78,10 +87,17 @@ impl ZecLeg for MockZec {
         let s = self.0.lock().unwrap();
         Ok(s.notes
             .iter()
-            .filter(|(f, ..)| f == fvk)
-            .map(|(_, value, h)| ZecNote {
+            .enumerate()
+            .filter(|(_, (f, ..))| f == fvk)
+            .map(|(i, (_, value, h))| ZecNote {
+                txid: format!("zsend-{}", i + 1),
                 value: *value,
                 confirmations: s.height - h,
+                spent_by: s
+                    .sweeps
+                    .iter()
+                    .find(|(_, f, _)| f == fvk)
+                    .map(|(t, ..)| t.clone()),
             })
             .collect())
     }

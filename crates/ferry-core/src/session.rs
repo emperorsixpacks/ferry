@@ -80,6 +80,13 @@ impl Session {
         joint::joint_ak_bytes(&z_p, &b_p)
     }
 
+    /// σ ∈ {1, −1} with `ak = σ·(Z_p + B_p)`.
+    pub fn joint_sigma(&self) -> Result<i8, Error> {
+        let (z_p, b_p) = self.pallas_pubs();
+        let (_, negated) = joint::normalize_ak(&(z_p + b_p))?;
+        Ok(if negated { -1 } else { 1 })
+    }
+
     /// Joint full viewing key `ak || nk || rivk`.
     pub fn joint_fvk(&self) -> Result<[u8; 96], Error> {
         let (z_p, b_p) = self.pallas_pubs();

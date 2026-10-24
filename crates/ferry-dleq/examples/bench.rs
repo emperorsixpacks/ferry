@@ -1,6 +1,5 @@
 //! Prove/verify timing: `cargo run --release -p ferry-dleq --example bench`
 
-
 use std::time::Instant;
 
 use ferry_dleq::*;

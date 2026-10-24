@@ -4,6 +4,7 @@ members = [
     "crates/ferry-dleq",
     "crates/ferry-btc",
     "crates/ferry-core",
+    "crates/ferryd",
     # "crates/ferry-zec",  (added once the Zcash spike lands)
 ]
 exclude = ["spikes", "third_party", "vendor"]

@@ -1,19 +1,38 @@
 //! What the daemon's Zcash wallet integration must provide. Implemented in `ferry-zec`.
+//!
+//! Wallet location, lightwalletd/Zaino endpoint and similar configuration belong to the
+//! implementing type's constructor, not to this trait.
 
 use std::future::Future;
 
 /// A note received by the joint address.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ZecNote {
+    /// Transaction that created the note.
+    pub txid: String,
     /// zatoshi
     pub value: u64,
     pub confirmations: u32,
+    /// Transaction that spent the note, if the viewing key has seen its nullifier.
+    pub spent_by: Option<String>,
+}
+
+/// Our own wallet and chain, for status displays.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ZecStatus {
+    /// e.g. "regtest", "test", "main"
+    pub network: String,
+    pub height: u64,
+    /// Spendable Ironwood balance of our own wallet (zatoshi).
+    pub shielded_balance: u64,
 }
 
 /// Zcash (Ironwood) operations, keyed by the joint full viewing key from
 /// [`crate::joint::joint_fvk_bytes`] (`ak || nk || rivk`, Orchard encoding).
-pub trait ZecLeg {
+pub trait ZecLeg: Send + Sync {
     type Error: std::error::Error + Send + Sync + 'static;
+
+    fn status(&self) -> impl Future<Output = Result<ZecStatus, Self::Error>> + Send;
 
     /// Encoded single-use unified address of the joint viewing key.
     fn joint_address(&self, fvk: &[u8; 96]) -> Result<String, Self::Error>;
@@ -40,10 +59,17 @@ pub trait ZecLeg {
         ask: &[u8; 32],
     ) -> impl Future<Output = Result<String, Self::Error>> + Send;
 
-    /// Confirmations of a transaction sent by [`ZecLeg::send`] or [`ZecLeg::sweep`]
-    /// (`Some(0)` while in the mempool, `None` if unknown).
+    /// Confirmations of a transaction (`Some(0)` while in the mempool, `None` if unknown).
     fn confirmations(
         &self,
         txid: &str,
     ) -> impl Future<Output = Result<Option<u32>, Self::Error>> + Send;
+
+    /// One line on what a public chain observer sees of `txid` (for the demo UI).
+    fn describe_tx(
+        &self,
+        _txid: &str,
+    ) -> impl Future<Output = Result<Option<String>, Self::Error>> + Send {
+        async { Ok(None) }
+    }
 }
