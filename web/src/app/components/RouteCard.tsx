@@ -186,7 +186,7 @@ export function RouteCard({ from, to, onChange, blocked }: { from: PairId; to: P
                 <Fact label="You get" value={q ? `About ${unitsText(q.out, to)}, and at least ${unitsText(q.minNet, to)}` : "–"} />
                 <Fact label="Typical time" value={`${PAUSE[pause].total[0].toUpperCase()}${PAUSE[pause].total.slice(1)}`} />
                 <Fact label="If it fails" value={`If swap 1 stops, your ${a.ticker} comes back. If swap 2 can't run, you keep the ZEC, shielded.`} />
-                <Fact label="Privacy" value={`Nothing on either chain links the ${a.ticker} you sell to the ${c.ticker} you get.`} />
+                <Fact label="Privacy" value={`No transaction links the ${a.ticker} you sell to the ${c.ticker} you get. Only the amounts and the timing could hint at it, and the pause blurs the timing.`} />
               </dl>
             </Section>
           </Sheet>
@@ -315,7 +315,7 @@ function Confirm({ open, onClose, from, to, q, pause, busy, onStart }: { open: b
             Two swaps, one after the other: {PAUSE[pause].total} in all. You can close this page.
           </Point>
           <Point icon={<ShieldCheck size={18} weight="regular" />} title="Your coins pass through the shielded pool">
-            Your {a} becomes shielded ZEC, then {c}. Nothing on either chain connects the two.
+            Your {a} becomes shielded ZEC, then {c}. No transaction links the two; only the amounts and the timing could hint at it.
           </Point>
           <Point icon={<Hourglass size={18} weight="regular" />} title="The waiting is on purpose">
             {pause === "off" ? "You turned the pause off, so the two swaps run back to back. That's faster, but easier to match up." : "A random pause between the two swaps makes them harder to match up."}

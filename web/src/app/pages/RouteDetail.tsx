@@ -94,7 +94,7 @@ function Body({ v }: { v: RouteView }) {
   else if (v.state === "pausing") head = { tone: "live", title: `Swapping ${a} for ${c} privately`, sub: "Swap 1 is done. Your ZEC is resting in your shielded wallet." };
   else if (v.state === "leg2") head = { tone: "live", title: `Swapping ${a} for ${c} privately`, sub: `Swap 2 of 2 is selling your ZEC for ${c}.` };
   else if (holding) head = { tone: "warn", title: `You hold ${zecText(v.zec.held_zat)}`, sub: `${why(v)}. Your ZEC is safe in your shielded wallet. Nothing is lost.` };
-  else if (v.state === "done") head = { tone: "good", title: `You received ${amt.outShort}`, sub: `${amt.inShort} went in, through shielded ZEC. Nothing on either chain links the two.` };
+  else if (v.state === "done") head = { tone: "good", title: `You received ${amt.outShort}`, sub: `${amt.inShort} went in, through shielded ZEC. No transaction links the two.` };
   else if (v.outcome === "refunded") head = { tone: "neutral", title: `Your ${a} is back`, sub: "The first swap didn't finish in time, so it was undone. The second never started." };
   else if (v.outcome === "punished") head = { tone: "bad", title: "The swap didn't complete", sub: `Your Ferry node was offline past the deadline, so the ${a} went to your partner.` };
   else head = { tone: "neutral", title: "Nothing moved", sub: (v.note || "The private swap didn't start.").replace(/\bmaker\b/gi, "partner") };
