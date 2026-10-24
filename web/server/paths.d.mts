@@ -20,6 +20,9 @@ export interface PathCtx {
   ready: boolean;
   sell: string[];
   buy: string[];
+  // of those, the pairs whose daemon that way isn't answering, and the ones not heard from yet
+  offline?: { sell: string[]; buy: string[] };
+  waiting?: { sell: string[]; buy: string[] };
   // the kind of network each pair's daemons run on (swapNet); a pair missing shows no time
   nets?: Partial<Record<string, NetKind>>;
   routes: { from: string[]; to: string[] } | null;
@@ -87,5 +90,6 @@ export function aboutText(minutes: [number, number]): string;
 export function resolvePath(sell: string, buy: string, ctx: PathCtx | null, opts?: { pause?: Pause; public?: boolean }): Path;
 export function stepWords(steps: Step[], ctx?: PathCtx | null): string;
 export function present(ctx: PathCtx | null, pair: string): boolean;
-export function defaultPick(ctx: PathCtx | null): { sell: Token; buy: Token };
+// null: a daemon it would pick hasn't answered yet
+export function defaultPick(ctx: PathCtx | null): { sell: Token; buy: Token } | null;
 export function pickOn(pick: { sell: Token; buy: Token }, side: Side, token: Token): { sell: Token; buy: Token };

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { usePoll, useWaited } from "./poll";
 import {
   DAEMONS,
   LOCAL_ROLE,
@@ -24,15 +25,28 @@ import { CHAIN_NAMES, chainOfNetwork } from "@/format";
 // whatever pair they run; the UI server may front another daemon per pair and direction
 // (GET /api/pairs). Each is probed now and then for its status, so the token picker can show
 // which pairs are up and at what rate.
+//
+// Each daemon is probed on its own (lib/poll), and nothing waits for all of them: a daemon that
+// hangs is only that pair's problem. The page waits FIRST_WAIT_MS at most for the first answers it
+// needs (the main daemons, whose pair only their status says), then shows what it has; a daemon
+// still silent then is offline until it answers ("Partner offline" in the picker and on the card),
+// and is asked again every RETRY_MS, so it comes back by itself.
 
 const PROBE_MS = 20_000;
+const RETRY_MS = 5_000;
+const FIRST_WAIT_MS = 3_000;
 
 // One side of a pair: the daemon's base path (null: nothing on this server swaps this pair this
-// way) and its last status (null while unknown or unreachable).
+// way), its last status (null while unknown or unreachable), and whether it answers: "waiting" for
+// its first answer (within FIRST_WAIT_MS), "up", or "down" (it failed, or stayed silent).
 export interface Side {
   daemon: string | null;
   status: Status | null;
+  state: "waiting" | "up" | "down";
 }
+
+// the side's daemon isn't answering
+export const isOffline = (s: Side | null | undefined) => !!s?.daemon && s.state === "down";
 
 export interface Pair {
   id: PairId;
@@ -43,10 +57,13 @@ export interface Pair {
 export interface Pairs {
   // GET /api/pairs has answered (an older server: its own side of the main pair only)
   ready: boolean;
-  // ... and every daemon it named was asked once: which pair each side swaps is known
+  // ... and the main daemons have answered, failed, or been waited for long enough: which pairs
+  // this server swaps is known (another pair's daemon is known from GET /api/pairs alone)
   probed: boolean;
   info: PairsInfo;
   list: Pair[];
+  // whether a daemon (by base path) answers, as its probes say
+  state: (daemon: string) => Side["state"];
 }
 
 const NONE: PairsInfo = { sell: [], buy: [], main: { sell: false, buy: false }, routes: null, own: false };
@@ -73,8 +90,6 @@ export const canSwap = (info: PairsInfo, dir: Direction): boolean =>
 
 export function usePairs(): Pairs {
   const [info, setInfo] = useState<PairsInfo | null>(null);
-  const [probes, setProbes] = useState<Record<string, Status | null>>({});
-  const [probedKey, setProbedKey] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -95,35 +110,24 @@ export function usePairs(): Pairs {
       ]
     : [];
   const key = bases.join(",");
-  useEffect(() => {
-    if (!bases.length) return;
-    let alive = true;
-    const probe = async () => {
-      const got = await Promise.all(bases.map((b) => getStatus(b).catch(() => null)));
-      if (!alive) return;
-      setProbes(Object.fromEntries(bases.map((b, i) => [b, got[i]])));
-      setProbedKey(key);
-    };
-    probe();
-    const id = setInterval(probe, PROBE_MS);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  const probes = usePoll(bases, getStatus, { every: PROBE_MS, retry: RETRY_MS });
+  const waited = useWaited(key, FIRST_WAIT_MS);
+  const stateOf = (b: string): Side["state"] => (b in probes.errors ? "down" : b in probes.data ? "up" : waited ? "down" : "waiting");
+  const statusOf = (b: string): Status | null => (stateOf(b) === "up" ? probes.data[b] : null);
 
-  const mainZ = probes[DAEMONS.Z] ?? null;
-  const mainB = probes[DAEMONS.B] ?? null;
+  // which pair a main daemon swaps, and whether an "auto" one is a maker: its last answer, kept while
+  // it is down, so its pair stays on the page as offline rather than vanishing
+  const mainZ = probes.data[DAEMONS.Z] ?? null;
+  const mainB = probes.data[DAEMONS.B] ?? null;
   // "auto": a main daemon is one of the user's own unless its status says it is a maker (the
   // usual demo's B makes offers; the user can't buy ZEC through it)
   const resolve = (v: boolean | "auto", s: Status | null) => (v === "auto" ? s?.offer.maker !== true : v);
   const raw = info ?? NONE;
   const i: PairsInfo = { ...raw, main: { sell: resolve(raw.main.sell, mainZ), buy: resolve(raw.main.buy, mainB) } };
   const side = (id: PairId, own: boolean, base: string, main: boolean, mainBase: string, mainStatus: Status | null): Side => {
-    if (own) return { daemon: base, status: probes[base] ?? null };
-    if (main && pairOf(mainStatus) === id) return { daemon: mainBase, status: mainStatus };
-    return { daemon: null, status: null };
+    if (own) return { daemon: base, status: statusOf(base), state: stateOf(base) };
+    if (main && pairOf(mainStatus) === id) return { daemon: mainBase, status: statusOf(mainBase), state: stateOf(mainBase) };
+    return { daemon: null, status: null, state: "down" };
   };
   const list = PAIR_IDS.map(
     (id): Pair => ({
@@ -132,7 +136,17 @@ export function usePairs(): Pairs {
       buy: side(id, i.buy.includes(id), pairBuyDaemon(id), i.main.buy !== false, DAEMONS.B, mainB),
     }),
   );
-  return { ready: info !== null, probed: info !== null && (!bases.length || probedKey === key), info: i, list };
+  // the main daemons say which pairs they swap: the page waits for them (FIRST_WAIT_MS at most); the
+  // other pairs' daemons are known from GET /api/pairs and fill in as they answer
+  const mains = bases.filter((b) => b === DAEMONS.Z || b === DAEMONS.B);
+  return { ready: info !== null, probed: info !== null && mains.every((b) => stateOf(b) !== "waiting"), info: i, list, state: stateOf };
+}
+
+// The pairs whose daemon is offline each way, and the ones not heard from yet, for the card's
+// first coins (server/paths.mjs defaultPick) and the picker.
+export function pairStates(list: Pair[]): { offline: { sell: PairId[]; buy: PairId[] }; waiting: { sell: PairId[]; buy: PairId[] } } {
+  const ids = (dir: Direction, state: Side["state"]) => list.filter((p) => p[dir].daemon && p[dir].state === state).map((p) => p.id);
+  return { offline: { sell: ids("sell", "down"), buy: ids("buy", "down") }, waiting: { sell: ids("sell", "waiting"), buy: ids("buy", "waiting") } };
 }
 
 // How a pair is named to people. title: the picker row ("Bitcoin · BTC", "USDC on Base",

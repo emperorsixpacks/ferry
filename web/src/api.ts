@@ -10,6 +10,9 @@ export interface Status {
   // balance as a decimal string. Read it with counterBalance().
   // eth_wei (EVM): the account's ETH for gas, as a decimal string.
   balances: { zec_shielded_zat: number; btc_sat: number; token_units?: string; eth_wei?: string };
+  // what a new swap (or a withdrawal) may use: the balances less what live swaps hold, and for a Z
+  // node's ZEC less the notes their locks may take (ferryd's capacity; older daemons leave it out)
+  free?: { zec_shielded_zat: number; btc_sat: number; token_units?: string; eth_wei?: string };
   chains: {
     // the coin swapped against ZEC ("btc" | "ltc"); older daemons leave it out (btc)
     // coin "usdc": an EVM daemon (--counter evm); `time` is the latest block's unix time
@@ -136,21 +139,43 @@ export const LOCAL_ROLE: Role = (() => {
   return v === "B" ? "B" : "Z";
 })();
 
+// What the UI server says when a daemon doesn't answer in time (504, "code": "timeout"), and what a
+// read says when it gets no answer at all within READ_TIMEOUT_MS. The server answers for a silent
+// daemon within 10 s (server/upstream.mjs), so the page's own limit only catches a server that doesn't.
+export const TIMEOUT_TEXT = "The daemon didn't answer in time.";
+const READ_TIMEOUT_MS = 15_000;
+
 async function call<T>(base: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(base + path, body === undefined ? undefined : {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const error = (data as { error?: string }).error;
-    if (res.status === 401) throw new Error("The daemon refused the API token. Start the UI from a shell that has sourced the .demo/env file infra/demo.sh wrote (cd web && source ../.demo/env && pnpm dev:ui), so the proxy can send FERRY_Z_TOKEN and FERRY_B_TOKEN.");
-    if (error) throw new Error(error);
-    // no JSON body: the dev proxy answering for a daemon that isn't running
-    throw new Error(res.status >= 500 ? "Can't reach the daemon. Is it running?" : `${res.status} ${res.statusText}`);
+  // a read gives up on its own after READ_TIMEOUT_MS; a POST (a swap start) waits for the server's answer
+  const ctl = body === undefined ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), READ_TIMEOUT_MS) : undefined;
+  try {
+    const res = await fetch(
+      base + path,
+      ctl
+        ? { signal: ctl.signal }
+        : {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          },
+    );
+    const data = await res.json().catch(() => ({}));
+    if (ctl?.signal.aborted) throw new Error(TIMEOUT_TEXT);
+    if (!res.ok) {
+      const error = (data as { error?: string }).error;
+      if (res.status === 401) throw new Error("The daemon refused the API token. Start the UI from a shell that has sourced the .demo/env file infra/demo.sh wrote (cd web && source ../.demo/env && pnpm dev:ui), so the proxy can send FERRY_Z_TOKEN and FERRY_B_TOKEN.");
+      if (error) throw new Error(error);
+      // no JSON body: the dev proxy answering for a daemon that isn't running
+      throw new Error(res.status >= 500 ? "Can't reach the daemon. Is it running?" : `${res.status} ${res.statusText}`);
+    }
+    return data as T;
+  } catch (e) {
+    if (ctl?.signal.aborted) throw new Error(TIMEOUT_TEXT);
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-  return data as T;
 }
 
 // `daemon` is a base path: DAEMONS[role] or pairDaemon(id)

@@ -9,6 +9,7 @@ import { extraDaemons, mainSide, pairsBody } from "./server/pairs.mjs";
 import { buildRoute, routerLink } from "./server/routes.mjs";
 import { ONE_CLICK_PUBKEY, ONE_CLICK_URL, nearDesk, nearRoutes, oneClick, ownDaemons, requestJson } from "./server/near.mjs";
 import { ownProblem, receiveFields, withdrawBody } from "./server/own.mjs";
+import { READ_MS, ROUTER_TIMEOUT_TEXT, START_MS, TIMEOUT_TEXT, deadline, limitFor, timeoutAnswer } from "./server/upstream.mjs";
 
 // The UI talks to the user's ferryd daemons: Z sells ZEC, B buys it. In dev and preview the main
 // two are proxied under /daemon/z and /daemon/b: the proxy adds each daemon's API token
@@ -31,6 +32,11 @@ const TOKENS: Record<string, string | undefined> = {
   ...Object.fromEntries(EXTRA.map((d) => [d.key, process.env[`FERRY_${d.tokenName}_TOKEN`]])),
 };
 const TARGETS: Record<string, string> = { z: Z_URL, b: B_URL, ...Object.fromEntries(EXTRA.map((d) => [d.key, d.url])) };
+// How long the proxy waits for a daemon or the router, as server/prod.mjs: a read (and an event
+// stream's start) FERRY_READ_TIMEOUT_MS (10 s), anything else FERRY_START_TIMEOUT_MS (120 s); then
+// the browser gets 504 and the request to the daemon is closed (server/upstream.mjs). So one daemon
+// that hangs instead of failing can't hold up the page.
+const LIMITS = { read: Number(process.env.FERRY_READ_TIMEOUT_MS) || READ_MS, start: Number(process.env.FERRY_START_TIMEOUT_MS) || START_MS };
 
 // keyed by an exact pattern: a plain "/daemon/b" prefix would also catch /daemon/btc and
 // /daemon/b-btc
@@ -43,6 +49,7 @@ function daemon(key: string, target: string, token: string | undefined): ProxyOp
     // When a daemon dies mid-stream the proxy would otherwise keep the browser's /api/events
     // response open forever, and the UI would never notice. End it so EventSource reconnects.
     configure: (proxy) => {
+      proxy.on("proxyReq", (proxyReq, req, res) => void deadline(proxyReq, res, { ms: limitFor(req.method, LIMITS), answer: timeoutAnswer(TIMEOUT_TEXT) }));
       proxy.on("proxyRes", (proxyRes, _req, res) => {
         proxyRes.on("close", () => {
           if (!res.writableEnded) res.destroy();
@@ -74,9 +81,10 @@ if (ROUTER_URL) {
     rewrite: (p: string) => p.replace(/^\/router/, ""),
     configure: (p) => {
       // read per request: the token file may change when the router restarts
-      p.on("proxyReq", (req) => {
+      p.on("proxyReq", (proxyReq, req, res) => {
         const t = routerToken();
-        if (t) req.setHeader("authorization", `Bearer ${t}`);
+        if (t) proxyReq.setHeader("authorization", `Bearer ${t}`);
+        deadline(proxyReq, res, { ms: limitFor(req.method, LIMITS), answer: timeoutAnswer(ROUTER_TIMEOUT_TEXT) });
       });
       p.on("proxyRes", (proxyRes, _req, res) => {
         proxyRes.on("close", () => {
@@ -254,14 +262,15 @@ function makers(): Plugin {
       }
       const maker = dir.resolve(body.maker);
       if (!maker) return send(res, 400, { error: "Unknown maker. Pick one from the list." });
-      // a firm quote, named by id: the signed quote this server got from that maker itself
-      const quote = body.quote == null ? null : desk.find(dir.makers.indexOf(maker), body.quote);
       // where the coins go, on the person's own node (own.mjs): payout_to on a sell, sweep_to on a buy
       const side = m[1] === "z" ? "sell" : m[1] === "b" ? "buy" : (EXTRA.find((d) => d.key === m[1])?.side ?? "sell");
       const receive = own(req) ? receiveFields(body, side) : { json: "" };
       if (receive.error) return send(res, 400, { error: receive.error });
+      // a firm quote, named by id: the signed quote this server got from that maker itself, claimed
+      // for this start alone (a fresh one if another start took it: server/quotes.mjs claim())
+      const zat = Number(body.zec_zat);
+      const quote = body.quote == null ? null : await desk.claim(dir.makers.indexOf(maker), body.quote, Number.isSafeInteger(zat) ? zat : 0);
       if (body.quote != null && !quote) return send(res, 400, { error: "That firm price has expired. Get a new one." });
-      if (quote) desk.take(quote);
       const headers: Record<string, string> = { "content-type": "application/json" };
       const token = TOKENS[m[1]];
       if (token) headers.authorization = `Bearer ${token}`;
@@ -273,7 +282,8 @@ function makers(): Plugin {
           body: quote
             ? `{"maker":${JSON.stringify(maker.url)},"zec_zat":${JSON.stringify(body.zec_zat)},"quote":${quote.json}${receive.json}}`
             : `{"maker":${JSON.stringify(maker.url)},"zec_zat":${JSON.stringify(body.zec_zat)}${receive.json}}`,
-          signal: AbortSignal.timeout(30_000),
+          // a start's own limit, longer than ferryd's longest wait in one (server/upstream.mjs)
+          signal: AbortSignal.timeout(LIMITS.start),
         });
         res.statusCode = up.status;
         res.setHeader("content-type", up.headers.get("content-type") ?? "application/json");
@@ -286,8 +296,9 @@ function makers(): Plugin {
           /* not JSON */
         }
         res.end(busy ? JSON.stringify({ error: "Every partner is busy right now. Try again once one of their swaps finishes.", code: "busy" }) : text);
-      } catch {
-        send(res, 502, { error: "Can't reach the daemon. Is it running?" });
+      } catch (e) {
+        if ((e as Error).name === "TimeoutError") send(res, 504, { error: TIMEOUT_TEXT, code: "timeout" });
+        else send(res, 502, { error: "Can't reach the daemon. Is it running?" });
       }
     });
   };

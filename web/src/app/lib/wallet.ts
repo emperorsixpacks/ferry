@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { getStatus, getSwaps, getWithdrawals, pairChain, type Addresses, type PairId, type SendAsset, type Status, type SwapView, type Withdrawal } from "@/api";
 import { CHAIN_NAMES, chainOfNetwork, coinOf, isMainnet, networkLabel } from "@/format";
 import { isEvmAddress, sameAddress } from "./browserWallet";
 import { useLocal } from "./daemon";
 import { pairName } from "./pairs";
+import { usePoll } from "./poll";
 import type { ReceiveCoin } from "./receive";
 
 // The node's wallet, for /wallet: every daemon the UI server fronts holds coins of its own (a Z
@@ -32,45 +33,6 @@ export function useNodes(): Node[] {
       }
     return [...seen.values()];
   }, [d.pairs, d.daemon, d.status]);
-}
-
-// Polls `load` for each base every `ms` (and when the bases change): base → its last answer, or the
-// error. `on` false: nothing.
-function usePoll<T>(bases: string[], load: (base: string) => Promise<T>, ms: number, on = true): { data: Record<string, T>; errors: Record<string, string>; refresh: () => void } {
-  const [data, setData] = useState<Record<string, T>>({});
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  const [kick, setKick] = useState(0);
-  const key = bases.join(",");
-  useEffect(() => {
-    if (!on || !bases.length) return;
-    let alive = true;
-    const run = () =>
-      Promise.all(
-        bases.map((b) =>
-          load(b).then(
-            (v) => {
-              if (!alive) return;
-              setData((x) => ({ ...x, [b]: v }));
-              setErrors((x) => {
-                if (!(b in x)) return x;
-                const { [b]: _, ...rest } = x;
-                void _;
-                return rest;
-              });
-            },
-            (e: Error) => alive && setErrors((x) => ({ ...x, [b]: e.message })),
-          ),
-        ),
-      );
-    run();
-    const id = setInterval(run, ms);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, on, ms, kick]);
-  return { data, errors, refresh: () => setKick((n) => n + 1) };
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -365,10 +327,11 @@ export function useWallet(own: boolean) {
   const d = useLocal();
   const nodes = useNodes();
   const bases = nodes.map((n) => n.base);
-  const statuses = usePoll(bases, getStatus, 5000);
-  const swaps = usePoll(bases, getSwaps, 5000);
+  // each daemon on its own, one ask at a time (lib/poll): one that hangs holds up only its own coins
+  const statuses = usePoll(bases, getStatus, { every: 5000 });
+  const swaps = usePoll(bases, getSwaps, { every: 5000 });
   const sending = bases.filter((b) => canSend(statuses.data[b] ?? nodes.find((n) => n.base === b)?.status ?? null));
-  const sends = usePoll(sending, getWithdrawals, 4000, own);
+  const sends = usePoll(sending, getWithdrawals, { every: 4000, on: own });
   // the followed daemon's swaps as they happen (its own role's: the provider also holds the other
   // direction's), over the polled ones
   const liveSwaps = useMemo(() => {

@@ -7,8 +7,11 @@
 // refused, and the quote rate limit. SHOOT_OUT=dir puts the screenshots elsewhere, SHOOT_THEME=dark
 // takes them in dark mode.
 //
-// Several swaps at once: the card says how many more swaps its partner takes ("Partner online ·
-// can take 4 more swaps"), a full partner is listed as busy and another one quotes, every partner
+// Several swaps at once: the card says whether the swap can start now, from both the partner and
+// the node it runs through, their slots and free funds for the amount ("Partner online · can take
+// your swap now", or busy when this node's free funds are held by a swap in progress), a start whose
+// firm price another start took goes ahead at a fresh one no worse (a worse one is shown to the
+// person instead), a full partner is listed as busy and another one quotes, every partner
 // full is said calmly, three swaps in progress are listed together (and the card still starts
 // another), and through the production server a sell runs beside a buy until the node's cap
 // (MOCK_MAX_SWAPS, 4), where the next start is "Every partner is busy right now".
@@ -110,8 +113,8 @@ check(true, "the swap card picks the best rate by itself (Kestrel)");
 // ...and, a moment later, Kestrel's firm price for the 1 ZEC bucket
 await rateLine(desk, "0.0041235", "Kestrel", true);
 check(true, "the rate line shows Kestrel's firm price with its countdown");
-await text(desk, "Partner online · can take 4 more swaps");
-check(true, "the card says how many more swaps the partner takes (Kestrel: 4)");
+await text(desk, "Partner online · can take your swap now");
+check(true, "the card says the swap can start now: Kestrel and this node both have a free slot and the funds for 1 ZEC");
 await sleep(400);
 await shot(desk, "01-swap-1440");
 
@@ -213,8 +216,8 @@ await reset();
 await sleep(400);
 const oneFull = await withFull(1440, (m) => m.name === "Kestrel");
 await rateLine(oneFull, "0.0041", "Bram");
-await text(oneFull, "Partner online · can take 4 more swaps");
-check(true, "Kestrel full: Bram quotes, and says it can take 4 more swaps");
+await text(oneFull, "Partner online · can take your swap now");
+check(true, "Kestrel full: Bram quotes, and can take the swap now");
 // a firm price from the full partner isn't used either: Bram's own firm price comes in
 await rateLine(oneFull, "0.0041", "Bram", true);
 await sleep(1500);
@@ -224,7 +227,8 @@ await settings(oneFull).click();
 await oneFull.getByRole("radiogroup", { name: "Swap partner" }).waitFor();
 const kestrelRow = await partner(oneFull, /Kestrel/).textContent();
 check(/Busy · full for now/.test(kestrelRow) && (await partner(oneFull, /Kestrel/).getAttribute("aria-disabled")) === "true", `the settings list Kestrel as busy, not pickable (${kestrelRow})`);
-check(/can take 4 more swaps/i.test(await partner(oneFull, /^Bram/).textContent()), "...and Bram with its free slots");
+const bramRow = await partner(oneFull, /^Bram/).textContent();
+check((await partner(oneFull, /^Bram/).getAttribute("aria-disabled")) === "false" && !/more swaps?/.test(bramRow), `...and Bram pickable, with no count of swaps its funds may not cover (${bramRow})`);
 await sleep(300);
 await shot(oneFull, "08-partner-busy-1440");
 await oneFull.close();
@@ -237,6 +241,83 @@ for (const width of [1440, 390]) {
   await sleep(300);
   await shot(allFull, `09-all-busy-${width}`);
   await allFull.close();
+}
+
+// This node's funds held by a swap in progress: it has free slots, but its free ZEC (status.free,
+// which ferryd counts with the notes its locks may take) can't fund 1 ZEC. The line and the message
+// say busy, not "can take your swap now"; an amount it can fund can start. The node's status is
+// edited on its way to the page, and its event stream refused so the edited status stands.
+{
+  await reset();
+  await sleep(400);
+  const held = await page(1440);
+  await held.route("**/daemon/z/api/events", (r) => r.fulfill({ status: 503, body: "" }));
+  await held.route("**/daemon/z/api/status", async (r) => {
+    const s = await (await r.fetch()).json();
+    s.free = { ...s.balances, zec_shielded_zat: 50_000_000 };
+    s.capacity = { ...s.capacity, live: 1, free_slots: 3 };
+    await r.fulfill({ json: s });
+  });
+  await held.goto(DEV + "/app");
+  await text(held, "Partner busy · usually free again within about 1–5 min");
+  const m = await message(held);
+  check(m.text === UI_BUSY && m.calm, `this node's free ZEC (0.50) can't fund 1 ZEC while a swap holds the rest: busy, calmly ("${m.text}")`);
+  await sleep(300);
+  await shot(held, "11-node-funds-held-1440");
+  await held.locator("input[inputmode=decimal]").fill("0.40");
+  await text(held, "Partner online · can take your swap now");
+  check(await held.locator("form button[type=submit]").isEnabled(), "0.40 ZEC fits what is free: the line says it can start now");
+  await held.close();
+}
+
+// A start whose firm price is gone by the time it gets there (another visitor's start took it, and
+// the maker refuses it, in ferryd's words): the card starts once more at a fresh firm price from the
+// same partner, without a second press, when it is no worse; when it is worse, the person sees it.
+{
+  await reset();
+  await sleep(400);
+  const takenFirst = async (r) => {
+    // another visitor's start, with the same quote, gets there first
+    await post(DEV, "/daemon/z/api/swaps", JSON.parse(r.request().postData() ?? "{}"));
+    await r.fulfill({ status: 400, json: { error: "The maker refused: the firm quote was already used for another swap" } });
+  };
+  const again = await page(1440);
+  const sent = [];
+  await again.route("**/daemon/z/api/swaps", async (r) => {
+    if (r.request().method() !== "POST") return r.continue();
+    sent.push(JSON.parse(r.request().postData() ?? "{}"));
+    return sent.length === 1 ? takenFirst(r) : r.continue();
+  });
+  await again.goto(DEV + "/app");
+  await rateLine(again, "0.0041235", "Kestrel", true);
+  await again.locator("form button[type=submit]").click();
+  await again.waitForURL(/\/app\/swap\//, { timeout: 15_000 });
+  check(sent.length === 2 && sent[0].quote && sent[1].quote && sent[0].quote !== sent[1].quote && sent[1].maker === sent[0].maker, `its firm price taken, the start went ahead at a fresh one from ${sent[0].maker}, in one press`);
+  await again.close();
+
+  await reset();
+  await sleep(400);
+  const worse = await page(1440);
+  let gone = false;
+  let starts = 0;
+  // once the first start has failed, the partner's fresh firm price is a little worse
+  await worse.route("**/api/quotes", async (r) => {
+    const j = await (await r.fetch()).json();
+    if (gone) for (const q of j.quotes ?? []) q.rate_sat_per_zec -= 100;
+    await r.fulfill({ json: j });
+  });
+  await worse.route("**/daemon/z/api/swaps", async (r) => {
+    if (r.request().method() !== "POST") return r.continue();
+    starts++;
+    gone = true;
+    return takenFirst(r);
+  });
+  await worse.goto(DEV + "/app");
+  await rateLine(worse, "0.0041235", "Kestrel", true);
+  await worse.locator("form button[type=submit]").click();
+  await text(worse, "That firm price ran out before the swap started. Press Sell ZEC again for a fresh one.");
+  check(starts === 1 && /\/app$/.test(worse.url()), "a worse fresh price isn't taken for the person: nothing more starts, and the card says so");
+  await worse.close();
 }
 
 // three swaps in progress at once: all listed in Recent activity, and the card still starts one
@@ -338,8 +419,14 @@ const firmStart = await r.json();
 check(r.status === 201, `swap started from Kestrel's firm quote (${r.status} ${firmStart.error ?? ""})`);
 const sv3 = await (await fetch(`http://127.0.0.1:${Z}/api/swaps/${firmStart.id}`)).json();
 check(sv3.amounts.btc_sat === Math.round(0.7 * kq.rate_sat_per_zec), `...at the quote's rate (btc_sat ${sv3.amounts.btc_sat})`);
+// one quote, one swap: a second start naming the same quote (another visitor was shown it too)
+// never forwards it again (the mock maker, like ferryd, refuses a quote used before); it goes ahead
+// at a fresh firm quote from Kestrel, no worse
 r = await post(PRD, "/daemon/z/api/swaps", { maker: "Kestrel", zec_zat: 70_000_000, quote: kq.quote_id });
-check(r.status === 400, "one quote, one swap: the same quote is refused again");
+const secondStart = await r.json();
+check(r.status === 201 && secondStart.id !== firmStart.id, `one quote, one swap: a second start naming it goes ahead at a fresh quote (${r.status} ${secondStart.error ?? ""})`);
+const sv4 = await (await fetch(`http://127.0.0.1:${Z}/api/swaps/${secondStart.id}`)).json();
+check(sv4.amounts.btc_sat >= Math.round(0.7 * kq.rate_sat_per_zec), `...at a rate no worse (btc_sat ${sv4.amounts.btc_sat})`);
 
 // buying ZEC through the production server: the main B daemon takes from a Z maker, behind the
 // same guards as a sell (maker allowlist, demo cap), and swaps run side by side up to the cap

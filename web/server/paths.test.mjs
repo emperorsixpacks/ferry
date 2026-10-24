@@ -243,3 +243,22 @@ test("the first coins, picks and times", () => {
   assert.equal(aboutText([30, 30]), "about 30 min");
   assert.equal(aboutText([45, 120]), "about 45 min–2 hours");
 });
+
+test("the first coin skips a daemon that isn't answering, and waits for one not heard from yet", () => {
+  const four = { ready: true, sell: ["btc", "ltc", "usdc-base", "weth-base"], buy: [], routes: null };
+  const none = { sell: [], buy: [] };
+  // the demo's USDC daemons hang: the card still opens on the first coin, at once
+  assert.deepEqual(defaultPick({ ...four, offline: { ...none, sell: ["usdc-base"] }, waiting: { ...none, sell: ["weth-base"] } }), { sell: "zec", buy: "btc" });
+  // the first coin's daemon hangs: the next one that answers
+  assert.deepEqual(defaultPick({ ...four, offline: { ...none, sell: ["btc"] } }), { sell: "zec", buy: "ltc" });
+  assert.deepEqual(defaultPick({ ...four, offline: { ...none, sell: ["btc", "ltc"] } }), { sell: "zec", buy: "usdc-base" });
+  // ... unless one before it hasn't answered yet: wait for it
+  assert.equal(defaultPick({ ...four, offline: { ...none, sell: ["btc"] }, waiting: { ...none, sell: ["ltc"] } }), null);
+  assert.equal(defaultPick({ ...four, waiting: { ...none, sell: ["btc"] } }), null);
+  // every daemon offline: the first coin all the same, which says it is offline
+  assert.deepEqual(defaultPick({ ...four, offline: { ...none, sell: four.sell } }), { sell: "zec", buy: "btc" });
+  // buying ZEC only: the same, that way
+  assert.deepEqual(defaultPick({ ready: true, sell: [], buy: ["btc", "ltc"], routes: null, offline: { sell: [], buy: ["btc"] } }), { sell: "ltc", buy: "zec" });
+  // selling ZEC is offline everywhere, buying it isn't: buy
+  assert.deepEqual(defaultPick({ ready: true, sell: ["btc"], buy: ["ltc"], routes: null, offline: { sell: ["btc"], buy: [] } }), { sell: "ltc", buy: "zec" });
+});

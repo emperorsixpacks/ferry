@@ -21,6 +21,9 @@
 //   ready     the server said which daemons it has and the page probed them; until then nothing
 //             is ruled out (available: null)
 //   sell/buy  the pairs it sells ZEC for (a Z daemon of yours) and buys ZEC with (a B daemon)
+//   offline   {sell, buy}: of those, the pairs whose daemon that way isn't answering (it failed, or is
+//             still silent after the page's first wait); a pair that comes back drops out of it
+//   waiting   {sell, buy}: the pairs whose daemon hasn't answered yet, within that first wait
 //   nets      {pair: "main" | "test" | "local"}: the kind of network each pair's daemons run on
 //             (swapNet of their status), for the time a swap takes; a pair missing has no time
 //   routes    the router's legs {from, to} (pairs a private swap starts from / ends in), or null
@@ -312,12 +315,29 @@ export function stepWords(steps, ctx = null) {
 export const present = (ctx, pair) => !!(ctx?.sell?.includes(pair) || ctx?.buy?.includes(pair) || ctx?.routes?.from?.includes(pair) || ctx?.routes?.to?.includes(pair));
 
 // Sell ZEC for the first coin this server sells it for; if it sells none, buy ZEC with the first
-// coin it buys ZEC with; else ZEC for the first coin it knows at all.
+// coin it buys ZEC with; else ZEC for the first coin it knows at all. A coin whose daemon is offline
+// (ctx.offline) gives way to the next one that answers, so one stuck daemon doesn't make the card
+// open on it; one that hasn't answered yet (ctx.waiting) is waited for, since it may answer in a
+// moment: null until it does, or until the page stops waiting for it. With every daemon offline, the
+// first coin all the same, and the card says it is offline.
 export function defaultPick(ctx) {
-  const sell = PAIRS.find((p) => ctx?.sell?.includes(p));
+  const first = (dir) => {
+    for (const p of PAIRS) {
+      if (!ctx?.[dir]?.includes(p) || ctx?.offline?.[dir]?.includes(p)) continue;
+      return ctx?.waiting?.[dir]?.includes(p) ? undefined : p;
+    }
+    return null;
+  };
+  const sell = first("sell");
+  if (sell === undefined) return null;
   if (sell) return { sell: ZEC, buy: sell };
-  const buy = PAIRS.find((p) => ctx?.buy?.includes(p));
+  const buy = first("buy");
+  if (buy === undefined) return null;
   if (buy) return { sell: buy, buy: ZEC };
+  const anySell = PAIRS.find((p) => ctx?.sell?.includes(p));
+  if (anySell) return { sell: ZEC, buy: anySell };
+  const anyBuy = PAIRS.find((p) => ctx?.buy?.includes(p));
+  if (anyBuy) return { sell: anyBuy, buy: ZEC };
   return { sell: ZEC, buy: PAIRS.find((p) => present(ctx, p)) ?? "btc" };
 }
 

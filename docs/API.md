@@ -101,6 +101,14 @@ sells ZEC on is refused (`409`): the ZEC its first swap bought waits in that dae
 the daemon counts as free. So is a buy on that pair when that daemon is also a partner (started
 with `--maker-offer`), since the buy could reach it.
 
+A daemon (or the router) that hangs instead of failing doesn't hold the page: the UI servers give a
+read (`GET`, `HEAD`) 10 s for its whole answer, an event stream 10 s to start and no limit once it
+has, and a `POST` (a swap start) 120 s, more than ferryd's own longest wait in a start (the partner's
+Accept, 60 s). Past that the browser gets `504 {"error": "The daemon didn't answer in time.",
+"code": "timeout"}` and the request to the daemon is closed (`web/server/upstream.mjs`;
+`FERRY_READ_TIMEOUT_MS`, `FERRY_START_TIMEOUT_MS`). A swap start that timed out keeps its place in
+the demo's limits, since the daemon may have taken it.
+
 `GET /api/pairs` says which of the user's daemons the server fronts:
 
 ```json
@@ -213,7 +221,12 @@ A swap start may name one: `POST /daemon/z/api/swaps {"maker": "Kestrel", "zec_z
 that maker), refuses one it doesn't hold or that has under 5 s left
 (`That firm price has expired. Get a new one.`), and forwards
 `{maker: <allowlisted URL>, zec_zat, quote: <signed quote>}` to the daemon. A quote is handed out for
-one swap start only.
+one swap start only: the start claims it as soon as it is checked. Everyone asking for a bucket is
+shown the same quote, so when two visitors start at once with it, the second start gets a fresh
+quote from the same maker for that start alone, used if it covers the amount at a rate no worse for
+the visitor than the one shown (selling ZEC: at least it; buying: at most it); otherwise the start
+is refused as above and the page asks for a new price. A start the server then refuses itself (a
+rate limit) gives its quote back.
 
 ## NEAR Intents (UI server, not ferryd)
 

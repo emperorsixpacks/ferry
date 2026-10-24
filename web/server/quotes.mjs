@@ -14,10 +14,18 @@
 // bucket per 25 s. A swap start names a quote by maker and id; the signed quote is looked up here
 // and forwarded to the daemon with the maker's allowlisted URL, then dropped (one quote, one swap).
 //
+// Everyone asking for the same bucket is shown the same quote, but a maker honours each quote once
+// (ferryd's claim_quote), so a start claims it (claim()) the moment it is checked: two visitors who
+// start at once in the same bucket never both forward it. The one who comes second gets a fresh
+// quote from the same maker, for that start alone, if it covers the amount at a rate at least as
+// good for them as the one they were shown; otherwise the start is refused as before ("That firm
+// price has expired"), and the browser asks for a new price.
+//
 // The exact amount is never logged, stored or sent to a maker.
 import { createPublicKey, verify } from "node:crypto";
 import http from "node:http";
 import https from "node:https";
+import { noWorse } from "./firm.mjs";
 
 // 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100 ZEC (as ferryd's quote::BUCKETS_ZAT)
 export const BUCKETS_ZAT = [10_000_000, 25_000_000, 50_000_000, 100_000_000, 250_000_000, 500_000_000, 1_000_000_000, 2_500_000_000, 5_000_000_000, 10_000_000_000];
@@ -212,6 +220,12 @@ export function quoteDesk(directory, { timeoutMs = 2000, fetcher = postQuote, mi
     return entry.pending;
   }
 
+  // one quote, one swap: taken, and out of the cache so it isn't shown or handed out again
+  function take(found) {
+    found.entry.taken = true;
+    for (const [k, c] of cache) if (c === found.entry) cache.delete(k);
+  }
+
   return {
     // { status, body }: the firm quotes for `zec_zat`, best first
     async request(body) {
@@ -265,9 +279,37 @@ export function quoteDesk(directory, { timeoutMs = 2000, fetcher = postQuote, mi
       return { json: quoteJson(e.q), min_zat: Number(e.q.min_zat), max_zat: Number(e.q.max_zat), entry: e };
     },
     // ...and once the start goes ahead: one quote, one swap, so it isn't shown or handed out again
-    take(found) {
-      found.entry.taken = true;
-      for (const [k, c] of cache) if (c === found.entry) cache.delete(k);
+    take,
+
+    // A swap start of `zat` naming a quote by maker index and id: a signed quote for this start
+    // alone, taken at once (before anything is awaited), so no other start can forward it too. The
+    // one named if it's free and has MIN_START_MS left; if another start took it (or it is about to
+    // run out), a fresh one asked of the same maker for the same side and the amount's bucket, if it
+    // covers `zat` at a rate no worse for the taker than the named one's (the price the person was
+    // shown). null: neither, or a quote this server never handed out. `release()` gives it back
+    // when the start goes no further than this server (a rate limit, a conflict); once a daemon
+    // has had it, it stays taken.
+    async claim(makerIndex, quoteId, zat) {
+      if (typeof quoteId !== "string" || !/^[0-9a-f]{32}$/.test(quoteId)) return null;
+      const named = byId.get(`${makerIndex}|${quoteId}`);
+      if (!named?.q) return null;
+      const hold = (e) => {
+        take({ entry: e });
+        return { json: quoteJson(e.q), min_zat: Number(e.q.min_zat), max_zat: Number(e.q.max_zat), rate_sat_per_zec: Number(e.q.rate_sat_per_zec), entry: e, release: () => (e.taken = false) };
+      };
+      if (!named.taken && named.deadline - Date.now() >= MIN_START_MS) return hold(named);
+      const b = bucketFor(Number(zat));
+      const offer = directory.offerOf(makerIndex);
+      if (!b || !offer?.quote_key) return null;
+      const takerRole = named.q.taker_role;
+      const got = await fetchQuote(makerIndex, offer, takerRole, named.q.pair, b.bucket);
+      if (!got || got.deadline - Date.now() < MIN_START_MS) return null;
+      if (BigInt(zat) < BigInt(got.q.min_zat) || BigInt(zat) > BigInt(got.q.max_zat)) return null;
+      // Z (selling ZEC) gets at least the rate shown, B (buying) pays at most it (firm.mjs)
+      if (!noWorse(got.q.rate_sat_per_zec, named.q.rate_sat_per_zec, takerRole)) return null;
+      const e = { ...got, index: makerIndex };
+      byId.set(`${makerIndex}|${got.q.quote_id}`, e);
+      return hold(e);
     },
   };
 }

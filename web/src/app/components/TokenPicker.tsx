@@ -3,9 +3,9 @@ import { CaretDown, Check, MagnifyingGlass } from "@phosphor-icons/react";
 import { PAIR_IDS, pairChain, pairCoin, type Direction, type NearToken, type PairId, type Role } from "@/api";
 import { CHAIN_NAMES, amountIn, coinInfo } from "@/format";
 import { useLocal } from "../lib/daemon";
-import { bestMaker, forPair, ownQuote, quoteOf, type Makers } from "../lib/makers";
+import { bestMaker, forPair, ownQuote, partnersOffline, quoteOf, type Makers } from "../lib/makers";
 import { FERRY_CHAIN_IDS, chainName as nearChainName, nearAmount, useNear, useRowQuote } from "../lib/near";
-import { pairName } from "../lib/pairs";
+import { isOffline, pairName } from "../lib/pairs";
 import { ZEC, isNear, nearToken, present, resolvePath, storePick, tickerOf, type Pick, type PathCtx, type Side, type Token } from "../lib/paths";
 import { cn } from "../lib/utils";
 import { ChainLogo, Monogram, NearMark, NearTokenLogo, PairLogo, TokenLogo, type ChainMarkId } from "./Logos";
@@ -44,7 +44,9 @@ export const tokenSubtitle = (id: PairId) => (pairChain(id) ? `${assetName(id)} 
 
 // One row of the sheet. `sub` replaces the coin's subtitle. `off`: this server doesn't swap the coin
 // (it is listed under "Not available here", with these words); `can`: it can be picked all the same
-// (the swap card then says why it can't run), or not at all (dimmed).
+// (the swap card then says why it can't run), or not at all (dimmed). A coin this server swaps whose
+// daemon, or every partner for it, isn't answering stays where it is, says "Partner offline" and shows
+// no rate, and is back to normal once it answers.
 export interface TokenRow {
   id: RowId;
   can: boolean;
@@ -366,6 +368,7 @@ export function TokenPicker({ open, onClose, makers, role }: { open: boolean; on
         const p = pairs.find((x) => x.id === id);
         const can = !!p?.[dir].daemon;
         const otherWay = !!p?.[dir === "sell" ? "buy" : "sell"].daemon;
+        if (can && (isOffline(p?.[dir]) || partnersOffline(makers, id, pair, role))) return { id, can, sub: `${tokenSubtitle(id)} · Partner offline` };
         let rate: number | undefined;
         if (can && makers.list === null && id === pair && status) rate = ownQuote(status).rate;
         else if (can && makers.list) {
@@ -394,12 +397,18 @@ export function TokenPicker({ open, onClose, makers, role }: { open: boolean; on
 // The one picker, for the side of the card it opened from (`side`), with `pick` on the card.
 // `zat`: the ZEC on the card, for the NEAR rows' quotes when ZEC is on the other side.
 export function CoinPicker({ open, onClose, side, pick, ctx, makers, zat = 1e8, onPick }: { open: boolean; onClose: () => void; side: Side; pick: Pick; ctx: PathCtx; makers?: Makers; zat?: number; onPick: (t: Token) => void }) {
-  const { pair: onScreen, status } = useLocal();
+  const { pair: onScreen, status, pairs } = useLocal();
   const nearCtx = useNear();
   const current = side === "sell" ? pick.sell : pick.buy;
   const other = side === "sell" ? pick.buy : pick.sell;
   const withZec = other === ZEC;
   const otherName = tickerOf(other, ctx);
+  // with ZEC on the other side: the coin's daemon that way, or every partner for it, isn't answering
+  const offline = (id: PairId): boolean => {
+    if (!withZec) return false;
+    const dir: Direction = side === "buy" ? "sell" : "buy";
+    return isOffline(pairs.find((p) => p.id === id)?.[dir]) || partnersOffline(makers, id, onScreen, side === "buy" ? "Z" : "B");
+  };
 
   // with ZEC on the other side, each coin's best rate for 1 ZEC from the partners that take swaps now
   const rates = useMemo(() => {
@@ -433,10 +442,12 @@ export function CoinPicker({ open, onClose, side, pick, ctx, makers, zat = 1e8, 
     const zec: TokenRow = { id: "zec", can: true, sub: join("Zcash · shielded", hint(ZEC)) };
     // a coin this server doesn't swap at all is listed apart, and can still be picked: the card
     // then says why it can't run
-    const coins = PAIR_IDS.map((id): TokenRow => (present(ctx, id) ? { id, can: true, sub: join(tokenSubtitle(id), hint(id)), rate: rates[id] } : { id, can: true, off: "not available here" }));
+    const coins = PAIR_IDS.map((id): TokenRow =>
+      !present(ctx, id) ? { id, can: true, off: "not available here" } : offline(id) ? { id, can: true, sub: join(tokenSubtitle(id), "Partner offline") } : { id, can: true, sub: join(tokenSubtitle(id), hint(id)), rate: rates[id] },
+    );
     return [zec, ...coins];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ctx, rates, side, other]);
+  }, [ctx, rates, side, other, pairs, makers, onScreen]);
 
   // NEAR Intents' assets, without the coins Ferry swaps here itself (those are above)
   const near = useMemo((): NearSection | null => {
