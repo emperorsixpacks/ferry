@@ -130,7 +130,8 @@ def wait_zec_blocks(n):
 
 def dt(*args, check=True):
     env = dict(os.environ, RUST_LOG="error", NO_COLOR="1")
-    return subprocess.run([DEVTOOL, *args], check=check, env=env, capture_output=True, text=True)
+    return subprocess.run([DEVTOOL, *args], check=check, env=env, capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL)
 
 def wallet_ua(path, receiver="unified"):
     # The wallet's own (spending) account: ferryd wallets also hold view-only joint accounts.
@@ -186,7 +187,7 @@ def h4(wallet, txid):
     env = dict(os.environ, RUST_LOG="error", NO_COLOR="1")
     for cmd in ("sync", "enhance"):
         subprocess.run([DEVTOOL, "wallet", "-w", w, cmd, "-s", ZAINO], check=True, env=env,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     internal = bytes.fromhex(txid)[::-1]
     db = sqlite3.connect(os.path.join(w, "data.sqlite"))
     known = db.execute("SELECT raw IS NOT NULL FROM transactions WHERE txid = ?", (internal,)).fetchone()
@@ -326,8 +327,12 @@ pc("prove", f"{tmp}/c.pczt", "--output", f"{tmp}/p.pczt")
 subprocess.run([JOINTKEY, "sign", f"{tmp}/keys.json", f"{tmp}/c.pczt", f"{tmp}/s.pczt"], check=True, capture_output=True)
 pc("combine", "-i", f"{tmp}/p.pczt", "-i", f"{tmp}/s.pczt", "-o", f"{tmp}/f.pczt")
 control = pc("send", f"{tmp}/f.pczt", "-s", ZAINO).stdout.strip().splitlines()[-1]
-wait_zec_blocks(2)
+# Mined and buried a little, so the observer's scan sees the joint note's nullifier spent.
+wait(f"control sweep {control} mined",
+     lambda: (zrpc("getrawtransaction", [control, 1]) or {}).get("confirmations", 0) >= 2, 600, 2)
 known, sent, recv = h4(f"{tmp}/observer", control)
+check("H4 control: the observer sees the sender-OVK sweep", bool(known) and known[0] == 1,
+      "full transaction downloaded" if known else "transaction unknown")
 check("H4 control: the same query recovers the recipient of a sender-OVK sweep",
       bool(sent) and all(addr for _, addr in sent), f"sweep {control}: sent_notes={sent}")
 shutil.rmtree(tmp)

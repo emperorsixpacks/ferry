@@ -209,7 +209,8 @@ zmine() {
   [ "$h" -ge "$target" ] || die "could not mine ZEC blocks"
 }
 
-zdt() { RUST_LOG=error NO_COLOR=1 "$ZEC_DEVTOOL" "$@"; }
+# Always with stdin closed: given an existing identity file, devtool can block reading stdin.
+zdt() { RUST_LOG=error NO_COLOR=1 "$ZEC_DEVTOOL" "$@" </dev/null; }
 
 # with_timeout <secs> <cmd...>: a devtool call against a server that is not up yet can hang.
 with_timeout() { perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "$@"; }
@@ -321,7 +322,7 @@ TOML
   for _ in $(seq 1 90); do
     if with_timeout 30 "$ZEC_DEVTOOL" wallet -w "$STATE/zec/miner" init --name miner -i "$STATE/zec/miner.age" \
       -n regtest --activation-heights "$STATE/zec/activation_heights.toml" -s "localhost:$ZAINO_PORT" \
-      >"$STATE/zec/probe.log" 2>&1; then ok=1; break; fi
+      </dev/null >"$STATE/zec/probe.log" 2>&1; then ok=1; break; fi
     rm -rf "$STATE/zec/miner"
     sleep 3
   done
