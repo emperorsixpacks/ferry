@@ -78,6 +78,11 @@ export interface SwapView {
 }
 
 export const DAEMONS: Record<Role, string> = { Z: "/daemon/z", B: "/daemon/b" };
+// The coins ZEC swaps against. One ferryd runs one of them; the UI server may front a daemon per
+// pair (server/pairs.mjs), at /daemon/<pair>.
+export type PairId = "btc" | "ltc" | "usdc";
+export const PAIR_IDS: PairId[] = ["btc", "ltc", "usdc"];
+export const pairDaemon = (id: PairId) => `/daemon/${id}`;
 // Which party this browser is: the swap app shows only that side. `?as=b` overrides it.
 export const LOCAL_ROLE: Role = (() => {
   const q = new URLSearchParams(window.location.search).get("as");
@@ -102,12 +107,21 @@ async function call<T>(base: string, path: string, body?: unknown): Promise<T> {
   return data as T;
 }
 
-export const getStatus = (role: Role) => call<Status>(DAEMONS[role], "/api/status");
-export const getSwaps = (role: Role) => call<SwapView[]>(DAEMONS[role], "/api/swaps");
+// `daemon` is a base path: DAEMONS[role] or pairDaemon(id)
+export const getStatus = (daemon: string) => call<Status>(daemon, "/api/status");
+export const getSwaps = (daemon: string) => call<SwapView[]>(daemon, "/api/swaps");
 // `maker` is a name from GET /api/makers; the UI server maps it to the maker's allowlisted URL
 // (the browser never sends a URL). Left out, the server's first maker.
-export const startSwap = (zec_zat: number, as: Role = "Z", maker?: string) =>
-  call<{ id: string }>(DAEMONS[as], "/api/swaps", maker === undefined ? { zec_zat } : { maker, zec_zat });
+export const startSwap = (zec_zat: number, daemon: string = DAEMONS.Z, maker?: string) =>
+  call<{ id: string }>(daemon, "/api/swaps", maker === undefined ? { zec_zat } : { maker, zec_zat });
+
+// The other pairs this UI server has a daemon for (GET /api/pairs); none from an older server.
+export async function getPairs(): Promise<PairId[]> {
+  const res = await fetch("/api/pairs");
+  if (!res.ok) return [];
+  const data = (await res.json().catch(() => null)) as { pairs?: unknown } | null;
+  return Array.isArray(data?.pairs) ? PAIR_IDS.filter((id) => (data.pairs as unknown[]).includes(id)) : [];
+}
 
 // One maker the UI server allowlists, with its live offer (GET /api/makers).
 export interface Maker {

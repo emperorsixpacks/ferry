@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { injectStall, startSwap, type Role, type SwapView } from "./api";
+import { DAEMONS, injectStall, startSwap, type Role, type SwapView } from "./api";
 import { CrossingChart } from "./components/Crossing";
 import { Deadlines, EvmDeadlines } from "./components/Deadlines";
 import { Observer } from "./components/Observer";
@@ -38,8 +38,8 @@ const CAN_STALL: Record<Role, string[]> = {
 const PATH_TITLE = { happy: "The crossing", refund: "Cancelled and refunded", punish: "Cancelled and punished" };
 
 export default function App() {
-  const z = useDaemon("Z");
-  const b = useDaemon("B");
+  const z = useDaemon(DAEMONS.Z);
+  const b = useDaemon(DAEMONS.B);
   const narrow = useNarrow();
   const [amount, setAmount] = useState("1.00");
   const [busy, setBusy] = useState(false);

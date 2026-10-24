@@ -19,6 +19,8 @@ const COINS: Record<CoinInfo["id"], CoinInfo> = {
 };
 // The EVM chain a USDC daemon runs on, by its network name.
 const EVM_CHAINS: Record<string, string> = { anvil: "Anvil", "base-sepolia": "Base Sepolia", base: "Base" };
+// a pair's coin when its daemon hasn't said yet (the swap page's pair toggle lists all three)
+export const coinInfo = (id: CoinInfo["id"]): CoinInfo => COINS[id];
 let current: CoinInfo = COINS.btc;
 // A daemon's coin is fixed for its lifetime, so one module-level value is enough: it is set
 // from each status just before the state update that re-renders.
@@ -38,6 +40,9 @@ export const zec = (zat: number) => (zat / 1e8).toFixed(2);
 export const btc = (sat: number) => (sat / 10 ** coin().decimals).toFixed(coin().kind === "evm" ? 2 : coin().decimals);
 // prose amounts: 0.0041 rather than 0.00410000
 export const btcShort = (sat: number) => btc(sat).replace(/0+$/, "").replace(/\.$/, "");
+// the same for any coin, not only this daemon's
+export const amountIn = (sat: number, c: CoinInfo) =>
+  sat === 0 ? "0" : (sat / 10 ** c.decimals).toFixed(c.kind === "evm" ? 2 : c.decimals).replace(/0+$/, "").replace(/\.$/, "");
 export const short = (hex: string, head = 6, tail = 4) =>
   hex.length <= head + tail + 1 ? hex : `${hex.slice(0, head)}…${hex.slice(-tail)}`;
 

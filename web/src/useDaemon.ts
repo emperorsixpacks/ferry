@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { DAEMONS, getStatus, getSwaps, type Role, type Status, type SwapView } from "./api";
+import { getStatus, getSwaps, type Status, type SwapView } from "./api";
 import { setCoinFrom } from "./format";
 
 export interface Daemon {
@@ -11,21 +11,26 @@ export interface Daemon {
 }
 
 const RETRY_MS = 2000;
+const EMPTY: Daemon = { connected: false, error: null, status: null, swaps: {} };
 
 // Follows one ferryd: a fetch, then the SSE stream. EventSource only retries network errors and
 // gives up for good on an HTTP error (a 401, or the proxy's 502 while the daemon restarts), so the
 // stream is reopened by hand. Every (re)connect refetches so nothing is missed while it was away.
-export function useDaemon(role: Role): Daemon {
-  const [state, setState] = useState<Daemon>({ connected: false, error: null, status: null, swaps: {} });
+// `daemon` is the base path (DAEMONS[role], pairDaemon(id)); null waits. A new one starts clean.
+export function useDaemon(daemon: string | null): Daemon {
+  const [state, setState] = useState<Daemon>(EMPTY);
 
   useEffect(() => {
+    setState(EMPTY);
+    if (!daemon) return;
+    const base = daemon;
     let alive = true;
     let es: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
 
     const refresh = async () => {
       try {
-        const [status, list] = await Promise.all([getStatus(role), getSwaps(role)]);
+        const [status, list] = await Promise.all([getStatus(base), getSwaps(base)]);
         if (!alive) return;
         setCoinFrom(status);
         setState((s) => ({ ...s, error: null, status, swaps: { ...s.swaps, ...Object.fromEntries(list.map((x) => [x.id, x])) } }));
@@ -35,7 +40,7 @@ export function useDaemon(role: Role): Daemon {
     };
 
     const open = () => {
-      es = new EventSource(DAEMONS[role] + "/api/events");
+      es = new EventSource(base + "/api/events");
       es.onopen = () => {
         setState((s) => ({ ...s, connected: true }));
         refresh();
@@ -65,7 +70,7 @@ export function useDaemon(role: Role): Daemon {
       clearTimeout(retry);
       es?.close();
     };
-  }, [role]);
+  }, [daemon]);
 
   return state;
 }

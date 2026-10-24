@@ -19,6 +19,10 @@
 //   FERRY_Z_TOKEN / FERRY_Z_TOKEN_FILE, FERRY_B_TOKEN / FERRY_B_TOKEN_FILE
 //                                              the daemons' API tokens (<data-dir>/api-token); a file is
 //                                              re-read every 30 s, so a restarted daemon is picked up
+//   FERRY_BTC_URL, FERRY_LTC_URL, FERRY_USDC_URL [unset]
+//                           Z's daemons for other pairs (one ferryd per pair), with
+//                           FERRY_<PAIR>_TOKEN / FERRY_<PAIR>_TOKEN_FILE; proxied at /daemon/<pair>
+//                           and listed by GET /api/pairs, so the swap page offers them (pairs.mjs)
 //   PUBLIC_ORIGIN [unset]   e.g. https://ferry.example: POSTs whose Origin is something else get 403
 //   TRUST_PROXY [0]         1 behind a reverse proxy: the client IP is the last X-Forwarded-For hop
 //   DEMO_MAX_ZAT [50000000] largest swap a visitor may start (0.5 ZEC)
@@ -38,6 +42,7 @@ import { createReadStream, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makerDirectory, parseMakers } from "./makers.mjs";
+import { pairDaemons } from "./pairs.mjs";
 
 const env = process.env;
 const PORT = Number(env.PORT ?? 5300);
@@ -78,10 +83,14 @@ function tokenSource(name) {
   };
 }
 
+const PAIRS = pairDaemons(env);
 const DAEMONS = {
   z: { url: new URL(env.FERRY_Z_URL ?? "http://127.0.0.1:7101"), token: tokenSource("Z") },
   b: { url: new URL(env.FERRY_B_URL ?? "http://127.0.0.1:7102"), token: tokenSource("B") },
+  ...Object.fromEntries(PAIRS.map((p) => [p.id, { url: new URL(p.url), token: tokenSource(p.id.toUpperCase()) }])),
 };
+// the daemons a visitor starts swaps on: Z's, and Z's for each other pair
+const TAKERS = new Set(["z", ...PAIRS.map((p) => p.id)]);
 
 // one request to a daemon from this server, for the guard's own checks
 function daemonJson(key, path) {
@@ -209,7 +218,7 @@ async function guard(key, path, req, res) {
     }
   }
 
-  if (key === "z" && path === "/api/swaps") {
+  if (TAKERS.has(key) && path === "/api/swaps") {
     let body;
     try {
       body = JSON.parse(await readBody(req));
@@ -237,10 +246,11 @@ async function guard(key, path, req, res) {
       json(res, 400, { error: "Unknown maker. Pick one from the list." });
       return false;
     }
-    // the maker (B) finishes a moment after Z, and refuses a new swap until it has
+    // the maker (B) finishes a moment after Z, and refuses a new swap until it has; another pair's
+    // maker isn't behind this server, so only its Z is asked
     let lists;
     try {
-      lists = await Promise.all([daemonJson("z", "/api/swaps"), daemonJson("b", "/api/swaps")]);
+      lists = await Promise.all((key === "z" ? ["z", "b"] : [key]).map((k) => daemonJson(k, "/api/swaps")));
     } catch {
       json(res, 502, { error: "Can't reach the daemon. Is it running?" });
       return false;
@@ -490,7 +500,8 @@ function serveStatic(pathname, req, res) {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://ui");
-  const m = url.pathname.match(/^\/daemon\/(z|b)(\/.*)?$/);
+  const m = url.pathname.match(/^\/daemon\/([a-z]+)(\/.*)?$/);
+  if (m && !Object.hasOwn(DAEMONS, m[1])) return json(res, 404, { error: "No such daemon on this server" });
   if (m) {
     proxy(m[1], m[2] ?? "/", url.search, req, res).catch((e) => {
       console.error("ferry-ui proxy:", e);
@@ -499,6 +510,7 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === "/healthz") return json(res, 200, { ok: true });
+  if (url.pathname === "/api/pairs") return json(res, 200, { pairs: PAIRS.map((p) => p.id) });
   if (url.pathname === "/api/makers") {
     serveMakers(req, res).catch((e) => {
       console.error("ferry-ui makers:", e);
@@ -511,7 +523,7 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`ferry-ui on http://${HOST}:${PORT}  dist ${DIST}`);
-  console.log(`  Z ${DAEMONS.z.url.origin}  B ${DAEMONS.b.url.origin}  makers ${MAKERS.makers.map((m) => `${m.name} (${m.pair})`).join(", ") || "none"}`);
+  console.log(`  Z ${DAEMONS.z.url.origin}  B ${DAEMONS.b.url.origin}${PAIRS.map((p) => `  ${p.id.toUpperCase()} ${p.url}`).join("")}  makers ${MAKERS.makers.map((m) => `${m.name} (${m.pair})`).join(", ") || "none"}`);
   console.log(`  demo: max ${zec(DEMO_MAX_ZAT)} ZEC, ${RATE_PER_HOUR} swaps/IP/hour, ${SWAPS_PER_HOUR} swaps/hour in all, ${SSE_PER_IP} streams/IP, ${SSE_TOTAL} streams in all, faults ${FAULTS ? "on" : "off"}${PUBLIC_ORIGIN ? `, origin ${PUBLIC_ORIGIN}` : ""}`);
 });
 
