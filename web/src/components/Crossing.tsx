@@ -125,6 +125,9 @@ export function CrossingChart({
   const byTitle = (prefix: string) => legs.find((l) => l.title.startsWith(prefix));
   const path = model?.path ?? "happy";
   const aborted = path !== "happy";
+  // EVM: no cancel transaction or output; refund and punish are calls on FerryLock itself
+  const evm = coin().kind === "evm";
+  const abortFrom = evm ? g.btc.lock : g.btc.cancel;
   // abort routes only appear on the chart once a cancel actually happens
   const spare: TrackState = "hidden";
 
@@ -157,7 +160,7 @@ export function CrossingChart({
       <g className="shore-zec">
         <Label at={g.shoreA.name} title="Zcash" sub={["Ironwood pool", heights.zec != null ? `height ${heights.zec}` : ""]} anchor="start" land />
       </g>
-      <Label at={g.shoreB.name} title={coin().name} sub={["Taproot", heights.btc != null ? `height ${heights.btc}` : ""]} anchor={narrow ? "start" : "end"} land />
+      <Label at={g.shoreB.name} title={coin().name} sub={[coin().kind === "evm" ? "FerryLock" : "Taproot", heights.btc != null ? `height ${heights.btc}` : ""]} anchor={narrow ? "start" : "end"} land />
       <g className="party-flag" transform={`translate(${g.shoreA.party[0]} ${g.shoreA.party[1]})`}>
         <circle r={17} />
         <text dy="0.36em">Z</text>
@@ -168,9 +171,9 @@ export function CrossingChart({
       </g>
 
       {/* abort routes */}
-      <Track from={g.btc.lock} to={g.btc.cancel} state={aborted ? trackState(byTitle("Cancel")) : spare} abort n={3} />
-      <Track from={g.btc.cancel} to={g.btc.bShore} state={path === "refund" ? trackState(byTitle("B refunds")) : path === "punish" ? "hidden" : spare} abort n={4} />
-      <Track from={g.btc.cancel} to={g.btc.zShore} state={path === "punish" ? trackState(byTitle("Z punishes")) : path === "refund" ? "hidden" : spare} abort n={4} />
+      {evm ? null : <Track from={g.btc.lock} to={g.btc.cancel} state={aborted ? trackState(byTitle("Cancel")) : spare} abort n={3} />}
+      <Track from={abortFrom} to={g.btc.bShore} state={path === "refund" ? trackState(byTitle("B refunds")) : path === "punish" ? "hidden" : spare} abort n={4} />
+      <Track from={abortFrom} to={g.btc.zShore} state={path === "punish" ? trackState(byTitle("Z punishes")) : path === "refund" ? "hidden" : spare} abort n={4} />
       {path === "refund" && byTitle("Z reclaims") ? (
         <Track from={add(g.zec.joint, g.reclaimOffset)} to={add(g.zec.zShore, g.reclaimOffset)} state={trackState(byTitle("Z reclaims"))} abort n={5} />
       ) : null}
@@ -178,14 +181,18 @@ export function CrossingChart({
       {/* happy routes */}
       <Track from={g.btc.bShore} to={g.btc.lock} state={trackState(byTitle("B locks"))} n={1} />
       <Track from={g.zec.zShore} to={g.zec.joint} state={trackState(byTitle("Z locks"))} n={2} />
-      <Track from={g.btc.lock} to={g.btc.zShore} state={aborted ? "hidden" : trackState(byTitle("Z redeems"))} n={3} />
+      <Track from={g.btc.lock} to={g.btc.zShore} state={aborted ? "hidden" : trackState(byTitle("Z redeems") ?? byTitle("Z claims"))} n={3} />
       <Track from={g.zec.joint} to={g.zec.bShore} state={aborted ? "hidden" : trackState(byTitle("B sweeps"))} n={4} />
 
       <Buoy at={g.btc.lock} held={model?.btc.at === "lock"} />
       <Buoy at={g.zec.joint} held={model?.zec.at === "joint"} />
-      {aborted ? <Buoy at={g.btc.cancel} held={model?.btc.at === "cancel"} /> : null}
+      {aborted && !evm ? <Buoy at={g.btc.cancel} held={model?.btc.at === "cancel"} /> : null}
 
-      <Label at={g.labels.lock} title="Taproot lock" sub={narrow ? "cancel after T1" : "redeem, or cancel after T1"} anchor={g.labels.lockAnchor} />
+      {coin().kind === "evm" ? (
+        <Label at={g.labels.lock} title="FerryLock" sub={narrow ? "refund after t1" : "claim before t1, refund after"} anchor={g.labels.lockAnchor} />
+      ) : (
+        <Label at={g.labels.lock} title="Taproot lock" sub={narrow ? "cancel after T1" : "redeem, or cancel after T1"} anchor={g.labels.lockAnchor} />
+      )}
       <Label
         at={g.labels.joint}
         title="Joint Ironwood note"
@@ -193,18 +200,18 @@ export function CrossingChart({
         sub={jointOpen ? (reveal?.learner === "B" ? "B knows z + b: spendable by B" : "Z knows z + b: spendable by Z") : model?.zec.stuck ? "locked for good" : "spendable only with z + b"}
         tone={jointOpen ? "magic" : undefined}
       />
-      {aborted ? <Label at={g.labels.cancel} title="Cancel output" sub={narrow ? "refund or punish" : "refund, or punish after T2"} anchor={g.labels.cancelAnchor} tone="abort" /> : null}
+      {aborted && !evm ? <Label at={g.labels.cancel} title="Cancel output" sub={narrow ? "refund or punish" : "refund, or punish after T2"} anchor={g.labels.cancelAnchor} tone="abort" /> : null}
 
       {reveal?.learner === "B" ? (
         <g className="reveal" key="rz">
           <path d={`M${rz.from[0]} ${rz.from[1]} Q${rz.ctrl[0]} ${rz.ctrl[1]} ${jointEdge[0]} ${jointEdge[1]}`} markerEnd="url(#arrow-magic)" pathLength={1} />
-          <Label at={rz.label} title="z read from Z's" sub="redeem signature" anchor={rz.anchor} tone="magic" />
+          <Label at={rz.label} title="z read from Z's" sub={coin().kind === "evm" ? "claim" : "redeem signature"} anchor={rz.anchor} tone="magic" />
         </g>
       ) : null}
       {reveal?.learner === "Z" ? (
         <g className="reveal" key="rb">
           <path d={`M${rb.from[0]} ${rb.from[1]} Q${rb.ctrl[0]} ${rb.ctrl[1]} ${jointEdgeB[0]} ${jointEdgeB[1]}`} markerEnd="url(#arrow-magic)" pathLength={1} />
-          <Label at={rb.label} title="b read from B's" sub="refund signature" anchor={rb.anchor} tone="magic" />
+          <Label at={rb.label} title="b read from B's" sub={coin().kind === "evm" ? "refund" : "refund signature"} anchor={rb.anchor} tone="magic" />
         </g>
       ) : null}
 

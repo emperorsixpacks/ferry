@@ -5,6 +5,7 @@
 
 mod b;
 mod error;
+pub mod evm;
 pub mod joint;
 pub mod keys;
 pub mod messages;

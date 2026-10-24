@@ -16,7 +16,8 @@
     "shoot:app": "node scripts/shoot-app.mjs",
     "shoot:app:real": "node scripts/shoot-app.mjs --real",
     "shoot:watchtower": "node scripts/shoot-watchtower.mjs",
-    "start": "node server/prod.mjs"
+    "start": "node server/prod.mjs",
+    "shoot:evm": "node scripts/shoot-evm.mjs"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",

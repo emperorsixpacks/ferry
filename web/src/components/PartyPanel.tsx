@@ -79,7 +79,7 @@ export function PartyPanel({
             <span>
               {swap?.secrets.peer_learned ? (
                 <>
-                  {r.peerName}'s share, read from {r.peerName}'s {role === "B" ? "redeem" : "refund"} signature
+                  {r.peerName}'s share, read from {r.peerName}'s {revealedIn(role)}
                 </>
               ) : (
                 <>{r.peerName}'s share, unknown to {role}</>
@@ -89,7 +89,7 @@ export function PartyPanel({
         </ul>
         {swap?.secrets.peer_learned ? (
           <p className="magic" role="status">
-            {role} read {r.peer} from {r.peerName}'s {role === "B" ? "redeem" : "refund"} signature → {role} can now spend the joint Ironwood note
+            {role} read {r.peer} from {r.peerName}'s {revealedIn(role)} → {role} can now spend the joint Ironwood note
           </p>
         ) : null}
       </div>
@@ -146,4 +146,11 @@ export function PartyPanel({
       ) : null}
     </section>
   );
+}
+
+// What revealed the peer's share to `role`: B learns z from Z's redeem (Bitcoin) or claim (EVM),
+// Z learns b from B's refund.
+function revealedIn(role: Role): string {
+  if (coin().kind === "evm") return role === "B" ? "claim" : "refund";
+  return role === "B" ? "redeem signature" : "refund signature";
 }

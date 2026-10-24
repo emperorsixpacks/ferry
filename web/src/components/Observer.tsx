@@ -69,7 +69,11 @@ export function Observer({ btc, zec }: { btc: string[]; zec: string[] }) {
         </div>
         <div>
           <dt>Shared key</dt>
-          <dd>None. {coin().name} shows secp256k1 keys; each Ironwood spend shows only a freshly randomized rk.</dd>
+          <dd>
+            {coin().kind === "evm"
+              ? `None. ${coin().name} shows the addresses of both shares and, after a claim or refund, one share itself; each Ironwood spend shows only a freshly randomized rk.`
+              : `None. ${coin().name} shows secp256k1 keys; each Ironwood spend shows only a freshly randomized rk.`}
+          </dd>
         </div>
         <div>
           <dt>Shared address</dt>
@@ -77,7 +81,7 @@ export function Observer({ btc, zec }: { btc: string[]; zec: string[] }) {
         </div>
         <div>
           <dt>Timing</dt>
-          <dd>The ZEC sweep waits a random delay, so it doesn't line up with the {coin().name} redeem.</dd>
+          <dd>The ZEC sweep waits a random delay, so it doesn't line up with the {coin().name} {coin().kind === "evm" ? "claim" : "redeem"}.</dd>
         </div>
       </dl>
     </section>

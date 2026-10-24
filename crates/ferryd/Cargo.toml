@@ -11,6 +11,7 @@ ferry-core.workspace = true
 ferry-dleq.workspace = true
 ferry-zec = { path = "../ferry-zec" }
 ferry-btc = { path = "../ferry-btc", features = ["rpc"] }
+ferry-evm = { path = "../ferry-evm" }
 ferry-watchtower = { path = "../ferry-watchtower" }
 anyhow = "1"
 axum = "0.8"

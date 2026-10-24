@@ -97,6 +97,28 @@ and observer lines name the coin ("0.5 LTC", "fee 2000 lit", "the Litecoin trans
 A taker refuses a maker whose offer is for another coin, and a maker refuses a Propose for
 another coin; the coin is part of `SwapParams` and so of the transcript.
 
+**USDC on an EVM chain.** A daemon started with `--counter evm` swaps ZEC against an ERC-20 in
+FerryLock (docs/EVM.md). The same paths answer, in the same shape:
+- `chains.btc` is `{ "coin": "usdc", "ticker": "USDC", "decimals": 6, "network": "anvil" |
+  "base-sepolia" | "base", "height", "time" }`, where `time` is the latest block's unix time.
+- `btc_sat` fields hold token base units.
+- `balances.eth_wei` is gas money.
+- `offer` has `pair: "ZEC/USDC"`, `rate_sat_per_zec` in token units per ZEC, and `t1_secs`,
+  `refund_secs` and `delta_secs` instead of block counts.
+- A `counter` block names the chain id, contract, token and our account.
+
+Swap views add `deadlines.t1_unix`, `t2_unix` and `now_unix` (block time) and a `counter` block
+(swap id, claimer, refunder, the share commitments `z_addr`/`b_addr`, `ready_signed`). The
+timeline reuses the Bitcoin kinds where the step is the same:
+- `btc_lock_broadcast` / `btc_lock_seen`: the FerryLock lock.
+- `redeem_adaptor_sent` / `redeem_adaptor_received`: B's Ready signature.
+- `btc_redeem_broadcast`: the claim.
+- `cancel_seen`: t1 passed without a claim.
+- `refund_broadcast` / `punish_broadcast`: the refund and the punish.
+
+It also adds `terms_agreed`, `claim_seen` and `refund_seen`. `GET /peer/offer` is an `EvmOffer`
+(`counter: "evm"`, `token_symbol`…), and the peer messages are EVM envelopes.
+
 ## POST /api/swaps
 
 Start a swap as taker against a maker.

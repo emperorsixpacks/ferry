@@ -60,12 +60,16 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
           </p>
           <p className="mt-1 font-mono text-xs text-slate-600">
             {refused
-              ? `Your wallet couldn't send the ZEC from shielded notes only, so no ZEC moved. The other side takes its ${coin().name.toLowerCase()} back after the deadline.`
-              : phase === "unwinding"
-                ? "The swap didn't finish in time, so it was called off. The ways back were signed before anything was locked."
-                : swap.watchtower?.status === "armed"
-                  ? "Both ways back were signed before anything was locked. A watchtower holds them too, so the deadlines are met even if this daemon goes offline."
-                  : "Both ways back were signed before anything was locked. Keep this daemon running until the swap is done."}
+              ? `Your wallet couldn't send the ZEC from shielded notes only, so no ZEC moved. The other side takes its ${coin().kind === "evm" ? coin().asset : coin().asset.toLowerCase()} back after the deadline.`
+              : coin().kind === "evm"
+                ? phase === "unwinding"
+                  ? `The swap didn't finish in time, so it was called off. From here the FerryLock contract on ${coin().name} only pays back.`
+                  : `The FerryLock contract on ${coin().name} enforces both ways back and their deadlines. Keep this daemon running until the swap is done.`
+                : phase === "unwinding"
+                  ? "The swap didn't finish in time, so it was called off. The ways back were signed before anything was locked."
+                  : swap.watchtower?.status === "armed"
+                    ? "Both ways back were signed before anything was locked. A watchtower holds them too, so the deadlines are met even if this daemon goes offline."
+                    : "Both ways back were signed before anything was locked. Keep this daemon running until the swap is done."}
           </p>
         </Banner>
       ) : (
@@ -115,12 +119,23 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
             <Detail label="Started" value={swap.timeline[0] ? new Date(swap.timeline[0].at).toLocaleString() : "–"} />
             <Detail label={swap.role === "Z" ? "You send" : "You pay"} value={<span className="font-mono">{swap.role === "Z" ? a.zec : a.btc}</span>} />
             <Detail label="You receive" value={<span className="font-mono">{swap.role === "Z" ? a.btc : a.zec}</span>} />
-            <Detail label="Network fee" value={<span className="font-mono">{status?.offer.fee_sat != null ? `${status.offer.fee_sat.toLocaleString("en-US")} ${coin().unit}` : "–"}</span>} />
+            <Detail
+              label="Network fee"
+              value={<span className="font-mono">{coin().kind === "evm" ? "Gas only, paid in ETH" : status?.offer.fee_sat != null ? `${status.offer.fee_sat.toLocaleString("en-US")} ${coin().unit}` : "–"}</span>}
+            />
             <Detail label="Rate" value={<span className="font-mono">{status ? `1 ZEC = ${btcText(status.offer.rate_sat_per_zec)} ${coin().ticker}` : "–"}</span>} />
-            <Detail label={`${coin().name} locked at`} value={<span className="font-mono">{d.btc_lock_height != null ? `block ${d.btc_lock_height}` : "not yet"}</span>} />
+            <Detail label={`${coin().asset} locked at`} value={<span className="font-mono">{d.btc_lock_height != null ? `block ${d.btc_lock_height}` : "not yet"}</span>} />
             <Detail
               label="Called off at the latest"
-              value={<span className="font-mono">{d.btc_lock_height != null ? `block ${d.btc_lock_height + d.t1_blocks}` : `${d.t1_blocks} blocks after the lock`}</span>}
+              value={
+                <span className="font-mono">
+                  {d.t1_unix != null
+                    ? new Date(d.t1_unix * 1000).toLocaleString()
+                    : d.btc_lock_height != null
+                      ? `block ${d.btc_lock_height + d.t1_blocks}`
+                      : `${d.t1_blocks} blocks after the lock`}
+                </span>
+              }
             />
           </div>
         </CardContent>
@@ -207,7 +222,7 @@ function Outcome({ swap, status }: { swap: SwapView; status: Status | null }) {
     settled: {
       icon: <CheckCircle size={28} weight="duotone" className="mx-auto text-brand-500" />,
       title: `You received ${a.btc}`,
-      note: `The other side stopped responding, so after the deadline the ${coin().name} was released to you. Your ${a.zec} stays locked: you were paid for it.`,
+      note: `The other side stopped responding, so after the deadline the ${coin().asset} was released to you. Your ${a.zec} stays locked: you were paid for it.`,
     },
     refunded: {
       icon: <ArrowCounterClockwise size={28} weight="duotone" className="mx-auto text-slate-500" />,
@@ -309,7 +324,9 @@ function ChainsSee({ swap }: { swap: SwapView }) {
         </div>
         <div className="rounded border border-slate-200 bg-slate-50 p-4 text-sm md:col-span-2">
           <Label>Can the two be linked?</Label>
-          <p className="mt-2 text-slate-700">No. The ZEC amount is encrypted, the shielded address was made for this swap and never published, and the {coin().name} side carries none of your Zcash keys.</p>
+          <p className="mt-2 text-slate-700">No. The ZEC amount is encrypted, the shielded address was made for this swap and never published, and {coin().kind === "evm"
+            ? `the ${coin().name} side shows one key share only once a claim or refund publishes it, which opens nothing on its own and points to no note.`
+            : `the ${coin().name} side carries none of your Zcash keys.`}</p>
         </div>
       </CardContent>
     </Card>

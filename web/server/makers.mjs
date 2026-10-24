@@ -104,7 +104,9 @@ function summarize(m, index, offer, now) {
   const paused = offer?.paused === true;
   const making = offer?.making === true;
   // The offer says which coin the maker swaps (ferryd --chain); older makers leave it out.
-  const pair = offer?.coin === "ltc" ? "ZEC/LTC" : offer?.coin === "btc" ? "ZEC/BTC" : m.pair;
+  // An EVM maker (ferryd --counter evm) names its token instead.
+  const token = offer?.counter === "evm" && /^[A-Za-z0-9]{1,11}$/.test(offer?.token_symbol ?? "") ? offer.token_symbol.toUpperCase() : null;
+  const pair = token ? `ZEC/${token}` : offer?.coin === "ltc" ? "ZEC/LTC" : offer?.coin === "btc" ? "ZEC/BTC" : m.pair;
   return {
     index,
     name: m.name,
