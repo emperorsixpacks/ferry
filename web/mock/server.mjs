@@ -732,7 +732,7 @@ function peerQuote(m, body) {
   const taker = m.role === "Z" ? "B" : "Z";
   if (body.taker_role !== taker) return [400, { error: `this maker quotes takers with role ${taker}` }];
   if (m.paused) return [403, { error: "not making offers" }];
-  if (slotsOf(m) === 0) return [409, { error: "busy: running as many swaps as it takes at once; ask again in a few minutes" }];
+  if (slotsOf(m) === 0) return [409, { error: "busy: running as many swaps as it takes at once; ask again once one of them finishes" }];
   const offer = peerOffer(m);
   if (b.bucket < m.min || b.lower >= m.max) return [400, { error: "outside this maker's range" }];
   const min = Math.max(b.lower, m.min);
@@ -917,8 +917,8 @@ function handler(role, coin = null) {
       if (zat < maker.min || zat > maker.max) return send(res, 400, { error: `Amount must be between ${zecAmount(maker.min)} and ${zecAmount(maker.max)}` });
       // several swaps at once, up to --max-swaps on each side (ferryd's words)
       const peer = role === "Z" ? "B" : "Z";
-      if (capacityOf(role).free_slots === 0) return send(res, 409, busyError(`this node already runs ${MAX_SWAPS} swaps, as many as it takes at once (--max-swaps); try again in a few minutes`));
-      if (slotsOf(maker) === 0) return send(res, 409, busyError(`the maker can't take another swap right now (Busy: it already runs as many swaps as it takes at once); try again in a few minutes`));
+      if (capacityOf(role).free_slots === 0) return send(res, 409, busyError(`this node already runs ${MAX_SWAPS} swaps, as many as it takes at once (--max-swaps); try again once one of them finishes`));
+      if (slotsOf(maker) === 0) return send(res, 409, busyError(`the maker can't take another swap right now (Busy: it already runs as many swaps as it takes at once); try again once one of them finishes`));
       // a firm quote holds the swap to its rate
       const firm = body.quote ? honour(body.quote, maker, zat) : null;
       if (firm?.error) return send(res, 400, { error: firm.error });
@@ -948,8 +948,8 @@ function handler(role, coin = null) {
         return send(res, 400, { error: mine(`B does not have enough BTC: ${btcAmount(sat + LOCK_FEE_RESERVE)} needed (the amount plus about ${btcAmount(LOCK_FEE_RESERVE)} for the lock's fee), ${btcAmount(bHave)} in the wallet`) });
       // enough in the wallet, but swaps in progress hold it: busy until they lock or end
       const short = freeOf("Z", "zec_shielded_zat") < zat + ZEC_FEE_RESERVE ? "Z" : freeOf("B", "btc_sat") < sat + LOCK_FEE_RESERVE ? "B" : null;
-      if (short === role) return send(res, 409, busyError("swaps in progress hold this node's funds until they lock; try again in a few minutes"));
-      if (short === peer) return send(res, 409, busyError("the maker can't take another swap right now (Busy: swaps in progress hold its funds); try again in a few minutes"));
+      if (short === role) return send(res, 409, busyError("swaps in progress hold this node's funds until they lock; try again once one of them finishes"));
+      if (short === peer) return send(res, 409, busyError("the maker can't take another swap right now (Busy: swaps in progress hold its funds); try again once one of them finishes"));
       firm?.take();
       const s = newSwap(role, body.maker ?? null, zat, rate, { payoutTo: body.payout_to ?? null, sweepAddr });
       return send(res, 201, { id: s.id });

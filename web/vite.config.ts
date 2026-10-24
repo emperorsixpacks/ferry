@@ -285,7 +285,7 @@ function makers(): Plugin {
         } catch {
           /* not JSON */
         }
-        res.end(busy ? JSON.stringify({ error: "Every partner is busy right now. Try again in a few minutes.", code: "busy" }) : text);
+        res.end(busy ? JSON.stringify({ error: "Every partner is busy right now. Try again once one of their swaps finishes.", code: "busy" }) : text);
       } catch {
         send(res, 502, { error: "Can't reach the daemon. Is it running?" });
       }

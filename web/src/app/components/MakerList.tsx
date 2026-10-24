@@ -86,7 +86,7 @@ function PartnerRow({ m, role, zat, active, onPick, age, firm, now }: { m: Maker
   if (!m.online) meta = "Offline";
   else if (m.paused) meta = `Paused${age != null && !fixed ? ` · rate from ${ago(age)}` : ""}`;
   // running as many swaps as it takes at once: it has room again when one of them finishes
-  else if (m.busy) meta = "Busy · try again in a few minutes";
+  else if (m.busy) meta = "Busy · full for now";
   else if (!m.available) meta = "Not taking swaps";
   else if (!takes) meta = m.role === "Z" ? "Only sells ZEC" : m.role === "B" ? "Only buys ZEC" : "Swaps the same side as you";
   else if (q && !fitsAmount) meta = zat < q.min ? `Takes at least ${zec(q.min)} ZEC` : `Takes up to ${zec(capacity(q))} ZEC right now`;

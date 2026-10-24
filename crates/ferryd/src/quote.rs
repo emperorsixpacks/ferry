@@ -270,7 +270,9 @@ pub enum QuoteError {
     WrongRole(&'static str),
     #[error("not making offers")]
     NotMaking,
-    #[error("busy: it runs as many swaps as it takes at once; ask again in a few minutes")]
+    #[error(
+        "busy: it runs as many swaps as it takes at once; ask again once one of them finishes"
+    )]
     Busy,
     #[error("this maker's swaps are {0}")]
     OutsideOffer(String),

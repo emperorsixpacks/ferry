@@ -25,7 +25,10 @@ const Z = BASE_PORT + 11;
 const B = BASE_PORT + 12;
 const VITE = Number(process.env.SHOOT_VITE_PORT ?? BASE_PORT + 51);
 const PROD = Number(process.env.SHOOT_PROD_PORT ?? BASE_PORT + 52);
-const BUSY_TEXT = "Every partner is busy right now. Try again in a few minutes.";
+// the UI server says no time (it doesn't know the pair); the app adds a swap's own time from
+// server/paths.mjs, here the local range
+const BUSY_TEXT = "Every partner is busy right now. Try again once one of their swaps finishes.";
+const UI_BUSY = "Every partner is busy right now. A swap takes about 1–5 min, so one usually has room again within that.";
 const OUT = (process.env.SHOOT_OUT ?? new URL("../screenshots/app/makers/", import.meta.url).pathname).replace(/\/?$/, "/");
 mkdirSync(OUT, { recursive: true });
 
@@ -220,16 +223,16 @@ check(true, "...at Bram's firm price, never the full partner's");
 await settings(oneFull).click();
 await oneFull.getByRole("radiogroup", { name: "Swap partner" }).waitFor();
 const kestrelRow = await partner(oneFull, /Kestrel/).textContent();
-check(/Busy · try again in a few minutes/.test(kestrelRow) && (await partner(oneFull, /Kestrel/).getAttribute("aria-disabled")) === "true", `the settings list Kestrel as busy, not pickable (${kestrelRow})`);
+check(/Busy · full for now/.test(kestrelRow) && (await partner(oneFull, /Kestrel/).getAttribute("aria-disabled")) === "true", `the settings list Kestrel as busy, not pickable (${kestrelRow})`);
 check(/can take 4 more swaps/i.test(await partner(oneFull, /^Bram/).textContent()), "...and Bram with its free slots");
 await sleep(300);
 await shot(oneFull, "08-partner-busy-1440");
 await oneFull.close();
 for (const width of [1440, 390]) {
   const allFull = await withFull(width, (m) => m.role === "B");
-  await text(allFull, BUSY_TEXT);
+  await text(allFull, UI_BUSY);
   const m = await message(allFull);
-  check(m.text === BUSY_TEXT && m.calm, `every partner full (${width}): "${m.text}", calm, not as an error`);
+  check(m.text === UI_BUSY && m.calm, `every partner full (${width}): "${m.text}", calm, not as an error`);
   check(await allFull.locator("form button[type=submit]").isDisabled(), `...and nothing to press (${width})`);
   await sleep(300);
   await shot(allFull, `09-all-busy-${width}`);
@@ -264,9 +267,9 @@ await several.locator("form button[type=submit]").click();
 await several.waitForURL(/\/app\/swap\//);
 check(true, "the card started a 4th swap beside the 3");
 await several.goto(DEV + "/app");
-await text(several, BUSY_TEXT);
+await text(several, UI_BUSY);
 const m4 = await message(several);
-check(m4.text === BUSY_TEXT && m4.calm, `with 4 live swaps the node is full: "${m4.text}"`);
+check(m4.text === UI_BUSY && m4.calm, `with 4 live swaps the node is full: "${m4.text}"`);
 await several.close();
 await severalPhone.close();
 

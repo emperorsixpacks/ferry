@@ -39,7 +39,8 @@
 //                           allowlist. Several swaps may run at once on a pair: each daemon takes as
 //                           many as its free funds and its --max-swaps allow, and a start it can't take
 //                           is answered 409 {"code": "busy"}, which reaches the browser as "Every
-//                           partner is busy right now. Try again in a few minutes."
+//                           partner is busy right now. Try again once one of their swaps finishes."
+//                           (the app adds a swap's own time, from paths.mjs, where it knows the pair)
 //   PUBLIC_ORIGIN [unset]   e.g. https://ferry.example: POSTs whose Origin is something else get 403
 //                           (with FERRY_OWN_NODE=1, a loopback origin's other loopback name passes too:
 //                           http://127.0.0.1:7865 and http://localhost:7865)
@@ -362,7 +363,7 @@ function startsRefused(req, n) {
 // What the browser hears when a daemon can't take a swap now: it runs as many swaps as it takes at
 // once (ferryd --max-swaps), its free funds are tied up in swaps in progress, or its partner said the
 // same. ferryd answers 409 {"code": "busy"}; anything else passes as it is.
-const BUSY_TEXT = "Every partner is busy right now. Try again in a few minutes.";
+const BUSY_TEXT = "Every partner is busy right now. Try again once one of their swaps finishes.";
 function busyBody(body) {
   return body?.code === "busy" ? { error: BUSY_TEXT, code: "busy" } : body;
 }

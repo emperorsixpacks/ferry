@@ -135,7 +135,7 @@ export function mockRouter(world, env = process.env) {
     else if (m.paused) refusal = "The maker refused: not making offers";
     else if (zat < m.min || zat > m.max) refusal = `Amount must be between ${zecStr(m.min)} and ${zecStr(m.max)}`;
     else if (full(leg.role)) {
-      refusal = "Busy: this node already runs as many swaps as it takes at once (--max-swaps); try again in a few minutes";
+      refusal = "Busy: this node already runs as many swaps as it takes at once (--max-swaps); try again once one of them finishes";
       busy = true;
     }
     const counter = m ? Math.round((zat / 1e8) * m.rate) : 0;

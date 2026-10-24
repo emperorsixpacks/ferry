@@ -708,8 +708,8 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             let body: serde_json::Value = resp.json().await.unwrap_or_default();
             if let Some(why) = crate::capacity::peer_busy(status, &body) {
                 return Err(ApiError::busy(format!(
-                    "the maker can't take another swap right now ({why}); try again in a few \
-                     minutes"
+                    "the maker can't take another swap right now ({why}); try again once one of \
+                     its swaps finishes"
                 )));
             }
             let msg = body["error"].as_str().unwrap_or("proposal refused");
@@ -1150,7 +1150,8 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                         return Err(ApiError::busy(format!(
                             "the shielded ZEC this swap needs is held by {} swap(s) in progress, \
                              or sits in notes their locks may take (change waits for \
-                             confirmations); try again in a few minutes",
+                             confirmations); try again once they have locked and the change \
+                             has confirmed",
                             needs.len() - 1
                         )));
                     }
@@ -1174,8 +1175,8 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 if have < held.saturating_add(U256::from(params.token_amount)) {
                     if live && have >= U256::from(params.token_amount) {
                         return Err(ApiError::busy(format!(
-                            "the {} this swap needs is held by swaps in progress; try again in \
-                             a few minutes",
+                            "the {} this swap needs is held by swaps in progress; try again once \
+                             one of them has locked",
                             params.token_symbol
                         )));
                     }
@@ -1221,7 +1222,8 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             if live && eth >= cost(mine) {
                 return Err(ApiError::busy(format!(
                     "the ETH this swap's gas needs is held for the calls of swaps in progress \
-                     ({} needed in all, {} in the account); try again in a few minutes",
+                     ({} needed in all, {} in the account); try again once one of them \
+                     finishes",
                     show(all),
                     show(eth)
                 )));

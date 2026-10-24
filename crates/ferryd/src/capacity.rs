@@ -37,7 +37,7 @@ pub const TEST_MAX_SWAPS: u32 = 4;
 pub const MAX_SWAPS_LIMIT: u32 = 64;
 
 impl ApiError {
-    /// 409 with `"code": "busy"`: try again in a few minutes.
+    /// 409 with `"code": "busy"`: try again once a swap finishes (or has locked).
     pub fn busy(msg: impl std::fmt::Display) -> ApiError {
         ApiError(409, format!("{BUSY_PREFIX}{msg}"))
     }
@@ -118,7 +118,7 @@ pub fn admit(max: u32, c: Count) -> Result<(), ApiError> {
     if c.counted() >= max {
         return Err(ApiError::busy(format!(
             "this node is running {} swaps, as many as it takes at once (--max-swaps {max}); \
-             try again in a few minutes",
+             try again once one of them finishes",
             c.counted()
         )));
     }

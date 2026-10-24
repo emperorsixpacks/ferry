@@ -539,8 +539,8 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             let body: serde_json::Value = resp.json().await.unwrap_or_default();
             if let Some(why) = crate::capacity::peer_busy(status, &body) {
                 return Err(ApiError::busy(format!(
-                    "the maker can't take another swap right now ({why}); try again in a few \
-                     minutes"
+                    "the maker can't take another swap right now ({why}); try again once one of \
+                     its swaps finishes"
                 )));
             }
             let msg = body["error"]
@@ -892,7 +892,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     return Err(ApiError::busy(format!(
                         "the shielded ZEC this swap needs is held by {} swap(s) in progress, or \
                          sits in notes their locks may take (change waits for confirmations); \
-                         try again in a few minutes",
+                         try again once they have locked and the change has confirmed",
                         needs.len() - 1
                     )));
                 }
@@ -925,7 +925,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 if live {
                     return Err(ApiError::busy(format!(
                         "the {t} this swap needs is held by swaps in progress ({} free, {} \
-                         needed); try again in a few minutes",
+                         needed); try again once one of them has locked",
                         coin_str(
                             u64::try_from(crate::withdraw::free(u128::from(have), &holds))
                                 .unwrap_or(0),
