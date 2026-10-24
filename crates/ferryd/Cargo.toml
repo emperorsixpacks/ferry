@@ -36,3 +36,5 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# Property tests of the fee-bump planner (bump.rs).
+proptest = { version = "1", default-features = false, features = ["std"] }

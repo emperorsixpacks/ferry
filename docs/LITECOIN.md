@@ -51,6 +51,7 @@ T2 and nobody sweeps.
 | watch-only wallet | descriptor wallet + `importdescriptors` | **"Descriptor wallets not supported"**. Ferry uses a legacy blank watch-only wallet + `importmulti` |
 | dust (`testmempoolaccept`) | P2TR 330, P2WPKH 294, P2PKH 546 | **10×**: P2TR 3300, P2WPKH 2940, P2PKH 5460 (`-dustrelayfee` 30 lit/vB) |
 | min relay fee | 1 sat/vB | 1 lit/vB |
+| fee bump (`ferryd --bump on`) | `submitpackage` (Core 28), replacement on by default | **no `submitpackage`** (only a one-transaction `testmempoolaccept`); **`-mempoolreplacement` is 0 by default**: a valid replacement is refused as `txn-mempool-conflict` (measured), so a child can be sent once but not replaced unless litecoind runs with `-mempoolreplacement=1` |
 | block time | 600 s | 150 s |
 | unit | sat | litoshi (`lit`) |
 | MWEB | n/a | MWEB addresses (`ltcmweb1…`, `tmweb1…`) have no scriptPubKey and are rejected as payout addresses |

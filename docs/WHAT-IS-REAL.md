@@ -114,7 +114,8 @@ Set up by `infra/deploy` ([DEPLOY.md](DEPLOY.md)). <!-- add the demo URL here on
   offers). It is not built into ferryd: a ferryd started by hand has no cap.
 - **Why the cap:** the cross-chain proof is unaudited
   ([Known limits](THREAT-MODEL.md#the-cross-chain-proof-is-unaudited)).
-- **Bitcoin and Litecoin are not offered on mainnet**: their prepared transactions use fixed fees
+- **Bitcoin and Litecoin are not offered on mainnet**: their prepared transactions use fixed fees.
+  A fee bump (off by default) has run on regtest only and has had no outside review
   ([Known limits](THREAT-MODEL.md#fixed-fees-on-prepared-bitcoin-transactions-so-bitcoin-and-litecoin-stay-on-test-networks)).
 
 ## NEAR Intents

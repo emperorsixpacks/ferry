@@ -232,8 +232,9 @@ and where, is in [docs/WHAT-IS-REAL.md](docs/WHAT-IS-REAL.md).
   neither side holds the whole key.
 - The cross-group DLEQ is Serai's `dleq` under its `experimental` feature, which Serai's 2023 audit
   excluded; its README says "none are recommended". So mainnet is capped at 0.02 ZEC per swap.
-- Presigned Bitcoin transactions use fixed fees, so Bitcoin and Litecoin stay on test networks
-  until an anchor/CPFP design ships.
+- Presigned Bitcoin transactions use fixed fees, so Bitcoin and Litecoin stay on test networks.
+  A child-pays-for-parent fee bump is built (`ferryd --bump on`, off by default) but has had no
+  outside review; Bitcoin and Litecoin stay off mainnet until it has.
 - The joint viewing key is built from an arbitrary `ak`, so it is not quantum-recoverable under
   ZIP 2005 (the same constructor FROST setups use today). The address is single-use and short-lived.
 

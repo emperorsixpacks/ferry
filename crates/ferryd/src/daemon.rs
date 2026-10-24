@@ -25,6 +25,8 @@ use crate::rebroadcast::{RebroadcastDecision, Rebroadcaster};
 use crate::record::{fvk_from_hex, Pending, Rebroadcast, Store, SwapRecord};
 use crate::view::{self, StatusView};
 
+mod bumper;
+
 /// An HTTP-facing error: status code and message.
 #[derive(Debug)]
 pub struct ApiError(pub u16, pub String);
@@ -1938,7 +1940,15 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             ),
             (Role::Z, "BtcRedeemed") => {
                 let got = params.btc_amount - params.btc_fee;
+                // A fee bump (--bump on) took its last child's fee out of that payout.
+                let bumped = rec.bump.as_ref().map_or(0, |b| b.child_fee).min(got);
                 let label = match &rec.payout_to {
+                    None if bumped > 0 => format!(
+                        "Swap complete. {} is in Z's wallet: tx_redeem paid {}, and the fee bump took {}",
+                        btc_str(got - bumped),
+                        btc_str(got),
+                        btc_str(bumped)
+                    ),
                     None => format!("Swap complete. {} is in Z's wallet", btc_str(got)),
                     Some(to) => format!(
                         "Swap complete. {} went to {}, the payout address given for this swap",
@@ -2222,6 +2232,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 self.exchange(rec).await;
             }
             self.rebroadcast(rec).await;
+            self.bump(rec).await;
             crate::tower::arm(&self.cli, rec).await;
         }
         self.maybe_timeout(rec).await;

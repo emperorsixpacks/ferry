@@ -1,5 +1,6 @@
 //! `ferryd`: runs one party (Z or B) of a Ferry ZEC<->BTC swap.
 
+mod bump;
 mod capacity;
 mod config;
 mod daemon;
@@ -138,6 +139,7 @@ async fn run<L: ZecLeg + 'static>(cli: Cli, leg: L) -> anyhow::Result<()> {
     }
     cli.check_maker_spread(cli.network == ferry_btc::bitcoin::Network::Bitcoin)
         .map_err(anyhow::Error::msg)?;
+    cli.check_bump().map_err(anyhow::Error::msg)?;
     let (peer_addr, api_addr) = (cli.listen, cli.api_listen);
     if !api_addr.ip().is_loopback() && !cli.api_allow_remote {
         bail!(

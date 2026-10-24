@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ferry_btc::bitcoin::Transaction;
+use ferry_btc::bitcoin::{Transaction, Txid};
 use ferry_core::{Action, Envelope, Message, Role, Secret32, Swap};
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +24,31 @@ pub struct Rebroadcast {
     pub tx: Transaction,
     /// The timeline already has its `*_broadcast` entry.
     pub announced: bool,
+}
+
+/// Fee bumping of the presigned spend we are waiting on (`--bump`, crate::bump): what the daemon
+/// needs to carry on after a restart. The node is asked first for what it holds; this fills in
+/// what it no longer does.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BumpState {
+    /// The spend (its txid) this state belongs to. A state left over from another spend is
+    /// dropped.
+    pub parent: Option<Txid>,
+    /// Our last child, its fee and vsize, and the fee rate (sat per kvB) of the package of the
+    /// parent and that child.
+    pub child_txid: Option<Txid>,
+    pub child_fee: u64,
+    pub child_vsize: u64,
+    pub package_rate: u64,
+    /// Bumps sent for this spend, and the chain height of the last one.
+    pub attempts: u32,
+    pub last_height: Option<u64>,
+    /// Where our children pay: a script (hex) of our own wallet, taken once and kept.
+    pub pay_to: Option<String>,
+    /// Height of the block at which the node last refused a child: tried again at the next one.
+    pub refused_height: Option<u64>,
+    /// Timeline notes already written about why this spend is not bumped, so each is written once.
+    pub noted: Vec<String>,
 }
 
 /// An [`Action`] the daemon has not executed yet, in a form that survives a restart.
@@ -249,6 +274,9 @@ pub struct SwapRecord {
     /// template B signed).
     #[serde(default)]
     pub payout_to: Option<String>,
+    /// Fee bumping of the spend we wait on (`--bump on`), if it ever started.
+    #[serde(default)]
+    pub bump: Option<BumpState>,
 }
 
 impl SwapRecord {
@@ -296,6 +324,7 @@ impl SwapRecord {
             sweep_to: None,
             payout_to: None,
             late_note_closed: false,
+            bump: None,
         }
     }
 
@@ -859,6 +888,43 @@ pub(crate) mod tests {
         store.remove(&rec.id).unwrap();
         assert!(store.load_all().unwrap().is_empty());
         store.remove(&rec.id).unwrap();
+    }
+
+    /// Records written before fee bumping have no `bump`; one with a state keeps it.
+    #[test]
+    fn bump_state_loads_from_old_records_and_round_trips() {
+        let mut rec = sample_record();
+        let mut old = serde_json::to_value(&rec).unwrap();
+        assert!(old.as_object_mut().unwrap().remove("bump").is_some());
+        let loaded: SwapRecord = serde_json::from_value(old).unwrap();
+        assert_eq!(loaded.bump, None);
+
+        let txid = |n: u8| {
+            use ferry_btc::bitcoin::hashes::Hash;
+            Txid::from_byte_array([n; 32])
+        };
+        rec.bump = Some(BumpState {
+            parent: Some(txid(1)),
+            child_txid: Some(txid(2)),
+            child_fee: 4_660,
+            child_vsize: 111,
+            package_rate: 30_000,
+            attempts: 2,
+            last_height: Some(1_001),
+            pay_to: Some("5120aa".into()),
+            refused_height: None,
+            noted: vec!["exhausted".into()],
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        store.save(&rec).unwrap();
+        let back = store.load_all().unwrap().remove(0);
+        assert_eq!(back.bump, rec.bump);
+        // A record from a newer build with fields this one does not know still loads.
+        let mut newer = serde_json::to_value(&rec).unwrap();
+        newer["bump"]["future_field"] = serde_json::json!(7);
+        let loaded: SwapRecord = serde_json::from_value(newer).unwrap();
+        assert_eq!(loaded.bump, rec.bump);
     }
 
     #[test]

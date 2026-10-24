@@ -78,6 +78,17 @@ impl Coin {
         *self == Coin::Btc
     }
 
+    /// Whether the node has `submitpackage` (package relay and package CPFP): Bitcoin Core ≥ 28,
+    /// which Ferry pins, has it; Litecoin Core 0.21 has only a one-transaction `testmempoolaccept`
+    /// and no package submission, so a fee bump there only ever sends a child after its parent is
+    /// already in the mempool.
+    pub fn supports_packages(self) -> bool {
+        match self {
+            Coin::Btc => true,
+            Coin::Ltc => false,
+        }
+    }
+
     /// The node's default `-dustrelayfee`: 3 sat/vB on Bitcoin Core, 30 lit/vB on Litecoin Core
     /// (measured with `testmempoolaccept` on litecoind 0.21.5.6).
     pub fn dust_relay_fee(self) -> FeeRate {

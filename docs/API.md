@@ -296,7 +296,9 @@ while a route is moving on that pair, and no private swap while another route mo
   "offer": { "pair": "ZEC/BTC", "rate_sat_per_zec": 410000, "min_zat": 10000000, "max_zat": 1000000000,
              "fee_sat": 2000, "t1_blocks": 12, "t2_blocks": 24, "btc_lock_confs": 2, "zec_confs": 3 },
   // fee_sat: the fixed fee of each presigned BTC transaction (the redeem pays one; the refund
-  // path pays two: cancel + refund). t1/t2 in BTC blocks; confirmations Z/B wait for. A maker's
+  // path pays two: cancel + refund). It is a baseline: a ferryd started with --bump on may pay
+  // more for its own redeem, refund or punish, in a child, out of its own payout (the timeline
+  // says when: `fee_bump`). t1/t2 in BTC blocks; confirmations Z/B wait for. A maker's
   // offer also has liquidity_zat and free_slots, as in /peer/offer.
   "features": ["route", "payout", "withdraw"]
   // What this ferryd supports beyond the base API. "route": POST /api/swaps takes the route
@@ -755,6 +757,10 @@ free-form. The mock uses: `propose_sent`, `propose_received`, `dleq_verified`, `
 `cancel_seen`, `punish_seen`, `swap_complete`, `refunded`, `reclaimed`, `punished`. ferryd also
 emits `route_leg` (local) first on a swap started as a route leg, `payout_to` (local) on a Z swap
 started with a payout address,
+`fee_bump` (btc, with the child's `txid`) each time a ferryd started with `--bump on` sends a child
+that raises the fee of its own redeem, refund or punish, or replaces its earlier child, and
+`fee_bump_note` (btc) once per reason such a spend cannot be bumped (a third-party payout, a cap
+reached, a presigned fee the node will not take at any price),
 `sweep_delayed` (local) when it schedules the random delay before a ZEC sweep or reclaim,
 `peer_message_ignored` / `peer_message_rejected` for a late or invalid peer message, and
 `redeem_adaptor_withheld` (B, local) when its redeem adaptor (EVM: Ready signature) had not reached Z
