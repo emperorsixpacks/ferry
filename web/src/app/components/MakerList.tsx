@@ -1,103 +1,93 @@
-import type { ReactNode } from "react";
+import { Check } from "@phosphor-icons/react";
 import type { Maker, Role } from "@/api";
-import { CHAIN_NAMES, coin, zec } from "@/format";
+import { coin, zec } from "@/format";
 import { btcText } from "@/swap/shared";
-import { Label } from "./Layout";
-import { StatusBadge } from "./ui/badge";
 import { cn } from "../lib/utils";
-import { ago, selectable, swappable } from "../lib/makers";
+import { ago, capacity, fits, quoteOf, selectable, swappable } from "../lib/makers";
+import { arrowKeys } from "./ui/sheet";
 
-// The makers this UI server lists for the pair on screen, as a side panel next to the swap card:
-// pick one and the card quotes its rate and range. Two lines a maker, so it fits half the page.
+// The swap partners this server lists for the coin on screen, in the swap settings: "Best rate"
+// (Ferry picks for the amount) or one partner. A partner that is offline, paused or can't take
+// the amount is listed but can't be picked.
 
-export function MakerList({
+export function PartnerList({
   makers,
   role,
-  selected,
-  onSelect,
+  zat,
+  pick,
+  current,
+  onPick,
   fetchedAt,
   now,
   error,
 }: {
   makers: Maker[] | null | undefined;
   role: Role;
-  selected: string | null;
-  onSelect: (name: string) => void;
+  // the amount on the form (0: none yet)
+  zat: number;
+  // the partner the viewer chose; null: best rate
+  pick: string | null;
+  // the partner quoting now
+  current: string | null;
+  onPick: (name: string | null) => void;
   fetchedAt: number;
   now: number;
   error: string | null;
 }) {
   const mine = (makers ?? []).filter(swappable);
-  const online = mine.filter((m) => m.online).length;
+  if (makers === undefined) return <p className="px-5 py-6 text-sm text-slate-500">Looking for partners…</p>;
+  if (makers === null) return <p className="px-5 py-4 text-sm text-slate-500">This server has one swap partner, set by whoever runs it.</p>;
   return (
-    // beside the swap card (lg) the panel takes the card's height, not its own, and scrolls
-    <section aria-labelledby="makers-title" className="flex min-w-0 flex-col border border-slate-200 bg-white lg:[contain:size]">
-      <div className="flex items-baseline justify-between gap-4 border-b border-slate-100 px-5 py-4">
-        <h2 id="makers-title" className="font-mono text-[11px] tracking-[0.16em] text-slate-900 uppercase">
-          Makers · ZEC ⇄ {coin().ticker}
-          {coin().chain ? ` on ${CHAIN_NAMES[coin().chain!]}` : null}
-        </h2>
-        <Label>{makers === undefined ? "Loading" : `${online} of ${mine.length} online`}</Label>
-      </div>
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
-        {makers === undefined ? null : mine.length === 0 ? (
-          <p className="px-2 py-10 text-center text-sm text-slate-500">
-            No makers swap ZEC for {coin().ticker}
-            {coin().chain ? ` on ${CHAIN_NAMES[coin().chain!]}` : ""} on this server yet.
-          </p>
-        ) : (
-          <div role="radiogroup" aria-label="Maker" className="space-y-2">
-            {mine.map((m) => (
-              <MakerRow key={m.name} m={m} role={role} active={m.name === selected} onSelect={onSelect} age={m.rate_age_s != null ? m.rate_age_s + (now - fetchedAt) / 1000 : null} />
-            ))}
-          </div>
-        )}
-        {error ? <p className="px-2 font-mono text-xs text-rose-700">{error}</p> : null}
-      </div>
-      <p className="border-t border-slate-100 px-5 py-3 text-xs leading-relaxed text-slate-500">
-        You choose who you swap with. Each maker sets its own rate and size; none of them can take your coins.
-      </p>
-    </section>
+    <div role="radiogroup" aria-label="Swap partner" onKeyDown={arrowKeys} className="space-y-1 px-2">
+      <Option active={pick === null} can onClick={() => onPick(null)} title="Best rate" meta={current && pick === null ? `Ferry picks for your amount · now ${current}` : "Ferry picks for your amount"} />
+      {mine.length === 0 ? (
+        <p className="px-3 py-4 text-sm text-slate-500">No partners swap ZEC for {coin().ticker} on this server yet.</p>
+      ) : (
+        mine.map((m) => <PartnerRow key={m.name} m={m} role={role} zat={zat} active={m.name === pick} onPick={onPick} age={m.rate_age_s != null ? m.rate_age_s + (now - fetchedAt) / 1000 : null} />)
+      )}
+      {error ? <p className="px-3 text-xs text-rose-700">{error}</p> : null}
+    </div>
   );
 }
 
-function MakerRow({ m, role, active, onSelect, age }: { m: Maker; role: Role; active: boolean; onSelect: (name: string) => void; age: number | null }) {
-  const can = selectable(m, role);
-  const rate = m.rate_sat_per_zec == null ? "–" : `${btcText(m.rate_sat_per_zec)} ${coin().ticker}`;
+function PartnerRow({ m, role, zat, active, onPick, age }: { m: Maker; role: Role; zat: number; active: boolean; onPick: (name: string) => void; age: number | null }) {
+  const q = quoteOf(m);
+  const takes = selectable(m, role);
+  const fitsAmount = !q || zat <= 0 || fits(q, zat);
+  const can = takes && fitsAmount;
+  const rate = m.rate_sat_per_zec == null ? null : `${btcText(m.rate_sat_per_zec)} ${coin().ticker}`;
   const fixed = m.rate_source === "fixed" || (m.online && m.rate_updated_at == null);
-  const updated = fixed ? "Fixed rate" : age != null ? `Updated ${ago(age)}` : null;
-  const range = m.min_zat != null && m.max_zat != null ? `${zec(m.min_zat)}–${zec(m.max_zat)} ZEC` : null;
-  const liquidity = m.liquidity_zat != null ? `${zec(m.liquidity_zat)} ZEC free` : null;
+  let meta: string;
+  if (!m.online) meta = "Offline";
+  else if (m.paused) meta = `Paused${age != null && !fixed ? ` · rate from ${ago(age)}` : ""}`;
+  else if (!m.available) meta = "Not taking swaps";
+  else if (!takes) meta = "Swaps the same side as you";
+  else if (q && !fitsAmount) meta = zat < q.min ? `Takes at least ${zec(q.min)} ZEC` : `Takes up to ${zec(capacity(q))} ZEC right now`;
+  else meta = q ? `Takes ${zec(q.min)}–${zec(capacity(q))} ZEC` : "Taking swaps";
+  return <Option active={active} can={can} onClick={() => can && onPick(m.name)} title={m.name} rate={rate} meta={meta} dot={m.online && !m.paused ? "bg-emerald-500" : "bg-slate-300"} />;
+}
 
-  let badge: ReactNode;
-  if (active) badge = <StatusBadge>Selected</StatusBadge>;
-  else if (!m.online) badge = <StatusBadge variant="destructive">Offline</StatusBadge>;
-  else if (m.paused) badge = <StatusBadge variant="outline" className="border-amber-300 bg-amber-50 text-amber-700">Paused</StatusBadge>;
-  else if (!m.available) badge = <StatusBadge variant="outline">Closed</StatusBadge>;
-  else badge = null;
-
-  const dot = m.online ? (m.paused ? "bg-amber-400" : "bg-brand-500") : "bg-slate-300";
-  const meta = m.online ? [m.paused && updated ? `Stale, ${updated.toLowerCase()}` : updated, range, liquidity].filter(Boolean) : ["Not answering"];
-
+function Option({ active, can, onClick, title, rate, meta, dot }: { active: boolean; can: boolean; onClick: () => void; title: string; rate?: string | null; meta: string; dot?: string }) {
   return (
     <button
       type="button"
       role="radio"
+      data-option
       aria-checked={active}
       aria-disabled={!can}
-      onClick={() => can && onSelect(m.name)}
-      className={cn(
-        "block w-full border px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-brand-500/20",
-        active ? "border-brand-500 bg-brand-50/40 ring-3 ring-brand-500/20" : can ? "border-slate-200 bg-white hover:border-slate-300" : "cursor-not-allowed border-slate-200 bg-slate-50",
-      )}
+      tabIndex={active ? 0 : -1}
+      onClick={onClick}
+      className={cn("flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-colors", active ? "bg-slate-100" : can ? "hover:bg-slate-50" : "cursor-not-allowed")}
     >
-      <span className="flex items-center gap-3">
-        <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dot)} aria-hidden />
-        <span className={cn("min-w-0 flex-1 truncate font-medium", can || active ? "text-slate-900" : "text-slate-500")}>{m.name}</span>
-        <span className={cn("font-mono text-sm", can || active ? "text-slate-900" : "text-slate-400")}>{rate}</span>
-        {badge}
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-2">
+          {dot ? <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dot)} aria-hidden /> : null}
+          <span className={cn("truncate font-medium", can || active ? "text-slate-900" : "text-slate-500")}>{title}</span>
+        </span>
+        <span className="mt-0.5 block truncate text-[13px] text-slate-500">{meta}</span>
       </span>
-      <span className="mt-1 block truncate pl-4.5 font-mono text-[11px] text-slate-500">{meta.join(" · ")}</span>
+      {rate ? <span className={cn("shrink-0 text-sm tabular-nums", can || active ? "text-slate-900" : "text-slate-500")}>{rate}</span> : null}
+      {active ? <Check size={16} weight="bold" className="shrink-0 text-slate-900" aria-hidden /> : <span className="w-4 shrink-0" aria-hidden />}
     </button>
   );
 }
