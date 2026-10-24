@@ -19,7 +19,8 @@
 //                           /api/makers lists their live offers (fetched here, cached 10 s); a swap
 //                           start names a maker by index or name, never by URL. POST /api/quotes
 //                           asks them for firm quotes for an amount's bucket (quotes.mjs); a swap
-//                           start may name one ({"maker", "zec_zat", "quote": id})
+//                           start may name one ({"maker", "zec_zat", "quote": id}), and claims it
+//                           for itself: two starts never forward the same quote (claim())
 //   FERRY_Z_TOKEN / FERRY_Z_TOKEN_FILE, FERRY_B_TOKEN / FERRY_B_TOKEN_FILE
 //                                              the daemons' API tokens (<data-dir>/api-token); a file is
 //                                              re-read every 30 s, so a restarted daemon is picked up
@@ -606,16 +607,6 @@ async function guard(key, path, req, res) {
       json(res, 400, { error: "Unknown maker. Pick one from the list." });
       return false;
     }
-    // a firm quote, named by id: the signed quote this server got from that maker itself
-    const quote = body?.quote == null ? null : QUOTES.find(MAKERS.makers.indexOf(maker), body.quote);
-    if (body?.quote != null && !quote) {
-      json(res, 400, { error: "That firm price has expired. Get a new one." });
-      return false;
-    }
-    if (quote && (zat < quote.min_zat || zat > quote.max_zat)) {
-      json(res, 400, { error: "The amount is outside that firm price's range. Get a new one." });
-      return false;
-    }
     // where the coins go: the person's own wallet, on their own node only (own.mjs); a public
     // demo's daemons pay their own wallets, whatever a browser says
     let receive = "";
@@ -636,8 +627,24 @@ async function guard(key, path, req, res) {
       json(res, conflict.status, conflict.body);
       return false;
     }
-    if (!takeStarts(req, res, 1)) return false;
-    if (quote) QUOTES.take(quote);
+    // a firm quote, named by id: the signed quote this server got from that maker itself, claimed
+    // for this start alone. A maker honours a quote once, so if another start took the one named,
+    // a fresh one from the same maker takes its place when it covers the amount at a rate no worse
+    // for the person (quotes.mjs claim()); else the start is refused, and the page gets a new price.
+    const quote = body?.quote == null ? null : await QUOTES.claim(MAKERS.makers.indexOf(maker), body.quote, zat);
+    if (body?.quote != null && !quote) {
+      json(res, 400, { error: "That firm price has expired. Get a new one." });
+      return false;
+    }
+    if (quote && (zat < quote.min_zat || zat > quote.max_zat)) {
+      quote.release();
+      json(res, 400, { error: "The amount is outside that firm price's range. Get a new one." });
+      return false;
+    }
+    if (!takeStarts(req, res, 1)) {
+      quote?.release();
+      return false;
+    }
     // the signed quote is forwarded as the maker sent it (its integers exact)
     if (quote) return `{"maker":${JSON.stringify(maker.url)},"zec_zat":${zat},"quote":${quote.json}${receive}}`;
     return `{"maker":${JSON.stringify(maker.url)},"zec_zat":${zat}${receive}}`;

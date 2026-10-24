@@ -262,14 +262,15 @@ function makers(): Plugin {
       }
       const maker = dir.resolve(body.maker);
       if (!maker) return send(res, 400, { error: "Unknown maker. Pick one from the list." });
-      // a firm quote, named by id: the signed quote this server got from that maker itself
-      const quote = body.quote == null ? null : desk.find(dir.makers.indexOf(maker), body.quote);
       // where the coins go, on the person's own node (own.mjs): payout_to on a sell, sweep_to on a buy
       const side = m[1] === "z" ? "sell" : m[1] === "b" ? "buy" : (EXTRA.find((d) => d.key === m[1])?.side ?? "sell");
       const receive = own(req) ? receiveFields(body, side) : { json: "" };
       if (receive.error) return send(res, 400, { error: receive.error });
+      // a firm quote, named by id: the signed quote this server got from that maker itself, claimed
+      // for this start alone (a fresh one if another start took it: server/quotes.mjs claim())
+      const zat = Number(body.zec_zat);
+      const quote = body.quote == null ? null : await desk.claim(dir.makers.indexOf(maker), body.quote, Number.isSafeInteger(zat) ? zat : 0);
       if (body.quote != null && !quote) return send(res, 400, { error: "That firm price has expired. Get a new one." });
-      if (quote) desk.take(quote);
       const headers: Record<string, string> = { "content-type": "application/json" };
       const token = TOKENS[m[1]];
       if (token) headers.authorization = `Bearer ${token}`;

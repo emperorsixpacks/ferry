@@ -864,8 +864,11 @@ export function nearDesk({
   };
   const active = (j) => !["done", "refunded", "failed", "expired"].includes(j.state);
 
-  // A Ferry start on the user's own daemon `key`. `quote`: a firm quote (quotes.mjs find()), whose
-  // signed JSON is forwarded exactly as the maker sent it.
+  // A Ferry start on the user's own daemon `key`. `quote`: a firm quote (quotes.mjs find()), claimed
+  // for this start alone (claim(): a maker honours a quote once, so if another start took it since,
+  // a fresh one at a rate no worse takes its place) and forwarded exactly as the maker signed it.
+  // Without one (none to be had), the start goes at the partner's own rate, within extra's
+  // min_counter / max_counter.
   async function ferryStart(key, makerIndex, zat, extra, firm) {
     const url = directory.makers[makerIndex]?.url;
     if (!url) return { status: 400, body: { error: "Unknown partner" } };
@@ -873,7 +876,8 @@ export function nearDesk({
       .filter(([, v]) => v != null)
       .map(([k, v]) => `,${JSON.stringify(k)}:${typeof v === "bigint" ? v.toString() : JSON.stringify(v)}`)
       .join("");
-    const body = `{"maker":${JSON.stringify(url)},"zec_zat":${zat}${firm ? `,"quote":${firm.json}` : ""}${fields}}`;
+    const quote = firm?.entry?.q ? await quotes.claim(makerIndex, firm.entry.q.quote_id, zat) : null;
+    const body = `{"maker":${JSON.stringify(url)},"zec_zat":${zat}${quote ? `,"quote":${quote.json}` : ""}${fields}}`;
     try {
       return await call(key, "POST", "/api/swaps", body);
     } catch {
@@ -1035,7 +1039,6 @@ export function nearDesk({
       // the Ferry payout never falls below what 1Click needs to start (its minAmountIn)
       const r2 = await ferryStart(v.key, makerIndex, zat, { payout_to: deposit, min_counter: minIn + fee }, firm);
       if (r2.status !== 201 || typeof r2.body?.id !== "string") return fail({ status: r2.status >= 400 ? r2.status : 502, body: { error: r2.body?.error ?? "Your Ferry node didn't start the swap." } });
-      if (firm) quotes.take(firm);
       j.ferry.swap_id = r2.body.id;
       note(j, "ferry_started", `Ferry swap started with ${j.maker}: ${(zat / 1e8).toFixed(4)} ZEC for ${v.token.symbol}, paid to NEAR Intents' deposit address`);
     } else {
@@ -1131,7 +1134,6 @@ export function nearDesk({
     if (blocked) return wait(j, blocked.body?.error ?? "Waiting for another swap to finish.");
     const r = await ferryStart(j.daemon, makerIndex, zat, { max_counter: budget > 0n ? budget : 0n, sweep_to: j.sweep_to ?? null }, firm && zat >= firm.min_zat && zat <= firm.max_zat ? firm : null);
     if (r.status !== 201 || typeof r.body?.id !== "string") return wait(j, r.body?.error ?? "Your Ferry node didn't start the swap. Trying again.");
-    if (firm && zat >= firm.min_zat && zat <= firm.max_zat) quotes.take(firm);
     if (j.ferry.swap_id) j.ferry.earlier.push(j.ferry.swap_id);
     j.ferry = { ...j.ferry, swap_id: r.body.id, state: null, outcome: null, zec_zat: zat };
     j.state = "ferry";
