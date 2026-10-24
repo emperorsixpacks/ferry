@@ -3,6 +3,7 @@ import type { Direction, PairId } from "@/api";
 import { ZEC, defaultPick, isNear, isPair, isToken, nearToken, pickOn, resolvePath, swapNet, type NetKind, type Path, type PathCtx, type Side, type Token } from "../../../server/paths.mjs";
 import { useLocal } from "./daemon";
 import { useNear } from "./near";
+import { pairStates } from "./pairs";
 import { useRoutes } from "./routes";
 
 // The swap card's two coins, any coin on either side (server/paths.mjs says which way each pair goes
@@ -54,6 +55,8 @@ export function usePathCtx(): PathCtx {
       ready: d.known,
       sell: d.pairs.filter((p) => p.sell.daemon).map((p) => p.id),
       buy: d.pairs.filter((p) => p.buy.daemon).map((p) => p.id),
+      // which of them don't answer, or haven't yet: the first coins skip the one and wait for the other
+      ...pairStates(d.pairs),
       nets,
       routes: routes.legs,
       near:

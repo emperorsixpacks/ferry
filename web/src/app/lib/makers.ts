@@ -129,6 +129,13 @@ export function forPair(m: Maker, id: PairId, onScreen: PairId): boolean {
   return m.pair === `ZEC/${c.ticker}` && (c.kind !== "evm" || (m.chain ?? null) === pairChain(id));
 }
 
+// Every partner listed for pair `id` this way (`role`: the side you take) is offline; false when none
+// is listed, or the list isn't in yet.
+export function partnersOffline(makers: Makers | undefined, id: PairId, onScreen: PairId, role: Role): boolean {
+  const listed = (makers?.list ?? []).filter((m) => (m.role == null || m.role !== role) && forPair(m, id, onScreen));
+  return listed.length > 0 && listed.every((m) => !m.online);
+}
+
 // The most ZEC a maker takes in one swap right now: its range's top, or less if its balance is lower.
 export const capacity = (q: Quote) => Math.min(q.max, q.liquidity ?? Infinity);
 export const fits = (q: Quote, zat: number) => zat >= q.min && zat <= capacity(q);

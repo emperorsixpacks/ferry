@@ -238,7 +238,7 @@ function RouteBanner({ route }: { route: RouteView }) {
 // works it out. The rate comes from the best partner for the direction; the partner and details
 // are behind the settings pill above the card.
 function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip }: CardProps & { status: Status | null }) {
-  const { role, dir, daemon, pair, info } = useLocal();
+  const { role, dir, daemon, pair, info, offline } = useLocal();
   const buying = dir === "buy";
   // where what you get goes: your Ferry node, or your own wallet (on your own node)
   const receive = receiveFor(buying ? "zec" : pair, status, info.own);
@@ -469,8 +469,9 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
           ) : makers.list === undefined ? (
             <p>Finding the best rate…</p>
           ) : null}
-          {/* is the partner taking swaps now, and how many more */}
-          {quote && maker ? <p data-availability>{availability(maker, about)}</p> : null}
+          {/* is the partner taking swaps now, and how many more; offline while this pair's daemon doesn't
+              answer (it comes back by itself) */}
+          {offline ? <p data-availability>Partner offline</p> : quote && maker ? <p data-availability>{availability(maker, about)}</p> : null}
           {skipped && quote && maker ? (
             <p>
               {skipped.name} can fill up to {zec(capacity(quoteOf(skipped)!))} ZEC right now, so {maker.name} takes this one.
@@ -571,6 +572,8 @@ function plainError(raw: string, buying: boolean, about: string | null): string 
   if (/payout_to.*(feature|can't pay)/i.test(raw)) return "That partner can't pay to your own wallet. Pick another partner in settings, or receive to your Ferry node.";
   if (/^(payout_to|sweep_to)\b/i.test(raw)) return `Your Ferry node refused your wallet's address: ${raw.replace(/^(payout_to|sweep_to):\s*/i, "")}. Check it under Receive to.`;
   if (/api token/i.test(raw)) return "Your Ferry node refused this page. Check how the app was started.";
+  // the UI server gave up waiting (server/upstream.mjs): the node may still have taken the swap
+  if (/didn't answer in time/i.test(raw)) return "Your Ferry node didn't answer in time. If the swap started, it shows under Recent activity.";
   if (/reach the daemon|unreachable|connection refused|timed? ?out/i.test(raw)) return "Couldn't reach your partner or your Ferry node. Try again in a moment.";
   if (/not making offers|paused/i.test(raw)) return "That partner just stopped taking swaps. Try again, or pick another one in settings.";
   if (/unknown maker/i.test(raw)) return "That partner isn't listed here any more. Pick another one in settings.";

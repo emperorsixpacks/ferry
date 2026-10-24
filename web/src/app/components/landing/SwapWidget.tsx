@@ -38,7 +38,8 @@ export function SwapWidget() {
             : "No partner is taking swaps for this coin right now."
           : `1 ZEC = ${btcText(quote.rate)} ${coin().ticker} · best rate, from ${maker.name}`;
   // is that partner taking swaps now, and how many more: small, under the rate
-  const avail = quote && maker ? availability(maker, about) : listed.length && listed.every((m) => !m.online) ? "Partner offline" : null;
+  // offline too while this pair's daemon doesn't answer (it comes back by itself)
+  const avail = d.offline ? "Partner offline" : quote && maker ? availability(maker, about) : listed.length && listed.every((m) => !m.online) ? "Partner offline" : null;
   const zecSide = (
     <Box label={z ? "You sell" : "You get"} pill={<ZecPill />}>
       <span className="text-slate-900">1</span>

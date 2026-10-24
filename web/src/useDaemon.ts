@@ -30,15 +30,23 @@ export function useDaemon(daemon: string | null, seed: Status | null = null): Da
     let alive = true;
     let es: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
+    // one refresh at a time, and its two reads one after the other: a daemon that hangs (the UI server
+    // answers for it after 10 s) never has more than one of them waiting
+    let refreshing = false;
 
     const refresh = async () => {
+      if (refreshing) return;
+      refreshing = true;
       try {
-        const [status, list] = await Promise.all([getStatus(base), getSwaps(base)]);
+        const status = await getStatus(base);
+        const list = await getSwaps(base);
         if (!alive) return;
         setCoinFrom(status);
         setState((s) => ({ ...s, error: null, status, swaps: { ...s.swaps, ...Object.fromEntries(list.map((x) => [x.id, x])) } }));
       } catch (e) {
         if (alive) setState((s) => ({ ...s, connected: false, error: (e as Error).message }));
+      } finally {
+        refreshing = false;
       }
     };
 
