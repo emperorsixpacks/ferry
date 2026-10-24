@@ -48,7 +48,7 @@ Start a swap as taker against a maker.
   "addresses": { "btc_lock": "bcrt1p…", "zec_joint": "uregtest1…" },
   "secrets": { "mine_revealed": false, "peer_learned": false },
   "timeline": [
-    { "at": "2026-10-16T13:05:01Z", "chain": "local|btc|zec|peer", "kind": "dleq_verified|btc_lock_broadcast|zec_note_seen|redeem_adaptor_received|btc_redeemed|secret_extracted|zec_swept|cancel_broadcast|refund_broadcast|punish_broadcast|…",
+    { "at": "2026-10-16T13:05:01Z", "chain": "local|btc|zec|peer", "kind": "btc_lock_broadcast",  // see "Timeline kinds"
       "label": "Human-readable sentence", "txid": "hex|null", "height": 407 }
   ],
   "observer": {
@@ -59,16 +59,96 @@ Start a swap as taker against a maker.
 ```
 
 `observer` lists what a public chain observer can see for this swap, one line per transaction.
-It is what the UI's "what each chain sees" panel renders.
+It is what the UI's "what each chain sees" panel renders. A line may start with a short transaction
+name followed by `": "` (for example `"tx_lock: a P2TR output of 0.0041 BTC…"`); the UI shows that name
+separately. Both parties return the same observer lists, since they describe public data.
+
+### Swap ids are shared
+
+The taker's `201 { "id" }` is the swap's session id, and the maker stores the same swap under the
+**same id**. The UI shows one swap by looking up that id on both daemons (`GET /api/swaps` and the
+`swap` events). If the ids differ, the two panels can't be paired.
+
+### Field semantics the UI relies on
+
+- `timeline` is in chronological order and append-only. `timeline[0].at` is treated as the swap's
+  start time. The UI picks the swap with the latest start as the current one.
+- A transaction entry has `txid` set and `height: null` while the transaction is in the mempool.
+  When it confirms, **the same entry's `height` is filled in**; don't append a second entry. The UI
+  draws `height == null` as "in mempool".
+- `deadlines.btc_lock_height` is null until `tx_lock` confirms. `deadlines.cancel_height` is null
+  until `tx_cancel` confirms. T1 = `btc_lock_height + t1_blocks` and T2 = `cancel_height + t2_blocks`.
+  Before a cancel, the UI shows T2 at its earliest (`btc_lock_height + t1_blocks + t2_blocks`).
+- `secrets.mine_revealed` becomes true when this party's share is visible on Bitcoin: Z's `z` once
+  `tx_redeem` is broadcast, B's `b` once `tx_refund` is broadcast. `secrets.peer_learned` becomes
+  true when this party has extracted the peer's share from a witness. This flag drives the UI's
+  "magic moment".
+- `outcome` is set once this party has nothing left to do. The UI treats the swap as finished when
+  **both** parties have a non-null `outcome`.
+
+## Timeline kinds
+
+The UI draws the crossing from these `kind`s, so their names and the party that emits them are part
+of the contract. "Tx" means the entry carries the `txid` and follows the `height` rule above.
+
+| kind | emitted by | chain | tx | UI use |
+|---|---|---|---|---|
+| `btc_lock_broadcast` | B | btc | yes | step 1. BTC token moves to the lock output |
+| `zec_lock_broadcast` | Z | zec | yes | step 2. ZEC token moves to the joint note |
+| `btc_redeem_broadcast` | Z | btc | yes | step 3. BTC token moves to Z |
+| `secret_extracted` | B (happy path) or Z (refund path) | btc | yes, the redeem or refund tx | highlighted entry (the magic moment). Set `secrets.peer_learned` together with it |
+| `zec_sweep_broadcast` | B | zec | yes | step 4. ZEC token moves to B |
+| `cancel_broadcast` | whichever party broadcast `tx_cancel` (Z or B) | btc | yes | switches the chart to the abort path. BTC moves to the cancel output |
+| `refund_broadcast` | B | btc | yes | refund path. BTC returns to B |
+| `zec_reclaim_broadcast` | Z | zec | yes | refund path, after Z extracts `b`. ZEC returns to Z |
+| `punish_broadcast` | Z | btc | yes | punish path. BTC goes to Z; the ZEC stays in the joint note |
+| `fault_injected` | the stalled party | local | no | shows a "Stalled" badge and disables both fault buttons |
+| `fault_cleared` | the stalled party | local | no | ends the stall started by the last `fault_injected` |
+
+The other kinds are only rendered as text (`label`, plus `txid`/`height` when present), so they are
+free-form. The mock uses: `propose_sent`, `propose_received`, `dleq_verified`, `accept_sent`,
+`lock_template_sent`, `cancel_sigs_sent`, `refund_adaptor_verified`, `cancel_sig_received`,
+`btc_lock_seen`, `zec_note_seen`, `zec_confirmed`, `redeem_adaptor_sent`, `redeem_adaptor_received`,
+`cancel_seen`, `punish_seen`, `swap_complete`, `refunded`, `reclaimed`, `punished`.
+
+`label` is a full sentence written from the emitting party's point of view, for example
+`"Broadcast tx_lock: 0.0041 BTC to the Taproot lock address"`. The UI shows the newest label from
+either party as the one-line narration under the chart.
 
 ## GET /api/events (Server-Sent Events)
 
 `event: swap` with a `SwapView` body on every state change; `event: status` with the status body
 whenever a balance or height changes.
 
+## Errors
+
+Every non-2xx response has a JSON body `{ "error": "Human-readable sentence" }`. The UI shows
+`error` verbatim under the controls, so it should say what is wrong. For `POST /api/swaps`:
+
+- `400`: bad body, amount outside the offer's `min_zat`/`max_zat`, or insufficient funds
+- `409`: a swap is already in progress
+
 ## POST /api/swaps/:id/fault (demo only)
 
-`{ "fault": "stall" }` makes this party stop acting, to demonstrate cancel/refund/punish paths.
+`{ "fault": "stall" }` → `200 { "ok": true }` makes this party stop acting, to demonstrate the
+cancel/refund/punish paths. While stalled, a party sends no messages and broadcasts nothing. Its
+chain watcher keeps running, so its `state`, `timeline` and `outcome` still follow what happens
+on-chain (for example B moves to `Punished` when Z's `tx_punish` confirms).
+
+- **Z stall:** Z comes back online when it sees `tx_cancel` confirmed and emits `fault_cleared`.
+  It can then extract `b` from B's refund and reclaim its ZEC (`zec_reclaim_broadcast` →
+  `ZecReclaimed`). Story: Z stalls, B cancels after T1, B refunds, Z reclaims.
+- **B stall:** B stays stalled. Story: B stalls, Z cancels after T1, there is no refund by T2, and
+  Z punishes.
+
+Errors (`{ "error" }`):
+
+- `400`: unknown fault
+- `404`: unknown swap id
+- `409`: the fault no longer changes the outcome, or the party is already stalled. The mock
+  accepts a Z stall in `CancelSigned`, `BtcLockSeen`, `ZecLocked` and `RedeemSigReceived` (before
+  `tx_redeem` is broadcast). It accepts a B stall in `BtcLocked` and `ZecSeen` (before the redeem
+  adaptor is sent). The UI enables the buttons in exactly these states.
 
 ## States
 
