@@ -114,7 +114,7 @@ export function NearCard({ asset, pick, path, ctx, onPick, onFlip, blocked }: Ca
         onChange={(e) => setAmount(e.target.value.replace(",", "."))}
         aria-invalid={!!problem && valid}
         aria-describedby="near-message"
-        className={cn("h-12 w-full min-w-0 bg-transparent leading-none font-medium tracking-tight text-slate-900 tabular-nums placeholder:text-slate-300 focus:outline-none focus-visible:outline-none", amountSize(amount))}
+        className={cn("h-12 w-full min-w-0 bg-transparent leading-none font-medium tracking-tight text-slate-900 tabular-nums placeholder:text-slate-300 dark:placeholder:text-slate-400 focus:outline-none focus-visible:outline-none", amountSize(amount))}
       />
     </Panel>
   );
@@ -132,7 +132,7 @@ export function NearCard({ asset, pick, path, ctx, onPick, onFlip, blocked }: Ca
         </span>
       }
     >
-      <output aria-live="polite" aria-label={selling ? `You get ${sym}` : `You pay ${sym}`} className={cn("flex h-12 items-center truncate leading-none font-medium tracking-tight tabular-nums", amountSize(outText), out ? "text-slate-900" : "text-slate-300")}>
+      <output aria-live="polite" aria-label={selling ? `You get ${sym}` : `You pay ${sym}`} className={cn("flex h-12 items-center truncate leading-none font-medium tracking-tight tabular-nums", amountSize(outText), out ? "text-slate-900" : "text-slate-300 dark:text-slate-400")}>
         {out ? (quote?.near.approximate ? `≈${outText}` : outText) : "0"}
       </output>
     </Panel>

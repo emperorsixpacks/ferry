@@ -236,12 +236,12 @@ export function NearTokenLogo({ symbol, chain, size = 32, className }: { symbol:
   );
 }
 
-// NEAR Intents, as a small mark: an N in a dark disc (not its logo)
+// NEAR Intents, as a small mark: an N on an ink tile (not its logo), so it follows the theme
 export function NearMark({ size = 16, className }: { size?: number; className?: string }) {
   return (
     <svg viewBox="0 0 32 32" width={size} height={size} className={cn("shrink-0", className)} aria-hidden>
-      <rect width="32" height="32" rx="9" fill="#18181b" />
-      <path d="M10 23V9h2.6l6.8 9.6V9H22v14h-2.6l-6.8-9.6V23z" fill="#fff" />
+      <rect width="32" height="32" rx="9" className="fill-slate-900" />
+      <path d="M10 23V9h2.6l6.8 9.6V9H22v14h-2.6l-6.8-9.6V23z" className="fill-white" />
     </svg>
   );
 }

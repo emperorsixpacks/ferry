@@ -45,12 +45,12 @@ export function OffCard(props: (CardProps & { loading?: false }) | { loading: tr
               value={amount}
               onChange={(e) => setAmount(e.target.value.replace(",", "."))}
               aria-describedby="off-message"
-              className={cn("h-12 w-full min-w-0 bg-transparent leading-none font-medium tracking-tight text-slate-900 tabular-nums placeholder:text-slate-300 focus:outline-none focus-visible:outline-none", amountSize(amount || "0"))}
+              className={cn("h-12 w-full min-w-0 bg-transparent leading-none font-medium tracking-tight text-slate-900 tabular-nums placeholder:text-slate-300 dark:placeholder:text-slate-400 focus:outline-none focus-visible:outline-none", amountSize(amount || "0"))}
             />
           </Panel>
           <FlipButton onFlip={onFlip} title="Swap the two sides" />
           <Panel label="Buy" pill={<SidePill token={pick.buy} side="buy" onOpen={() => setPicker("buy")} />} foot={<Foot token={pick.buy} zec="Arrives shielded" />}>
-            <output aria-live="polite" className={cn("flex h-12 items-center truncate leading-none font-medium tracking-tight text-slate-300 tabular-nums", amountSize("0"))}>
+            <output aria-live="polite" className={cn("flex h-12 items-center truncate leading-none font-medium tracking-tight text-slate-300 tabular-nums dark:text-slate-400", amountSize("0"))}>
               0
             </output>
           </Panel>

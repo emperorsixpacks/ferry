@@ -61,8 +61,8 @@ function ShieldArt({ live }: { live: boolean }) {
   return (
     <div className="relative h-[110px] w-[96px]">
       <svg viewBox="0 0 96 110" className="absolute inset-0 h-full w-full overflow-visible">
-        <path d={shield} fill="#fafafa" stroke="#e4e4e7" strokeWidth="1.5" strokeLinejoin="round" />
-        <path d={shield} fill="none" stroke="#18181b" strokeWidth="1.75" strokeLinejoin="round" pathLength="100" className="lp-shield-draw" />
+        <path d={shield} className="fill-[#fafafa] stroke-slate-200 dark:fill-slate-50" strokeWidth="1.5" strokeLinejoin="round" />
+        <path d={shield} fill="none" strokeWidth="1.75" strokeLinejoin="round" pathLength="100" className="lp-shield-draw stroke-slate-900" />
       </svg>
       <div className="font-data absolute inset-x-0 top-[34px] flex flex-col items-center text-[12px] leading-tight text-slate-500">
         {["a9f3", "71c0", "e4d2"].map((t, j) => (

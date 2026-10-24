@@ -467,7 +467,7 @@ function LaneBox({ lane }: { lane: Lane }) {
   return (
     <section
       aria-label={`On ${ch.name}`}
-      className={cn("rounded-2xl border p-3.5", shielded ? "border-[#F4B728]/45 bg-[#FFFBF0]" : "border-slate-200 bg-slate-50/80")}
+      className={cn("rounded-2xl border p-3.5", shielded ? "border-[#F4B728]/45 bg-[#FFFBF0] dark:border-[#F4B728]/35 dark:bg-[#F4B728]/[0.06]" : "border-slate-200 bg-slate-50/80")}
     >
       <div className="flex items-center justify-between gap-2">
         <span className="flex items-center gap-2 text-[13px] font-semibold text-slate-900">
@@ -534,7 +534,7 @@ function AliceTag({ reveal = false }: { reveal?: boolean }) {
 function Secret() {
   return (
     <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-[#F4B728]/20 px-1.5 py-px text-[12px] font-medium text-slate-800">
-      <LockSimple size={11} weight="bold" style={{ color: "#A87A00" }} aria-hidden />
+      <LockSimple size={11} weight="bold" className="text-[#A87A00] dark:text-[#F4B728]" aria-hidden />
       encrypted
     </span>
   );
@@ -621,8 +621,8 @@ function Ext({ href, children, className }: { href: string; children: ReactNode;
 function NearMark({ size = 16, light = false }: { size?: number; light?: boolean }) {
   return (
     <svg viewBox="0 0 32 32" width={size} height={size} className="shrink-0" aria-hidden>
-      <rect width="32" height="32" rx="9" fill={light ? "#fff" : "#18181b"} />
-      <path d="M10 23V9h2.6l6.8 9.6V9H22v14h-2.6l-6.8-9.6V23z" fill={light ? "#18181b" : "#fff"} />
+      <rect width="32" height="32" rx="9" className={light ? "fill-white" : "fill-slate-900"} />
+      <path d="M10 23V9h2.6l6.8 9.6V9H22v14h-2.6l-6.8-9.6V23z" className={light ? "fill-slate-900" : "fill-white"} />
     </svg>
   );
 }
@@ -644,7 +644,7 @@ const LIMITS: [string, string][] = [
 
 function Limits() {
   return (
-    <section aria-labelledby="pv-limits" className="mt-20 border-t border-slate-100 bg-slate-50/70 py-16 sm:mt-24 sm:py-20">
+    <section aria-labelledby="pv-limits" className="mt-20 border-t border-slate-100 bg-slate-50/70 py-16 sm:mt-24 sm:py-20 dark:bg-white/40">
       <div className={wrap}>
         <h2 id="pv-limits" className={h2}>
           What Ferry can't hide

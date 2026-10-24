@@ -21,7 +21,7 @@ export function Landing() {
   const root = useRef<HTMLDivElement>(null);
   useReveal(root);
   return (
-    <div ref={root} className="lp flex min-h-screen flex-col overflow-x-clip bg-white text-slate-900">
+    <div ref={root} className="lp flex min-h-screen flex-col overflow-x-clip bg-canvas text-slate-900">
       <SiteHeader landing />
       <main className="flex-1">
         <Hero />
@@ -46,7 +46,7 @@ const secondary =
 function Hero() {
   const anchor = useRef<HTMLDivElement>(null);
   return (
-    <section aria-labelledby="hero-title" className="relative isolate overflow-hidden bg-white">
+    <section aria-labelledby="hero-title" className="relative isolate overflow-hidden bg-canvas">
       <Gate anchor={anchor} />
       <div className="relative mx-auto flex max-w-6xl flex-col px-4 sm:min-h-[max(720px,calc(100svh-105px))] sm:px-6 md:min-h-[max(720px,calc(100svh-64px))]">
         <div className="order-2 mx-auto max-w-3xl pb-10 text-center sm:order-1 sm:pt-14 sm:pb-0 lg:pt-16">
@@ -80,7 +80,7 @@ function Hero() {
 
 function ProofSection() {
   return (
-    <section aria-labelledby="proof-title" className="border-t border-slate-100 bg-slate-50/70">
+    <section aria-labelledby="proof-title" className="border-t border-slate-100 bg-slate-50/70 dark:bg-white/40">
       <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6 sm:py-28">
         <h2 id="proof-title" data-reveal className={h2}>
           Private. Direct. Everywhere.
@@ -159,7 +159,7 @@ function NetworksSection() {
 
 function How() {
   return (
-    <section id="how" aria-labelledby="how-title" className="scroll-mt-20 border-t border-slate-100 bg-slate-50/70">
+    <section id="how" aria-labelledby="how-title" className="scroll-mt-20 border-t border-slate-100 bg-slate-50/70 dark:bg-white/40">
       <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6 sm:py-28">
         <h2 id="how-title" data-reveal className={h2}>
           How it works
@@ -188,7 +188,7 @@ function Closing() {
       <div className="mx-auto max-w-3xl px-4 py-24 text-center sm:px-6 sm:py-32">
         <div data-reveal className="relative mx-auto mb-8 flex h-[92px] w-[80px] items-center justify-center" aria-hidden>
           <svg viewBox="0 0 80 92" className="absolute h-[92px] w-[80px] overflow-visible drop-shadow-[0_10px_18px_rgba(24,24,27,0.14)]">
-            <path d="M40 2 78 24v44L40 90 2 68V24z" fill="#fff" stroke="#18181b" strokeWidth="1.5" strokeLinejoin="round" />
+            <path d="M40 2 78 24v44L40 90 2 68V24z" className="fill-white stroke-slate-900" strokeWidth="1.5" strokeLinejoin="round" />
           </svg>
           <Mark id="zec" size={40} className="relative" />
         </div>

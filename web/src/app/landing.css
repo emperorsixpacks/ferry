@@ -1,5 +1,5 @@
 /* ======================================================================
-   The landing page (/): the Shield Gate on the app's own white. Ink,
+   The landing page (/): the Shield Gate on the app's own canvas. Ink,
    greys and white, with Zcash gold only at the gate's core; coins and
    chains keep their colours inside their marks. The small loops here
    are slow, pause under .lp-paused (off screen or a hidden tab) and
@@ -40,8 +40,8 @@
     background-color 0.25s ease;
 }
 .lp-chain:hover {
-  border-color: color-mix(in srgb, var(--c) 35%, white);
-  background-color: color-mix(in srgb, var(--c) 4%, white);
+  border-color: color-mix(in srgb, var(--c) 35%, var(--color-white));
+  background-color: color-mix(in srgb, var(--c) 4%, var(--color-white));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 12%, transparent);
 }
 
