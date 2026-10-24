@@ -62,6 +62,8 @@ pub struct MockZecLeg {
     path: PathBuf,
     owner: String,
     block_ms: u64,
+    /// Network label for status and the mock address prefix ("regtest", "test", "main").
+    network: String,
 }
 
 fn now_ms() -> u64 {
@@ -84,6 +86,7 @@ impl MockZecLeg {
             path,
             owner,
             block_ms: (block_secs * 1000.0).max(1.0) as u64,
+            network: "regtest".into(),
         };
         leg.with_chain(|c, _| {
             c.balances
@@ -92,6 +95,11 @@ impl MockZecLeg {
             Ok(())
         })?;
         Ok(leg)
+    }
+
+    pub fn with_network(mut self, network: impl Into<String>) -> Self {
+        self.network = network.into();
+        self
     }
 
     fn height(&self, c: &MockChain) -> u64 {
@@ -146,7 +154,7 @@ impl ZecLeg for MockZecLeg {
     async fn status(&self) -> Result<ZecStatus, MockZecError> {
         self.with_chain(|c, height| {
             Ok(ZecStatus {
-                network: "regtest".into(),
+                network: self.network.clone(),
                 height,
                 shielded_balance: c.balances.get(&self.owner).copied().unwrap_or(0),
             })
@@ -154,7 +162,12 @@ impl ZecLeg for MockZecLeg {
     }
 
     fn joint_address(&self, fvk: &[u8; 96]) -> Result<String, MockZecError> {
-        Ok(format!("uregtest1mock{}", hex::encode(&fvk[..24])))
+        let hrp = if self.network == "main" {
+            "u"
+        } else {
+            &format!("u{}", self.network)
+        };
+        Ok(format!("{hrp}1mock{}", hex::encode(&fvk[..24])))
     }
 
     async fn send(&self, fvk: &[u8; 96], amount: u64) -> Result<String, MockZecError> {

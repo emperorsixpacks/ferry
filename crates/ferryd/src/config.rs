@@ -80,6 +80,10 @@ pub struct Cli {
     /// bitcoind wallet holding our BTC (created if missing; default: --name).
     #[arg(long)]
     pub btc_wallet: Option<String>,
+    /// Watch-only bitcoind wallet tracking the swap outputs (created if missing; default:
+    /// <btc-wallet>-watch). Lets ferryd follow its transactions on a pruned node without -txindex.
+    #[arg(long)]
+    pub btc_watch_wallet: Option<String>,
     #[arg(long, default_value = "regtest")]
     pub network: Network,
 

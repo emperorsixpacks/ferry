@@ -56,7 +56,8 @@ pub fn api_router<L: ZecLeg + 'static>(daemon: Arc<Daemon<L>>) -> Router {
         .route("/api/status", get(status::<L>))
         .route("/api/swaps", get(list_swaps::<L>).post(create_swap::<L>))
         .route("/api/swaps/{id}", get(get_swap::<L>))
-        .route("/api/events", get(events::<L>));
+        .route("/api/events", get(events::<L>))
+        .route("/api/addresses", get(addresses::<L>));
     if daemon.cli.demo_faults {
         r = r.route("/api/swaps/{id}/fault", post(fault::<L>));
     }
@@ -195,6 +196,12 @@ async fn events<L: ZecLeg + 'static>(
         .chain(live)
         .map(|e| Ok(SseFrame::default().event(e.event).data(e.data)));
     Sse::new(frames).keep_alive(KeepAlive::default())
+}
+
+async fn addresses<L: ZecLeg + 'static>(
+    State(d): D<L>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    d.funding_addresses().await.map(Json)
 }
 
 async fn offer<L: ZecLeg + 'static>(State(d): D<L>) -> Json<crate::config::Offer> {

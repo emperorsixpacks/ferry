@@ -34,7 +34,8 @@ async fn main() -> anyhow::Result<()> {
                 cli.name.clone(),
                 cli.zec_mock_block_secs,
                 cli.zec_mock_balance,
-            )?;
+            )?
+            .with_network(cli.zec_network.clone());
             run(cli, leg).await
         }
         ZecBackend::Devtool => {

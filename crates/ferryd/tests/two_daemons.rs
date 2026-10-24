@@ -276,6 +276,19 @@ impl World {
         (r.status().as_u16(), r.json().await.unwrap_or_default())
     }
 
+    /// Poll `/api/status` until `ok` holds (10 s at most).
+    async fn status_until(&self, url: &str, ok: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let s = self.get(url, "/api/status").await;
+            if ok(&s) {
+                return s;
+            }
+            assert!(Instant::now() < deadline, "status never matched: {s}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     async fn swap(&self, url: &str, id: &str) -> Value {
         self.get(url, &format!("/api/swaps/{id}")).await
     }
@@ -461,16 +474,35 @@ async fn happy_swap_over_http_with_restart() {
         1,
         "MuSig2 key-path redeem: a single signature"
     );
+    // Z follows the swap through its watch-only wallet (what a pruned node without -txindex
+    // needs): it knows B's lock and the redeem even though neither came from Z's own wallet.
+    let z_watch =
+        BitcoinRpc::new(rpc_url(), "ferry", "ferry").with_wallet(format!("{}-watch", w.z.wallet));
+    let lock_txid = entry(&b, "btc_lock_broadcast")["txid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for txid in [lock_txid, redeem_txid.to_string()] {
+        let v: Value = z_watch
+            .wallet_call("gettransaction", json!([txid, true]))
+            .await
+            .unwrap();
+        assert!(v["confirmations"].as_i64().unwrap() >= 1, "{v}");
+    }
     assert!(z["observer"]["btc"][0]
         .as_str()
         .unwrap()
         .starts_with("tx_lock: "));
 
-    let zs = w.get(&w.z.url, "/api/status").await;
-    assert_eq!(zs["balances"]["btc_sat"], 410_000 - 2_000);
+    // Balances are refreshed on the daemons' poll interval.
+    let zs = w
+        .status_until(&w.z.url, |s| s["balances"]["btc_sat"] == 410_000 - 2_000)
+        .await;
     assert_eq!(zs["balances"]["zec_shielded_zat"], 400_000_000);
-    let bs = w.get(&w.b.url, "/api/status").await;
-    assert_eq!(bs["balances"]["zec_shielded_zat"], 100_000_000);
+    w.status_until(&w.b.url, |s| {
+        s["balances"]["zec_shielded_zat"] == 100_000_000
+    })
+    .await;
 
     // A second swap is refused only while one is running; the SSE stream replays state.
     let mut sse = w
@@ -544,8 +576,10 @@ async fn refund_swap_when_z_stalls() {
         entry(&b, "btc_lock_broadcast")["height"].as_u64().unwrap() + u64::from(T1)
             <= z["deadlines"]["cancel_height"].as_u64().unwrap()
     );
-    let zs = w.get(&w.z.url, "/api/status").await;
-    assert_eq!(zs["balances"]["zec_shielded_zat"], 500_000_000);
+    w.status_until(&w.z.url, |s| {
+        s["balances"]["zec_shielded_zat"] == 500_000_000
+    })
+    .await;
     println!("Z: {}\nB: {}", kinds(&z), kinds(&b));
 }
 

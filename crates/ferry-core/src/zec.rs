@@ -65,6 +65,12 @@ pub trait ZecLeg: Send + Sync {
         txid: &str,
     ) -> impl Future<Output = Result<Option<u32>, Self::Error>> + Send;
 
+    /// Our own wallet's receiving address, where the ZEC to swap must be sent (shown to the
+    /// operator for funding). None if the backend has no such address.
+    fn receive_address(&self) -> Option<String> {
+        None
+    }
+
     /// One line on what a public chain observer sees of `txid` (for the demo UI).
     fn describe_tx(
         &self,

@@ -83,6 +83,20 @@ fn btc_str(sat: u64) -> String {
     format!("{} BTC", s.trim_end_matches('0').trim_end_matches('.'))
 }
 
+/// Rescan window when importing a swap's addresses (recent blocks are kept even when pruned).
+const WATCH_RESCAN_SECS: u64 = 2 * 24 * 3600;
+
+/// Have the watch-only wallet track the lock and cancel outputs, and so every swap transaction.
+async fn watch_swap(rpc: &BitcoinRpc, rec: &SwapRecord) -> Result<(), RpcError> {
+    let session = rec.swap.session();
+    let scripts = session.scripts();
+    for out in [&scripts.lock, &scripts.cancel_out] {
+        rpc.watch_address(&out.address(session.params.network), WATCH_RESCAN_SECS)
+            .await?;
+    }
+    Ok(())
+}
+
 fn zec_str(zat: u64) -> String {
     format!("{:.2} ZEC", zat as f64 / 1e8)
 }
@@ -90,19 +104,37 @@ fn zec_str(zat: u64) -> String {
 impl<L: ZecLeg + 'static> Daemon<L> {
     pub async fn new(cli: Cli, leg: L) -> anyhow::Result<Arc<Self>> {
         let wallet = cli.btc_wallet.clone().unwrap_or_else(|| cli.name.clone());
-        let rpc =
-            BitcoinRpc::new(&cli.btc_rpc, &cli.btc_rpc_user, &cli.btc_rpc_pass).with_wallet(wallet);
+        let watch = cli
+            .btc_watch_wallet
+            .clone()
+            .unwrap_or_else(|| format!("{wallet}-watch"));
+        let rpc = BitcoinRpc::new(&cli.btc_rpc, &cli.btc_rpc_user, &cli.btc_rpc_pass)
+            .with_wallet(wallet)
+            .with_watch_wallet(watch);
         rpc.ensure_wallet().await?;
+        rpc.ensure_watch_wallet().await?;
         let store = Store::open(&cli.data_dir)?;
-        let api_token = cli.api_token.clone().unwrap_or_else(|| {
-            let mut b = [0u8; 32];
-            OsRng.fill_bytes(&mut b);
-            hex::encode(b)
-        });
-        crate::record::write_private(&cli.data_dir.join("api-token"), api_token.as_bytes())?;
+        // Keep the token across restarts, so a running UI proxy stays authorized.
+        let token_file = cli.data_dir.join("api-token");
+        let existing = std::fs::read_to_string(&token_file)
+            .ok()
+            .map(|t| t.trim().to_string());
+        let api_token = cli
+            .api_token
+            .clone()
+            .or(existing.filter(|t| !t.is_empty()))
+            .unwrap_or_else(|| {
+                let mut b = [0u8; 32];
+                OsRng.fill_bytes(&mut b);
+                hex::encode(b)
+            });
+        crate::record::write_private(&token_file, api_token.as_bytes())?;
         let mut state = State::default();
         for rec in store.load_all()? {
             tracing::info!(id = %rec.id, state = %rec.state(), "resuming swap");
+            if !rec.settled() {
+                watch_swap(&rpc, &rec).await?;
+            }
             state.swaps.insert(rec.id.clone(), rec);
         }
         let (events, _) = broadcast::channel(256);
@@ -286,6 +318,9 @@ impl<L: ZecLeg + 'static> Daemon<L> {
 
         let id = hex::encode(sid);
         let mut rec = self.new_record(id.clone(), swap, maker, true)?;
+        watch_swap(&self.rpc, &rec)
+            .await
+            .map_err(|e| ApiError(500, format!("watching the swap outputs: {e}")))?;
         rec.peer_seen = 1; // the maker's outbox starts with the Accept we just processed
         let p = peer_name(self.role);
         rec.log(
@@ -310,6 +345,22 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         st.swaps.insert(id.clone(), rec);
         self.publish(&mut st);
         Ok(id)
+    }
+
+    /// Where the operator funds this party: a fresh address of our BTC wallet and, if the Zcash
+    /// backend has one, our own Zcash address.
+    pub async fn funding_addresses(&self) -> Result<serde_json::Value, ApiError> {
+        let btc = self
+            .rpc
+            .labeled_address("ferry-funding", self.network())
+            .await
+            .map_err(|e| ApiError(503, e.to_string()))?;
+        Ok(serde_json::json!({
+            "role": self.role,
+            "name": self.cli.name,
+            "btc": { "network": self.network().to_string(), "address": btc.to_string() },
+            "zec": { "address": self.leg.receive_address() },
+        }))
     }
 
     /// One swap at a time: funds and the demo UI both assume it.
@@ -420,6 +471,9 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         let (swap, actions) =
             accept(&mut OsRng, &env, address).map_err(|e| ApiError::bad(e.to_string()))?;
         let mut rec = self.new_record(id.clone(), swap, req.taker_url, false)?;
+        watch_swap(&self.rpc, &rec)
+            .await
+            .map_err(|e| ApiError(500, format!("watching the swap outputs: {e}")))?;
         let p = peer_name(self.role);
         rec.log(
             "peer",
@@ -1103,7 +1157,6 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         let Some(lock) = rec.swap.lock_outpoint() else {
             return Ok(out);
         };
-        let tip = self.rpc.block_count().await?;
         let params = rec.swap.session().params.clone();
 
         if let Some(confs) = self.rpc.confirmations(&lock.txid).await? {
@@ -1114,7 +1167,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     view::describe_lock(&tx, lock.vout),
                 );
                 if confs > 0 {
-                    rec.btc_lock_height = Some(tip + 1 - u64::from(confs));
+                    rec.btc_lock_height = self.rpc.block_height(&lock.txid).await?;
                     let txout = tx.output[lock.vout as usize].clone();
                     out.push(Event::Chain(ChainEvent::BtcLockConfirmed { confs, txout }));
                 }
@@ -1127,7 +1180,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             };
             let confs = self.rpc.confirmations(&txid).await?.unwrap_or(0);
             if spend == Spend::Cancel && confs > 0 {
-                rec.cancel_height = Some(tip + 1 - u64::from(confs));
+                rec.cancel_height = self.rpc.block_height(&txid).await?;
             }
             let prev = match spend {
                 Spend::Cancel | Spend::Redeem => Amount::from_sat(params.btc_amount),
@@ -1181,21 +1234,23 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         {
             return Ok(());
         }
-        let btc_tip = self.rpc.block_count().await?;
         let zec_tip = self.leg.status().await?.height;
         for e in rec.timeline.iter_mut().filter(|e| e.height.is_none()) {
             let Some(txid) = e.txid.clone() else { continue };
-            let (confs, tip) = match e.chain.as_str() {
+            e.height = match e.chain.as_str() {
                 "btc" => match Txid::from_str(&txid) {
-                    Ok(t) => (self.rpc.confirmations(&t).await?, btc_tip),
+                    Ok(t) => self.rpc.block_height(&t).await?,
                     Err(_) => continue,
                 },
-                "zec" => (self.leg.confirmations(&txid).await?, zec_tip),
+                // The ZecLeg reports confirmations only; derive the height from the tip.
+                "zec" => self
+                    .leg
+                    .confirmations(&txid)
+                    .await?
+                    .filter(|c| *c > 0)
+                    .map(|c| zec_tip + 1 - u64::from(c)),
                 _ => continue,
             };
-            if let Some(c) = confs.filter(|c| *c > 0) {
-                e.height = Some(tip + 1 - u64::from(c));
-            }
         }
         Ok(())
     }

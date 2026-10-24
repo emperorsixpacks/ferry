@@ -45,6 +45,7 @@ pub struct BitcoinRpc {
     user: String,
     pass: String,
     wallet: Option<String>,
+    watch_wallet: Option<String>,
 }
 
 impl BitcoinRpc {
@@ -55,6 +56,7 @@ impl BitcoinRpc {
             user: user.into(),
             pass: pass.into(),
             wallet: None,
+            watch_wallet: None,
         }
     }
 
@@ -62,6 +64,106 @@ impl BitcoinRpc {
     pub fn with_wallet(mut self, name: impl Into<String>) -> Self {
         self.wallet = Some(name.into());
         self
+    }
+
+    /// Track the swap's transactions through a watch-only descriptor wallet (see
+    /// [`BitcoinRpc::watch_address`]). This works on pruned nodes without `-txindex`, where
+    /// `getrawtransaction` only knows the mempool.
+    pub fn with_watch_wallet(mut self, name: impl Into<String>) -> Self {
+        self.watch_wallet = Some(name.into());
+        self
+    }
+
+    async fn watch_call<T: DeserializeOwned>(
+        &self,
+        w: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<T, RpcError> {
+        self.request(&format!("{}/wallet/{w}", self.url), method, params)
+            .await
+    }
+
+    /// Load the watch-only wallet, creating it (blank, no private keys) if it does not exist.
+    pub async fn ensure_watch_wallet(&self) -> Result<(), RpcError> {
+        let Some(name) = &self.watch_wallet else {
+            return Ok(());
+        };
+        let loaded: Vec<String> = self.call("listwallets", json!([])).await?;
+        if loaded.iter().any(|w| w == name) {
+            return Ok(());
+        }
+        if self
+            .call::<Value>("loadwallet", json!([name]))
+            .await
+            .is_err()
+        {
+            // name, disable_private_keys, blank, passphrase, avoid_reuse, descriptors
+            self.call::<Value>("createwallet", json!([name, true, true, "", false, true]))
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Watch every transaction paying to or spending from `address` (idempotent). Rescans the
+    /// last `rescan_secs` seconds of blocks, which a pruned node still has.
+    pub async fn watch_address(&self, address: &Address, rescan_secs: u64) -> Result<(), RpcError> {
+        let Some(w) = &self.watch_wallet else {
+            return Ok(());
+        };
+        let info: Value = self
+            .call("getdescriptorinfo", json!([format!("addr({address})")]))
+            .await?;
+        let desc = format!(
+            "addr({address})#{}",
+            info["checksum"].as_str().unwrap_or_default()
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let res: Value = self
+            .watch_call(
+                w,
+                "importdescriptors",
+                json!([[{"desc": desc, "timestamp": now.saturating_sub(rescan_secs)}]]),
+            )
+            .await?;
+        if res[0]["success"].as_bool() != Some(true) {
+            return Err(RpcError::Decode {
+                method: "importdescriptors".into(),
+                detail: res.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// `gettransaction` in the watch wallet: (confirmations, tx). None if the wallet doesn't
+    /// know the txid or it was conflicted out.
+    async fn watched_tx(&self, txid: &Txid) -> Result<Option<(u32, Transaction)>, RpcError> {
+        let Some(w) = &self.watch_wallet else {
+            return Ok(None);
+        };
+        match self
+            .watch_call::<Value>(w, "gettransaction", json!([txid.to_string(), true]))
+            .await
+        {
+            Ok(v) => {
+                let confs = v["confirmations"].as_i64().unwrap_or(0);
+                if confs < 0 {
+                    return Ok(None);
+                }
+                let tx = deserialize_hex(v["hex"].as_str().unwrap_or_default()).map_err(|e| {
+                    RpcError::Decode {
+                        method: "gettransaction".into(),
+                        detail: e.to_string(),
+                    }
+                })?;
+                Ok(Some((confs as u32, tx)))
+            }
+            Err(e) if e.code() == Some(RPC_INVALID_ADDRESS_OR_KEY) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     async fn request<T: DeserializeOwned>(
@@ -159,6 +261,34 @@ impl BitcoinRpc {
             })
     }
 
+    /// A stable receiving address of the wallet under `label` (created on first use).
+    pub async fn labeled_address(
+        &self,
+        label: &str,
+        network: Network,
+    ) -> Result<Address, RpcError> {
+        let decode = |detail: String| RpcError::Decode {
+            method: "labeled_address".into(),
+            detail,
+        };
+        let existing: Result<Value, _> = self
+            .wallet_call("getaddressesbylabel", json!([label]))
+            .await;
+        let addr = match existing
+            .ok()
+            .and_then(|v| v.as_object().and_then(|m| m.keys().min().cloned()))
+        {
+            Some(a) => a,
+            None => {
+                self.wallet_call::<String>("getnewaddress", json!([label, "bech32m"]))
+                    .await?
+            }
+        };
+        addr.parse::<Address<_>>()
+            .and_then(|a| a.require_network(network))
+            .map_err(|e| decode(e.to_string()))
+    }
+
     /// Regtest only: mine `n` blocks to `to`.
     pub async fn generate_to_address(
         &self,
@@ -219,8 +349,12 @@ impl BitcoinRpc {
             .await
     }
 
-    /// Mempool or (with `-txindex`) confirmed transaction; None if unknown.
+    /// A transaction from the watch wallet, the mempool or (with `-txindex`) the chain; None if
+    /// unknown.
     pub async fn raw_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, RpcError> {
+        if let Some((_, tx)) = self.watched_tx(txid).await? {
+            return Ok(Some(tx));
+        }
         match self
             .call::<String>("getrawtransaction", json!([txid.to_string()]))
             .await
@@ -236,8 +370,38 @@ impl BitcoinRpc {
         }
     }
 
+    /// Height of the block that confirmed `txid`; None while unconfirmed or unknown.
+    pub async fn block_height(&self, txid: &Txid) -> Result<Option<u64>, RpcError> {
+        if let Some(w) = &self.watch_wallet {
+            match self
+                .watch_call::<Value>(w, "gettransaction", json!([txid.to_string(), true]))
+                .await
+            {
+                Ok(v) => return Ok(v["blockheight"].as_u64()),
+                Err(e) if e.code() == Some(RPC_INVALID_ADDRESS_OR_KEY) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let v = match self
+            .call::<Value>("getrawtransaction", json!([txid.to_string(), true]))
+            .await
+        {
+            Ok(v) => v,
+            Err(e) if e.code() == Some(RPC_INVALID_ADDRESS_OR_KEY) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let Some(hash) = v["blockhash"].as_str() else {
+            return Ok(None);
+        };
+        let header: Value = self.call("getblockheader", json!([hash])).await?;
+        Ok(header["height"].as_u64())
+    }
+
     /// Confirmations of a transaction: Some(0) in the mempool, None if unknown.
     pub async fn confirmations(&self, txid: &Txid) -> Result<Option<u32>, RpcError> {
+        if let Some((confs, _)) = self.watched_tx(txid).await? {
+            return Ok(Some(confs));
+        }
         match self
             .call::<Value>("getrawtransaction", json!([txid.to_string(), true]))
             .await

@@ -28,9 +28,9 @@ ZEC_BLOCK_SECS="${ZEC_BLOCK_SECS:-3}"
 # ZEC_BACKEND=devtool: Zebra + Zaino regtest in Docker (amd64 images; emulated on arm64).
 ZEBRA_IMAGE="${ZEBRA_IMAGE:-zfnd/zebra:7.0.0-rc.0}"
 ZAINO_IMAGE="${ZAINO_IMAGE:-zingodevops/zaino:0.10.2-no-tls}"
-ZEBRA_CONTAINER=ferry-demo-zebra
-ZAINO_CONTAINER=ferry-demo-zaino
-ZEC_NET=ferry-demo-zec
+ZEBRA_CONTAINER="${ZEBRA_CONTAINER:-ferry-demo-zebra}"
+ZAINO_CONTAINER="${ZAINO_CONTAINER:-ferry-demo-zaino}"
+ZEC_NET="$ZEBRA_CONTAINER-net"
 ZEC_RPC_PORT="${ZEC_RPC_PORT:-18232}"
 ZAINO_PORT="${ZAINO_PORT:-8137}"
 ZEC_RPC="http://127.0.0.1:$ZEC_RPC_PORT"
@@ -200,6 +200,9 @@ zmine() {
 
 zdt() { RUST_LOG=error NO_COLOR=1 "$ZEC_DEVTOOL" "$@"; }
 
+# with_timeout <secs> <cmd...>: a devtool call against a server that is not up yet can hang.
+with_timeout() { perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "$@"; }
+
 zwallet_init() { # zwallet_init <key>
   zdt wallet -w "$STATE/zec/$1" init --name "$1" -i "$STATE/zec/$1.age" -n regtest \
     --activation-heights "$STATE/zec/activation_heights.toml" -s "localhost:$ZAINO_PORT" >/dev/null
@@ -257,6 +260,8 @@ start_zec() {
   docker volume rm "$ZEBRA_CONTAINER-state" >/dev/null 2>&1 || true
   docker network create "$ZEC_NET" >/dev/null 2>&1 || true
   rm -rf "$STATE/zec" && mkdir -p "$STATE/zec"
+  # `down` removes exactly these, so a second demo (another FERRY_DEMO_DIR) is left alone.
+  echo "$ZAINO_CONTAINER $ZEBRA_CONTAINER" >"$STATE/zec/containers"
   cat >"$STATE/zec/activation_heights.toml" <<TOML
 overwinter = 1
 sapling = 1
@@ -296,7 +301,9 @@ TOML
     "$ZAINO_IMAGE" start -c /app/config/zainod.toml >/dev/null
   local ok=
   for _ in $(seq 1 60); do
-    if zwallet_init miner 2>/dev/null; then ok=1; break; fi
+    if with_timeout 20 "$ZEC_DEVTOOL" wallet -w "$STATE/zec/miner" init --name miner -i "$STATE/zec/miner.age" \
+      -n regtest --activation-heights "$STATE/zec/activation_heights.toml" -s "localhost:$ZAINO_PORT" \
+      >/dev/null 2>&1; then ok=1; break; fi
     rm -rf "$STATE/zec/miner"
     sleep 2
   done
@@ -417,9 +424,11 @@ cmd_down() {
   stop_pid z
   stop_pid b
   docker rm -f "$CONTAINER" >/dev/null 2>&1 && log "removed $CONTAINER" || true
-  for c in "$ZAINO_CONTAINER" "$ZEBRA_CONTAINER"; do
-    docker rm -f "$c" >/dev/null 2>&1 && log "removed $c" || true
-  done
+  if [ -f "$STATE/zec/containers" ]; then
+    for c in $(cat "$STATE/zec/containers"); do
+      docker rm -f "$c" >/dev/null 2>&1 && log "removed $c" || true
+    done
+  fi
   log "stopped (logs in $STATE/logs)"
 }
 
@@ -430,7 +439,7 @@ cmd_status() {
     echo "bitcoind  down"
   fi
   if alive miner; then echo "producer  up (pid $(cat "$STATE/miner.pid"))"; else echo "producer  down"; fi
-  if docker ps --format '{{.Names}}' | grep -qx "$ZEBRA_CONTAINER"; then
+  if [ -f "$STATE/zec/containers" ] && docker ps --format '{{.Names}}' | grep -qx "$ZEBRA_CONTAINER"; then
     echo "zebrad    up, height $(zheight 2>/dev/null || echo '?')  ($ZEC_RPC, zaino :$ZAINO_PORT)"
     if alive zec-miner; then echo "zec producer up (pid $(cat "$STATE/zec-miner.pid"))"; else echo "zec producer down"; fi
   fi
