@@ -56,6 +56,10 @@ struct Faults {
     z_wallet_refuses: bool,
     /// B locks with a different bAddr than agreed.
     b_locks_wrong_b_addr: bool,
+    /// Z's account in the setup, the claimer (`payout_to`); default a fresh account.
+    z_claimer: Option<[u8; 20]>,
+    /// B locks with this claimer instead of the agreed one (to pay itself, say).
+    b_locks_with_claimer: Option<[u8; 20]>,
     /// The ready signature reaches Z only at this block time.
     delay_ready_until: Option<u64>,
     /// Someone else spends the ZEC lock note as soon as it is mined (e.g. Z, after learning b
@@ -102,7 +106,9 @@ impl Sim {
 
     fn with_params(faults: Faults, params: EvmParams) -> Sim {
         let b_key = PrivateKeySigner::random();
-        let z_addr = addr20(PrivateKeySigner::random().address());
+        let z_addr = faults
+            .z_claimer
+            .unwrap_or_else(|| addr20(PrivateKeySigner::random().address()));
         let b_addr = addr20(b_key.address());
         let addr = |r: Role| if r == Role::B { b_addr } else { z_addr };
         let sid = [7u8; 32];
@@ -223,6 +229,9 @@ impl Sim {
                     assert_eq!(role, Role::B);
                     if self.faults.b_locks_wrong_b_addr {
                         terms.b_addr = [0x99; 20];
+                    }
+                    if let Some(claimer) = self.faults.b_locks_with_claimer {
+                        terms.claimer = claimer;
                     }
                     let id = ferry_evm::swap_id(self.b_key.address(), B256::from(salt));
                     assert_eq!(id.0, self.b.session().swap_id());
@@ -572,6 +581,42 @@ fn weth_at_the_swap_cap() {
     assert!(sim.rejected.is_empty(), "{:?}", sim.rejected);
     let back: EvmSwap = serde_json::from_str(&serde_json::to_string(&sim.z).unwrap()).unwrap();
     assert_eq!(back.session().params, p);
+}
+
+/// `payout_to` on EVM: Z's setup names the payout address as its account, so it is the claimer
+/// in both sides' lock terms and on chain, and the swap runs as any other. A B that locks with
+/// another claimer (itself, say) gets no ZEC: Z checks every term, the claimer included.
+#[test]
+fn payout_address_is_the_claimer_and_b_cannot_change_it() {
+    let payout = [0x5a; 20];
+    for taker in TAKERS {
+        let mut sim = Sim::new(Faults {
+            taker: Some(taker),
+            z_claimer: Some(payout),
+            ..Faults::default()
+        });
+        let terms = sim.z.session().lock_terms().unwrap();
+        assert_eq!(terms.claimer, payout);
+        assert_eq!(sim.b.session().lock_terms().unwrap(), terms);
+        sim.run_until(T2, |s| s.b_state() == EvmBState::ZecSwept);
+        assert_eq!(sim.z_state(), EvmZState::Claimed);
+        assert_eq!(sim.contract.lock.as_ref().unwrap().0.claimer, payout);
+        sim.assert_clean();
+
+        let refunder = sim.b.session().lock_terms().unwrap().refunder;
+        let mut sim = Sim::new(Faults {
+            taker: Some(taker),
+            z_claimer: Some(payout),
+            b_locks_with_claimer: Some(refunder),
+            ..Faults::default()
+        });
+        for _ in 0..50 {
+            sim.step();
+        }
+        assert!(sim.zec_note.is_none(), "Z locked ZEC under another claimer");
+        assert_eq!(sim.z_state(), EvmZState::Negotiated);
+        assert!(sim.rejected.iter().any(|r| r.contains("does not match")));
+    }
 }
 
 #[test]

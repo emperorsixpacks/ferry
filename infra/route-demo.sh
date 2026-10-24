@@ -38,6 +38,9 @@ ROUTE_RETRY_SECS="${ROUTE_RETRY_SECS:-5}"
 ROUTE_LEG2_WINDOW_SECS="${ROUTE_LEG2_WINDOW_SECS:-300}"
 # What a route keeps back for fees on the way (ferry-route's --zec-fee-zat + --zec-lock-reserve-zat).
 ROUTE_FEES_ZAT=60000
+# The payout story's payout_to: anvil's account 3, whose key no daemon holds (it stands in for a
+# NEAR Intents 1Click deposit address on coin C's chain; the demo never talks to NEAR).
+PAYOUT_ADDR="${PAYOUT_ADDR:-0x90F79bf6EB2c4f870365E785982E1f101E93b906}"
 
 usage() {
   cat <<EOF
@@ -47,12 +50,14 @@ Ferry privacy-hub demo: BTC -> shielded ZEC -> USDC, two atomic swaps run by fer
                              :$L1_MAKER_PORT) and user-b (your B daemon, :$L1_USER_PORT); anvil (:$ANVIL_PORT) with
                              user-z (your Z daemon, :$L2_USER_PORT, no ZEC) and maker-b (B maker, :$L2_MAKER_PORT);
                              one mock Zcash chain for all four; ferry-route on :$ROUTER_PORT
-  infra/route-demo.sh test   up, then three routes, then down; exits non-zero if one fails:
+  infra/route-demo.sh test   up, then four routes, then down; exits non-zero if one fails:
                              happy   BTC -> ZEC -> USDC to done (the router restarts twice midway)
+                             payout  the same, with leg 2 paying a third address (payout_to), as a
+                                     route ending on NEAR Intents would
                              refund  leg 2 is refunded: the route holds shielded ZEC; continue
                                      finishes it
                              stop    stopped during leg 1: the route ends holding the ZEC
-  infra/route-demo.sh happy | refund | stop    one story on a running demo
+  infra/route-demo.sh happy | payout | refund | stop    one story on a running demo
   infra/route-demo.sh status | down | help
 
 The router's API: curl -H "authorization: Bearer \$(cat $STATE/router/api-token)" \\
@@ -62,7 +67,7 @@ Environment (defaults in brackets): FERRY_ROUTE_DEMO_DIR [$STATE] BITCOIND_CONTA
   L2_MAKER_PORT L2_USER_PEER_PORT L2_MAKER_PEER_PORT ROUTER_PORT (as above)
   ROUTE_ZAT [$ROUTE_ZAT] ROUTE_ZEC_CONFS [$ROUTE_ZEC_CONFS] ROUTE_RETRY_SECS [$ROUTE_RETRY_SECS]
   ROUTE_LEG2_WINDOW_SECS [$ROUTE_LEG2_WINDOW_SECS] ZEC_BLOCK_SECS [$ZEC_BLOCK_SECS]
-  BTC_RATE [$BTC_RATE] USDC_RATE [$USDC_RATE] MAKER_ZEC_ZAT [$MAKER_ZEC_ZAT]
+  BTC_RATE [$BTC_RATE] USDC_RATE [$USDC_RATE] MAKER_ZEC_ZAT [$MAKER_ZEC_ZAT] PAYOUT_ADDR [$PAYOUT_ADDR]
 EOF
 }
 
@@ -123,6 +128,8 @@ route() { d router "/api/routes/$1"; }
 route_field() { route "$1" | json "$2"; }
 zec_balance() { d "$1" /api/status | json 'v["balances"]["zec_shielded_zat"]'; }
 token_balance() { d "$1" /api/status | json 'v["balances"]["btc_sat"]'; }
+# USDC at any address on the demo's anvil
+usdc_at() { "$CAST" call "$(cat "$STATE/evm/token")" "balanceOf(address)(uint256)" "$1" --rpc-url "http://127.0.0.1:$ANVIL_PORT" | awk '{print $1}'; }
 # The swap carrying a route label on a daemon, as JSON ("null" if none).
 labelled() { d "$1" /api/swaps | python3 -c 'import json, sys; m = [s for s in json.load(sys.stdin) if s.get("route") == sys.argv[1]]; print(json.dumps(m[-1]) if m else "null")' "$2"; }
 labelled_count() { d "$1" /api/swaps | python3 -c 'import json, sys; print(len([s for s in json.load(sys.stdin) if s.get("route") == sys.argv[1]]))' "$2"; }
@@ -204,8 +211,9 @@ for r in json.load(sys.stdin):
 }
 
 # POST /api/routes for ROUTE_ZAT with a 1% price margin each way; prints the route id.
-new_route() { # new_route <delay min> <delay max>
-  local max_in min_out out
+new_route() { # new_route <delay min> <delay max> [payout_to]
+  local max_in min_out out payout=""
+  [ -n "${3:-}" ] && payout=", \"payout_to\": \"$3\""
   max_in=$(units_for "$ROUTE_ZAT" "$BTC_RATE")
   max_in=$((max_in + max_in / 100))
   min_out=$(pct "$(units_for $((ROUTE_ZAT - ROUTE_FEES_ZAT)) "$USDC_RATE")" 99)
@@ -214,7 +222,7 @@ new_route() { # new_route <delay min> <delay max>
     \"from\": \"btc\", \"to\": \"usdc-base\", \"zec_zat\": $ROUTE_ZAT,
     \"maker1\": {\"url\": \"http://127.0.0.1:$L1_MAKER_PEER_PORT\", \"name\": \"maker-z\"},
     \"maker2\": [{\"url\": \"http://127.0.0.1:$L2_MAKER_PEER_PORT\", \"name\": \"maker-b\"}],
-    \"max_in\": $max_in, \"min_out\": $min_out, \"delay_secs\": [$1, $2]}" \
+    \"max_in\": $max_in, \"min_out\": $min_out, \"delay_secs\": [$1, $2]$payout}" \
     "http://127.0.0.1:$ROUTER_PORT/api/routes")
   echo "$out" | json 'v["id"]' 2>/dev/null || die "the route was refused: $out"
 }
@@ -292,6 +300,31 @@ story_happy() {
   finish "$RID" "$t0"
 }
 
+story_payout() {
+  log "--- payout: BTC -> shielded ZEC -> USDC paid to $PAYOUT_ADDR (payout_to), not user-z's account"
+  local t0 u0 p0 got out_min
+  t0=$(date +%s)
+  u0=$(token_balance user-z)
+  p0=$(usdc_at "$PAYOUT_ADDR")
+  RID=$(new_route 0 0 "$PAYOUT_ADDR")
+  log "route $RID"
+  [ "$(route_field "$RID" 'v["payout_to"]')" = "$PAYOUT_ADDR" ] || die "the route does not show payout_to"
+  wait_for 120 "leg 1 to start" '[ "$(labelled user-b "$RID/1")" != null ]'
+  [ "$(labelled user-b "$RID/1" | json 'v["payout_to"]')" = null ] || die "leg 1 carries a payout_to"
+  wait_for 600 "the route to finish" 'state_is done || state_is holding || state_is failed'
+  state_is done || die "the route ended $(route_field "$RID" 'v["state"]'): $(route_field "$RID" 'v["note"]')"
+  [ "$(labelled user-z "$RID/2" | json 'v["payout_to"]')" = "$PAYOUT_ADDR" ] || die "leg 2 does not pay $PAYOUT_ADDR"
+  [ "$(labelled user-z "$RID/2" | json 'v["counter"]["claimer"]')" = "$PAYOUT_ADDR" ] ||
+    die "leg 2's claimer is not $PAYOUT_ADDR"
+  out_min=$(route_field "$RID" 'v["amounts"]["out_min"]')
+  wait_for 30 "USDC at $PAYOUT_ADDR" '[ "$(usdc_at "$PAYOUT_ADDR")" -gt "$p0" ]'
+  got=$(($(usdc_at "$PAYOUT_ADDR") - p0))
+  [ "$got" -ge "$out_min" ] || die "$PAYOUT_ADDR received $got USDC units, below out_min $out_min"
+  [ "$(token_balance user-z)" = "$u0" ] || die "user-z's own account received USDC ($u0 -> $(token_balance user-z))"
+  log "payout: leg 2's claim paid $got USDC units to $PAYOUT_ADDR (out_min $out_min); user-z's own account unchanged"
+  finish "$RID" "$t0"
+}
+
 story_refund() {
   log "--- refund: user-z stalls after locking ZEC in leg 2; maker-b refunds at t1; the route holds the ZEC; continue finishes it"
   local t0 swap id t1 held
@@ -350,9 +383,10 @@ cmd_test() {
   local t0
   t0=$(date +%s)
   story_happy
+  story_payout
   story_refund
   story_stop
-  log "all three routes passed ($(($(date +%s) - t0))s)"
+  log "all four routes passed ($(($(date +%s) - t0))s)"
 }
 
 case "${1:-help}" in
@@ -360,6 +394,7 @@ case "${1:-help}" in
   down) cmd_down ;;
   status) cmd_status ;;
   happy) story_happy ;;
+  payout) story_payout ;;
   refund) story_refund ;;
   stop) story_stop ;;
   test) cmd_test ;;

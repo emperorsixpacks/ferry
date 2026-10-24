@@ -23,6 +23,8 @@ pub struct RouteView {
     pub privacy: Privacy,
     pub zec: Zec,
     pub legs: [LegView; 2],
+    /// Where leg 2 pays coin C, as the request named it (null: the leg-2 wallet).
+    pub payout_to: Option<String>,
     pub timeline: Vec<Entry>,
     /// Where the money is and what happens next, in one or two sentences.
     pub note: String,
@@ -139,6 +141,7 @@ pub fn route_view(r: &Route, policy: &Policy, now: u64) -> RouteView {
             held_zat: r.held_zat,
         },
         legs,
+        payout_to: r.payout_to.clone(),
         timeline: r.timeline.clone(),
         note: note(r, policy, now),
         problem: r.problem.clone(),

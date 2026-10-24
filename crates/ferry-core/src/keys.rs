@@ -43,6 +43,13 @@ pub struct Setup {
     pub nonce: [u8; 32],
     /// Z: where tx_redeem and tx_punish pay. B: where tx_refund pays.
     pub btc_address: Address<NetworkUnchecked>,
+    /// Z only, when its user named a payout address for this swap (`payout_to`): where
+    /// tx_redeem pays instead of `btc_address`. tx_punish still pays `btc_address`. Left out of
+    /// the JSON when unset, so a swap without one serializes, and hashes into the transcript,
+    /// exactly as before. A peer that predates the field drops it on reading, its transcript no
+    /// longer matches ours, and the swap stops at negotiation, before anything is locked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redeem_address: Option<Address<NetworkUnchecked>>,
     /// Ephemeral secp256k1 ECDH key (SEC1). The shared secret keeps the joint `nk`/`rivk` (and
     /// the peer channel token) out of reach of anyone who only sees the transcript.
     #[serde(
@@ -93,6 +100,7 @@ impl LocalKeys {
                 dleq_proof: proven.proof,
                 nonce,
                 btc_address: btc_address.into_unchecked(),
+                redeem_address: None,
                 ecdh: Some(ecdh_pub),
             },
         }
@@ -154,6 +162,8 @@ pub struct Peer {
     pub encryption_key: EncryptionKey,
     pub btc_key: XOnlyPublicKey,
     pub btc_address: Address,
+    /// Z's `redeem_address`, if it named one (never B's).
+    pub redeem_address: Option<Address>,
 }
 
 impl Peer {
@@ -213,6 +223,15 @@ impl Peer {
             .clone()
             .require_network(network)
             .map_err(|_| bad("btc address network"))?;
+        let redeem_address = match (&setup.redeem_address, role) {
+            (None, _) => None,
+            (Some(_), Role::B) => return Err(bad("a redeem address, which only Z may name")),
+            (Some(a), Role::Z) => Some(
+                a.clone()
+                    .require_network(network)
+                    .map_err(|_| bad("redeem address network"))?,
+            ),
+        };
         Ok(Peer {
             setup,
             network,
@@ -220,6 +239,7 @@ impl Peer {
             encryption_key,
             btc_key,
             btc_address,
+            redeem_address,
         })
     }
 }
@@ -296,6 +316,43 @@ mod tests {
         assert!(matches!(
             Peer::verify(&mut OsRng, &sid, Role::Z, Network::Regtest, stripped),
             Err(Error::InvalidSetup { .. })
+        ));
+    }
+
+    /// A redeem address is Z's alone, of the swap's network, and absent from the JSON unless
+    /// set (so a setup without one hashes into the transcript as before).
+    #[test]
+    fn redeem_address_belongs_to_z_on_the_swap_network() {
+        let sid = [4u8; 32];
+        let z = LocalKeys::generate(&mut OsRng, &sid, Role::Z, addr());
+        let json = serde_json::to_value(&z.setup).unwrap();
+        assert!(json.get("redeem_address").is_none(), "{json}");
+        let payout = addr();
+        let mut with = z.setup.clone();
+        with.redeem_address = Some(payout.as_unchecked().clone());
+        let peer = Peer::verify(&mut OsRng, &sid, Role::Z, Network::Regtest, with.clone()).unwrap();
+        assert_eq!(peer.redeem_address, Some(payout));
+        let back: Setup = serde_json::from_value(serde_json::to_value(&with).unwrap()).unwrap();
+        assert_eq!(back, with);
+
+        let secp = ferry_btc::bitcoin::key::Secp256k1::new();
+        let mainnet = Address::p2tr(&secp, BtcKey::random().xonly(), None, Network::Bitcoin);
+        let mut wrong_net = z.setup.clone();
+        wrong_net.redeem_address = Some(mainnet.into_unchecked());
+        assert!(matches!(
+            Peer::verify(&mut OsRng, &sid, Role::Z, Network::Regtest, wrong_net),
+            Err(Error::InvalidSetup {
+                reason: "redeem address network",
+                ..
+            })
+        ));
+
+        let b = LocalKeys::generate(&mut OsRng, &sid, Role::B, addr());
+        let mut b_with = b.setup.clone();
+        b_with.redeem_address = Some(addr().into_unchecked());
+        assert!(matches!(
+            Peer::verify(&mut OsRng, &sid, Role::B, Network::Regtest, b_with),
+            Err(Error::InvalidSetup { role: Role::B, .. })
         ));
     }
 

@@ -178,6 +178,10 @@ pub struct EvmRecord {
     /// peer).
     #[serde(default)]
     pub sweep_to: Option<String>,
+    /// Z taker only: the payout address (checksummed) our setup named as the claimer instead of
+    /// our own account. Set at creation; the lock terms carry the same address.
+    #[serde(default)]
+    pub payout_to: Option<String>,
 }
 
 impl EvmRecord {
@@ -223,6 +227,7 @@ impl EvmRecord {
             watchtower: None,
             route: None,
             sweep_to: None,
+            payout_to: None,
         }
     }
 

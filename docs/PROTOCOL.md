@@ -48,7 +48,7 @@ tx_lock   : B's coins → lock output
 tx_cancel : lock output → cancel output            (presigned by both, valid after T1)
               leaf refund : <kz> CHECKSIGVERIFY <kb> CHECKSIG
               leaf punish : <T2> CSV DROP <kz> CHECKSIG
-tx_redeem : lock output → Z                        (B's sig is an adaptor sig under Z_s)
+tx_redeem : lock output → Z, or Z's payout address (B's sig is an adaptor sig under Z_s)
 tx_refund : cancel output → B                      (Z's sig is an adaptor sig under B_s)
 tx_punish : cancel output → Z                      (Z alone, after T2)
 ```
@@ -62,6 +62,15 @@ signature that only `z` completes. The completed signature on chain gives B `z =
 in the script path. Each party uses one fresh nonce for this one message. The script leaves stay as
 fallbacks (`--btc-keypath false` uses the 2-of-2 redeem leaf); the cancel output keeps a NUMS
 internal key, so cancel/refund/punish are script-path spends.
+
+**Payout address.** Z's setup carries its own address (tx_redeem and tx_punish pay it) and, when
+Z's user named one (`payout_to`, [API.md](API.md#payout-address-payout_to)), a separate
+`redeem_address` that tx_redeem pays instead. It is part of the Propose and so of the transcript,
+both parties build tx_redeem from it, and B's adaptor signature commits to that output, so it is
+fixed from negotiation on. tx_punish still pays Z's own address. The field is absent otherwise, so
+swaps without one serialize and hash exactly as before; a maker that predates it fails the
+transcript check at negotiation, and a Z taker proposes with one only to a maker whose offer lists
+`features: ["payout"]`.
 
 ## Flow
 
@@ -159,6 +168,8 @@ holding no keys and no funds:
 5. **Leg 2** starts on L2 with the label `<route>/2` and `min_counter`, the least coin C for its
    amount (kept as a rate, so a smaller amount scales it down), and runs as any sell-ZEC swap. A
    refusal is retried, through the listed makers, for up to 2 hours; then the route holds the ZEC.
+   If the route request named a `payout_to`, leg 2 carries it, so coin C is paid there (a NEAR
+   Intents deposit address, say) instead of L2's wallet.
 
 **Each leg starts at most once.** The router saves the start as in flight before it sends it.
 ferryd stores the label in the swap record before its first save, refuses a label already in use

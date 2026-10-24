@@ -68,6 +68,8 @@ struct Faults {
     /// The lock note shows up already spent by someone else (Z learned `b` early, e.g. from
     /// a leaked tx_refund, and pulled its ZEC back).
     zec_note_spent_early: bool,
+    /// A Z taker's payout address (`payout_to`): where tx_redeem pays instead of Z's own.
+    payout: Option<Address>,
 }
 
 struct Sim {
@@ -98,7 +100,15 @@ impl Sim {
         // B's address is address(1), Z's address(2), whoever proposes.
         let taker = faults.taker.unwrap_or(Role::B);
         let addr = |r: Role| address(if r == Role::B { 1 } else { 2 });
-        let (proposal, propose) = Proposal::new(&mut OsRng, sid, taker, p, addr(taker)).unwrap();
+        let (proposal, propose) = Proposal::with_payout(
+            &mut OsRng,
+            sid,
+            taker,
+            p,
+            addr(taker),
+            faults.payout.clone(),
+        )
+        .unwrap();
         let (maker, maker_actions) = accept(&mut OsRng, &propose, addr(taker.peer())).unwrap();
         assert_eq!(maker.role(), taker.peer());
         let Action::SendMessage(accept_env) = &maker_actions[0] else {
@@ -855,4 +865,192 @@ fn timeout_aborts_only_before_lock() {
     sim.b.handle(Event::Timeout).unwrap();
     sim.z.handle(Event::Timeout).unwrap();
     assert_eq!(before, (sim.b.state_name(), sim.z.state_name()));
+}
+
+// ------------------------------------------------------------- payout_to (Z's redeem address)
+
+fn p2wpkh(seed: u8, network: Network) -> Address {
+    use bitcoin::hashes::Hash;
+    Address::from_script(
+        &bitcoin::ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([seed; 20])),
+        network,
+    )
+    .unwrap()
+}
+
+fn witness_program(version: bitcoin::WitnessVersion, program: &[u8]) -> Address {
+    let wp = bitcoin::WitnessProgram::new(version, program).unwrap();
+    Address::from_script(
+        &bitcoin::ScriptBuf::new_witness_program(&wp),
+        Network::Regtest,
+    )
+    .unwrap()
+}
+
+/// A Z taker's payout address gets the redeem: both machines build it into tx_redeem (the
+/// MuSig2 adaptor signatures verify only if they agree), on the key path and the script path.
+/// tx_punish still pays Z's own address. Without one, the redeem pays Z's own address.
+#[test]
+fn payout_address_gets_the_redeem_and_punish_stays_with_z() {
+    use ferry_core::Spend;
+    let payout = p2wpkh(9, Network::Regtest);
+    let after_fee = Amount::from_sat(params().btc_amount - params().btc_fee);
+    for script_path in [false, true] {
+        let mut sim = Sim::new(Faults {
+            taker: Some(Role::Z),
+            payout: Some(payout.clone()),
+            script_path,
+            ..Default::default()
+        });
+        assert_eq!(
+            sim.b.session().redeem_address(),
+            payout,
+            "B read it from the Propose"
+        );
+        assert_eq!(sim.z.session().redeem_address(), payout);
+        sim.mine_until(10, |s| {
+            s.b_state() == BState::ZecSwept && s.z_state() == ZState::BtcRedeemed
+        });
+        let tx = &sim.chain[&sim.txid(Spend::Redeem)].0;
+        assert_eq!(tx.output.len(), 1);
+        assert_eq!(tx.output[0].script_pubkey, payout.script_pubkey());
+        assert_eq!(tx.output[0].value, after_fee);
+        assert_eq!(tx.input[0].witness.len(), if script_path { 4 } else { 1 });
+        sim.assert_sweep_valid(Role::B);
+        assert!(sim.rejected.is_empty(), "{:?}", sim.rejected);
+    }
+
+    // B vanishes after locking: the punish pays Z's own address, not the payout address, and
+    // so does the tx_punish a watchtower would get.
+    let mut sim = Sim::new(Faults {
+        taker: Some(Role::Z),
+        payout: Some(payout.clone()),
+        b_offline_after_lock: true,
+        ..Default::default()
+    });
+    sim.mine_until(60, |s| s.z_state() == ZState::Punished);
+    let punish = &sim.chain[&sim.txid(Spend::Punish)].0;
+    assert_eq!(punish.output[0].script_pubkey, address(2).script_pubkey());
+    let (_, _, tower_punish) = sim.z.watchtower_txs().unwrap().unwrap();
+    assert_eq!(
+        tower_punish.output[0].script_pubkey,
+        address(2).script_pubkey()
+    );
+
+    // The default is unchanged: Z's own address, and no redeem_address in the Propose.
+    let mut sim = Sim::new(Faults {
+        taker: Some(Role::Z),
+        ..Default::default()
+    });
+    assert_eq!(sim.b.session().redeem_address(), address(2));
+    sim.mine_until(10, |s| s.z_state() == ZState::BtcRedeemed);
+    let tx = &sim.chain[&sim.txid(Spend::Redeem)].0;
+    assert_eq!(tx.output[0].script_pubkey, address(2).script_pubkey());
+    let (_, propose) = Proposal::new(&mut OsRng, [1; 32], Role::Z, params(), address(2)).unwrap();
+    let json = serde_json::to_value(&propose).unwrap();
+    assert!(
+        json["message"]["setup"].get("redeem_address").is_none(),
+        "{json}"
+    );
+}
+
+/// Only Z names a payout address; it must be of the swap's network and of an output type only
+/// its owner can spend; a maker refuses a Propose whose payout breaks those rules.
+#[test]
+fn payout_address_rules() {
+    let p = params();
+    let refused = |role: Role, payout: Address| {
+        Proposal::with_payout(
+            &mut OsRng,
+            [3; 32],
+            role,
+            p.clone(),
+            address(5),
+            Some(payout),
+        )
+        .err()
+        .map(|e| e.to_string())
+    };
+    let err = refused(Role::B, p2wpkh(9, Network::Regtest)).unwrap();
+    assert!(err.contains("only Z names a payout address"), "{err}");
+    let err = refused(Role::Z, p2wpkh(9, Network::Bitcoin)).unwrap();
+    assert!(err.contains("another network"), "{err}");
+    let v2 = witness_program(bitcoin::WitnessVersion::V2, &[7; 32]);
+    let anchor = witness_program(bitcoin::WitnessVersion::V1, &[0x4e, 0x73]);
+    for anyone_can_spend in [v2, anchor] {
+        let err = refused(Role::Z, anyone_can_spend.clone()).unwrap();
+        assert!(
+            err.contains("anyone could spend"),
+            "{anyone_can_spend}: {err}"
+        );
+    }
+    // Taproot, segwit v0 (both kinds) and the legacy types are fine.
+    let secp = bitcoin::key::Secp256k1::new();
+    let sk = bitcoin::secp256k1::SecretKey::from_slice(&[9; 32]).unwrap();
+    let pk = bitcoin::PublicKey::new(sk.public_key(&secp));
+    for ok in [
+        address(9),
+        p2wpkh(9, Network::Regtest),
+        Address::p2wsh(&bitcoin::ScriptBuf::new(), Network::Regtest),
+        Address::p2pkh(pk, Network::Regtest),
+        Address::p2sh(&bitcoin::ScriptBuf::new(), Network::Regtest).unwrap(),
+    ] {
+        assert_eq!(refused(Role::Z, ok.clone()), None, "{ok}");
+    }
+    // The redeem's output must clear its type's dust floor (params this thin are refused by
+    // validate() anyway; the payout check holds on its own).
+    let thin = SwapParams {
+        btc_amount: 2_100,
+        ..p.clone()
+    };
+    let to = p2wpkh(9, Network::Regtest);
+    assert!(ferry_core::check_payout_address(&to, &thin).is_err());
+    assert!(ferry_core::check_payout_address(&to, &p).is_ok());
+
+    // A maker reads the payout from the Propose and refuses one of another network.
+    let (_, propose) =
+        Proposal::with_payout(&mut OsRng, [4; 32], Role::Z, p, address(2), Some(to)).unwrap();
+    let mut forged = propose.clone();
+    if let Message::Propose { setup, .. } = &mut forged.message {
+        setup.redeem_address = Some(p2wpkh(9, Network::Bitcoin).into_unchecked());
+    }
+    assert!(matches!(
+        accept(&mut OsRng, &forged, address(1)),
+        Err(Error::InvalidSetup {
+            reason: "redeem address network",
+            ..
+        })
+    ));
+    assert!(accept(&mut OsRng, &propose, address(1)).is_ok());
+}
+
+/// A maker that predates payout addresses drops the field and would build tx_redeem to Z's own
+/// address. It never gets that far: its transcript no longer matches, so Z refuses its Accept
+/// before anything is locked.
+#[test]
+fn a_maker_that_ignores_the_payout_address_is_refused_at_negotiation() {
+    let (proposal, propose) = Proposal::with_payout(
+        &mut OsRng,
+        [5; 32],
+        Role::Z,
+        params(),
+        address(2),
+        Some(p2wpkh(9, Network::Regtest)),
+    )
+    .unwrap();
+    let mut old = serde_json::to_value(&propose).unwrap();
+    old["message"]["setup"]
+        .as_object_mut()
+        .unwrap()
+        .remove("redeem_address");
+    let old: ferry_core::Envelope = serde_json::from_value(old).unwrap();
+    let (b, actions) = accept(&mut OsRng, &old, address(1)).unwrap();
+    assert_eq!(b.session().redeem_address(), address(2));
+    let Action::SendMessage(accept_env) = &actions[0] else {
+        panic!("expected Accept")
+    };
+    assert!(matches!(
+        proposal.on_accept(&mut OsRng, accept_env),
+        Err(Error::TranscriptMismatch)
+    ));
 }

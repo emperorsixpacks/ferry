@@ -23,7 +23,9 @@ pub use messages::{Envelope, Message, Transcript, PROTOCOL_VERSION};
 pub use params::{Policy, SwapParams};
 pub use secret::{Secret, Secret32, Secret64};
 pub use session::Session;
-pub use swap::{accept, Action, ChainEvent, Event, Proposal, Swap};
+pub use swap::{
+    accept, check_payout_address, check_payout_type, Action, ChainEvent, Event, Proposal, Swap,
+};
 pub use z::{ZState, ZSwap};
 pub use zec::{SendFailure, ZecLeg, ZecNote, ZecStatus};
 

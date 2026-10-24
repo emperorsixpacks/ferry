@@ -12,6 +12,10 @@
 //!   - `max_counter` (role B) / `min_counter` (role Z): refuse to start if the maker's rate means
 //!     paying more / receiving fewer counter units for `zec_zat`.
 //!
+//!   - `payout_to`: role Z only, where leg 2's redeem (EVM: claim) pays coin C instead of the
+//!     daemon's own wallet (a 1Click deposit address, say). ferryd checks it for its chain;
+//!     the router sends it only to a daemon that lists [`PAYOUT_FEATURE`].
+//!
 //!   An error status means no swap was created; `201 {id}` means it was. The exception is a
 //!   409 with `"code": "route_label_in_use"`: a swap with that label exists, or a start with it
 //!   is still being handled, so the router treats it like a lost answer ([`start_answer`]).
@@ -30,6 +34,34 @@ use serde::{Deserialize, Serialize};
 
 /// What `/api/status` must list in `features` before the router starts a leg there.
 pub const ROUTE_FEATURE: &str = "route";
+
+/// What leg 2's daemon must also list before the router sends it a `payout_to`: an older
+/// ferryd would ignore the field and pay its own wallet.
+pub const PAYOUT_FEATURE: &str = "payout";
+
+/// Longest `payout_to` the router passes on (ferryd's own limit).
+const MAX_PAYOUT: usize = 100;
+
+/// A route's `payout_to` looks like an address (ASCII letters and digits, 1 to 100). Whether it
+/// is one of leg 2's chain and network is ferryd's to check, before it contacts a maker.
+pub fn check_payout(to: &str) -> Result<(), String> {
+    if to.is_empty() || to.len() > MAX_PAYOUT || !to.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err("payout_to must be an address (ASCII letters and digits)".into());
+    }
+    Ok(())
+}
+
+/// Whether leg 2's daemon takes `payout_to`.
+pub fn verify_payout(status: &DaemonStatus, pair: &str) -> Result<(), String> {
+    if status.features.iter().any(|f| f == PAYOUT_FEATURE) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the {pair} daemon does not take payout_to (its /api/status lacks features: \
+             [\"{PAYOUT_FEATURE}\"]); it would pay its own wallet instead"
+        ))
+    }
+}
 
 /// Swap party: `Z` holds shielded ZEC and wants the counter coin, `B` the reverse.
 #[derive(
@@ -252,6 +284,9 @@ pub struct LegSwap {
     /// Step 1: where B's sweep pays (role B; None = the daemon's own wallet).
     #[serde(default)]
     pub sweep_to: Option<String>,
+    /// Where Z's redeem or claim pays (role Z; None = the daemon's own wallet).
+    #[serde(default)]
+    pub payout_to: Option<String>,
 }
 
 impl LegSwap {
@@ -296,6 +331,8 @@ pub struct StartSwap {
     pub max_counter: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub min_counter: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub payout_to: Option<String>,
 }
 
 /// A read from a daemon failed.
@@ -679,5 +716,34 @@ mod tests {
             body,
             json!({"maker": "http://m", "zec_zat": 9, "route": "r1/2", "min_counter": 4})
         );
+    }
+
+    #[test]
+    fn payout_to_needs_the_feature_and_an_address_shape() {
+        let mut z = DaemonStatus::from_json(&evm_status()).unwrap();
+        assert!(verify_payout(&z, "usdc-base")
+            .unwrap_err()
+            .contains("does not take payout_to"));
+        z.features.push(PAYOUT_FEATURE.into());
+        assert_eq!(verify_payout(&z, "usdc-base"), Ok(()));
+        for ok in [
+            "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+            "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+        ] {
+            assert_eq!(check_payout(ok), Ok(()), "{ok}");
+        }
+        for bad in ["", " 0xab", "0x12/34", "--x", &"a".repeat(101)] {
+            assert!(check_payout(bad).is_err(), "{bad:?}");
+        }
+        let body = serde_json::to_value(StartSwap {
+            maker: "http://m".into(),
+            zec_zat: 9,
+            route: "r1/2".into(),
+            min_counter: Some(4),
+            payout_to: Some("0xab".into()),
+            ..StartSwap::default()
+        })
+        .unwrap();
+        assert_eq!(body["payout_to"], "0xab");
     }
 }

@@ -211,6 +211,47 @@ watchtower, you lose coin A, exactly as in a single swap.
 --watchtower-own`). Your swap-2 Ferry (the seller) can use any tower. Towers never touch the ZEC
 side, which has no deadlines. The router changes nothing about either swap's tower.
 
+## Paying out to another address (`payout_to`, NEAR Intents)
+
+When you sell ZEC, you can have the coin you receive paid straight to another address instead of
+your own wallet ([API.md](API.md#payout-address-payout_to)): typically a NEAR Intents deposit
+address that turns it into another coin on another chain
+([how the two fit](ARCHITECTURE.md#cross-chain-settlement-with-near-intents)).
+
+**The swap's guarantees don't change.** The address is fixed when the swap is agreed, before
+anything is locked, and nobody can change it afterwards: on Bitcoin and Litecoin it is in the
+claim transaction the other side signs [tx_redeem, under B's adaptor signature], and on EVM it is
+the payee in the contract's lock terms [`claimer`], which Ferry checks on chain before it locks
+your ZEC. A partner can't redirect it: the only claim Ferry ever signs or sends pays that
+address, and on EVM Ferry won't lock ZEC behind any other payee. A partner that ignores it (an
+older Ferry) or tries another can only stop the swap, at negotiation or through the usual call-off
+and refund; it never gets your ZEC. Only whoever holds your Ferry's API token can set it;
+a partner never can. Ferry checks it before asking anyone: an address of the right coin and
+network that only its owner can spend, paid above the dust floor. Keys, deadlines, timing rules
+and the call-off path are the same, and if the swap is called off your ZEC comes back to your own
+wallet. On Bitcoin and Litecoin the penalty [tx_punish] still pays your own wallet. **On EVM** the
+contract has one payee for the ZEC seller, so the penalty (your partner vanished after locking)
+goes to the payout address too, hours later than a normal claim.
+
+**What you trust on the NEAR side.** Once the payout lands, Ferry's guarantees end and NEAR
+Intents' begin: the deposit address is controlled by NEAR Intents, not by you, and the
+conversion is not atomic with the swap. You trust NEAR Intents, its bridges and its solvers to
+deliver the quoted coin, or to refund to the refund address you gave, while they hold your coin
+during settlement. A deposit address has a deadline: a payout that arrives late (a slow swap, or
+an EVM penalty) is refunded rather than converted, under NEAR's rules. Their leg is public: the
+1Click service sees the quote (amounts, destination), the deposit and settlement are visible on
+both chains and on NEAR, and the deposit address links your payout to its destination. Nothing
+about this touches Zcash: the ZEC side stays shielded.
+
+**Ferry never sends ZEC into NEAR Intents.** We checked the live 1Click API on 2026-10-20: its ZEC
+deposit address is transparent. Depositing there would take the ZEC out of the shielded pool and
+publish the amount and the link Ferry exists to hide. So Ferry does the private hop (shielded ZEC
+for BTC, LTC, USDC or WETH) and NEAR Intents only ever touches the other coin.
+
+**The public demo never lets a visitor choose `payout_to`**: its daemons hold the operator's
+coins, so a visitor's address would be paid with them. Its server sets the field only to a
+deposit address it created itself.
+
 ## How we checked
 
 - `cargo test --workspace`: unit tests, a two-daemon simulation of every outcome above, and
@@ -220,6 +261,11 @@ side, which has no deadlines. The router changes nothing about either swap's tow
   privacy control), and a pool check on every ZEC transaction. It exits 0 only if every check passes.
 - `infra/route-demo.sh test`: routes BTC → shielded ZEC → USDC on regtest Bitcoin and anvil with a
   stand-in Zcash chain: one to the end (the router restarted twice midway, and exactly one swap 2),
-  one whose swap 2 is refunded so the route holds the ZEC until "try again" finishes it, and one
-  stopped during swap 1 that ends holding the ZEC. The waits between the swaps with real notes are
-  covered by unit tests and `infra/e2e-real.sh`, not by this script.
+  one whose swap 2 pays a third address (`payout_to`), one whose swap 2 is refunded so the route
+  holds the ZEC until "try again" finishes it, and one stopped during swap 1 that ends holding the
+  ZEC. The waits between the swaps with real notes are covered by unit tests and
+  `infra/e2e-real.sh`, not by this script.
+- Payout addresses: simulation tests (the redeem pays it on the key path and the script path, the
+  penalty doesn't, a partner that drops it or locks to another payee gets no ZEC),
+  `infra/demo.sh test` (a regtest swap whose redeem pays a segwit address of a third wallet), and
+  an anvil test whose claim lands at a third account.

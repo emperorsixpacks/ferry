@@ -345,6 +345,34 @@ pub fn parse_address(s: &str) -> Result<[u8; 20], String> {
         .ok_or_else(|| format!("{s}: not a 20-byte hex address"))
 }
 
+/// A `payout_to` for an EVM swap: `0x` and 40 hex digits, all lowercase, all uppercase, or
+/// mixed-case with a valid EIP-55 checksum (so a typo in a checksummed address is caught), and
+/// not the zero address. FerryLock refuses a zero claimer anyway; this says so before the maker
+/// is asked.
+pub fn parse_payout(s: &str) -> Result<[u8; 20], String> {
+    let Some(h) = s.strip_prefix("0x") else {
+        return Err("an EVM address starts with 0x".into());
+    };
+    if h.len() != 40 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("an EVM address is 0x and 40 hex digits".into());
+    }
+    let mixed =
+        h.bytes().any(|b| b.is_ascii_lowercase()) && h.bytes().any(|b| b.is_ascii_uppercase());
+    let a = if mixed {
+        ferry_evm::Address::parse_checksummed(s, None).map_err(|_| {
+            "the EIP-55 checksum (its mix of upper and lower case) is wrong; check the address"
+                .to_string()
+        })?
+    } else {
+        s.parse::<ferry_evm::Address>()
+            .map_err(|e| format!("not an EVM address: {e}"))?
+    };
+    if a.is_zero() {
+        return Err("the zero address can't receive a payout".into());
+    }
+    Ok(a.0 .0)
+}
+
 pub fn addr_str(a: &[u8; 20]) -> String {
     ferry_evm::Address::from(*a).to_checksum(None)
 }
@@ -635,5 +663,40 @@ mod tests {
             usdc().token_for(u64::MAX / 100),
             Some(73_786_976_294_838_206)
         );
+    }
+
+    /// payout_to on EVM: 0x and 40 hex digits; a mixed-case address must carry a valid EIP-55
+    /// checksum; never the zero address.
+    #[test]
+    fn payout_addresses() {
+        // anvil's account 3, checksummed, lowercase and uppercase
+        let ok = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
+        let want = parse_address(ok).unwrap();
+        for s in [
+            ok.to_string(),
+            ok.to_lowercase(),
+            format!("0x{}", ok[2..].to_uppercase()),
+        ] {
+            assert_eq!(parse_payout(&s), Ok(want), "{s}");
+        }
+        // One letter's case flipped: the checksum catches it.
+        let typo = ok.replacen('F', "f", 1);
+        assert!(parse_payout(&typo).unwrap_err().contains("checksum"));
+        for (bad, why) in [
+            ("90f79bf6eb2c4f870365e785982e1f101e93b906", "starts with 0x"),
+            ("0x90f79bf6eb2c4f870365e785982e1f101e93b9", "40 hex digits"),
+            (
+                "0x90f79bf6eb2c4f870365e785982e1f101e93b90g",
+                "40 hex digits",
+            ),
+            ("0x0000000000000000000000000000000000000000", "zero address"),
+            (
+                "bcrt1qn7uqc8hytxc7mhtsdszr9f5yc6hgmqqlc0wsks",
+                "starts with 0x",
+            ),
+        ] {
+            let err = parse_payout(bad).unwrap_err();
+            assert!(err.contains(why), "{bad}: {err}");
+        }
     }
 }

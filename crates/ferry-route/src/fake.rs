@@ -214,6 +214,7 @@ impl Ferryd for FakeFerryd {
                 watchtower: None,
                 route: Some(req.route.clone()),
                 sweep_to: req.sweep_to.clone(),
+                payout_to: req.payout_to.clone(),
             });
             if std::mem::take(&mut s.lose_answer) {
                 return Err(StartError::Unknown("timed out".into()));

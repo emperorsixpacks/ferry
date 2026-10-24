@@ -49,7 +49,8 @@ Useful flags (defaults in brackets):
  "maker1": {"url": "http://maker1:7112", "name": "Kestrel"},
  "maker2": [{"url": "http://maker2:7912", "name": "Heron"}, "http://maker3:7912"],
  "max_in": 412500, "min_out": 39200000,
- "delay_secs": [300, 1800], "keep_bps": 0}
+ "delay_secs": [300, 1800], "keep_bps": 0,
+ "payout_to": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"}
 ```
 
 - `maker1` is leg 1's maker. `maker2` lists leg 2's makers in the order to try them. Each entry is a
@@ -61,6 +62,12 @@ Useful flags (defaults in brackets):
 - `delay_secs` is optional. `keep_bps` is optional (at most 200): it keeps a random 0 to `keep_bps`
   of the ZEC back in your wallet.
 - The router fetches leg 1's `sweep_to` address from your Z daemon itself; a request can't set it.
+- `payout_to` is optional: where leg 2's redeem (EVM: claim) pays coin C instead of your leg-2
+  wallet, for a route that ends on NEAR Intents (a 1Click deposit address on coin C's chain). The
+  router checks only that it looks like an address (1 to 100 ASCII letters and digits) and that
+  leg 2's daemon lists `"payout"` in its `/api/status` `features` (at creation and again before
+  leg 2 starts); ferryd checks it for its chain and network before it contacts a maker. Leg 1
+  never gets it. If leg 2 is refunded, the ZEC still comes back to your leg-2 wallet.
 - Errors are `{"error": "..."}`:
   - `400` for an unknown or unconfigured pair, a route where A and C are the same asset, the same
     partner on both legs, a daemon with the wrong role or pair, or a Z wallet with no address;
@@ -89,6 +96,7 @@ A route as the API shows it:
  "zec": {"sweep_txid": "…", "sweep_confs": 7, "needed_confs": 10, "spendable_zat": 0, "need_zat": 99990000, "held_zat": 99990000},
  "legs": [{"n": 1, "pair": "btc", "role": "B", "maker": "Kestrel", "label": "r9f3…/1", "swap_id": "…",
            "state": "ZecSwept", "outcome": "swapped", "watchtower": null, …}, {"n": 2, …}],
+ "payout_to": null,   // or the address leg 2 pays coin C to
  "timeline": [{"at": "…", "kind": "leg1_started", "label": "Swap 1 of 2 started with Kestrel"}],
  "note": "Your ZEC is in your wallet \"user-z\": 7 of 10 confirmations before it can be spent.",
  "problem": null}
@@ -165,16 +173,19 @@ daemon types; [docs/API.md](../../docs/API.md#route-legs)):
   - `route`: a label of at most 80 characters (`[a-z0-9/-]`), stored before the first save;
   - `sweep_to`: role B only, checked by the Zcash backend (our network, an Orchard receiver) and
     never sent to the maker;
-  - `max_counter` for role B and `min_counter` for role Z, which refuse a maker rate past the limit.
+  - `max_counter` for role B and `min_counter` for role Z, which refuse a maker rate past the limit;
+  - `payout_to`: role Z only, the address Z's redeem or claim pays instead of its own wallet.
 
   An error status means that no swap was created, with one exception the router relies on: a 409
   with `"code": "route_label_in_use"` says a swap with that label exists, or a start with it is
   still being handled. The router treats it like a lost answer and looks the swap up by label.
-- `SwapView` shows `route` and `sweep_to`.
+- `SwapView` shows `route`, `sweep_to` and `payout_to`.
 - `GET /api/status` lists `"route"` in `features`. Without it the router won't start a leg: an
-  older ferryd silently ignores unknown fields.
+  older ferryd silently ignores unknown fields. It also lists `"payout"` when it takes `payout_to`;
+  the router sends `payout_to` only to such a daemon.
 - `GET /api/addresses` returns the wallet's own shielded address as `zec.address`.
 
-`infra/route-demo.sh test` runs three routes end to end (BTC → ZEC → USDC on regtest Bitcoin and
-anvil, one mock Zcash chain): one to `done` with two router restarts midway, one whose leg 2 is
+`infra/route-demo.sh test` runs four routes end to end (BTC → ZEC → USDC on regtest Bitcoin and
+anvil, one mock Zcash chain): one to `done` with two router restarts midway, one whose leg 2 pays
+a third address (`payout_to`, standing in for a 1Click deposit address), one whose leg 2 is
 refunded and then finished with `continue`, and one stopped during leg 1.

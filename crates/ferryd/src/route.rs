@@ -12,6 +12,11 @@
 //!   protocol: the maker never sees it.
 //! - `max_counter` (role B) / `min_counter` (role Z): refuse to start when the maker's rate
 //!   means paying more / receiving fewer counter units for `zec_zat` than this.
+//! - `payout_to` (role Z, any swap, not only a route leg): the address that receives the
+//!   counter coin when Z redeems (EVM: claims) instead of our own wallet. Each daemon type
+//!   checks it for its chain before the maker is contacted; it is bound at negotiation (BTC/LTC:
+//!   the tx_redeem template B signs; EVM: the `claimer` in the FerryLock terms). Refunds and
+//!   the Bitcoin punish keep paying our own wallet.
 //!
 //! An error status means no swap was created; `201 {id}` means one was.
 
@@ -23,8 +28,17 @@ use serde::Deserialize;
 use crate::daemon::ApiError;
 
 /// What `GET /api/status` lists in `features`. The router starts a leg only on a daemon that
-/// lists `route` (an older ferryd would silently ignore the fields above).
-pub const FEATURES: &[&str] = &["route"];
+/// lists `route`, and passes `payout_to` only to one that lists `payout` (an older ferryd would
+/// silently ignore the fields above, and pay our own wallet).
+pub const FEATURES: &[&str] = &["route", PAYOUT_FEATURE];
+
+/// `POST /api/swaps` takes `payout_to` (in `GET /api/status` `features`), and, in a Bitcoin or
+/// Litecoin maker's `/peer/offer` `features`, the maker takes a Propose that names one.
+pub const PAYOUT_FEATURE: &str = "payout";
+
+/// Longest `payout_to`: Bitcoin and Litecoin addresses are at most 90 characters (bech32), an
+/// EVM address 42.
+const MAX_PAYOUT: usize = 100;
 
 /// The `code` of a 409 whose route label is already taken (by a swap, or a start in progress).
 pub const LABEL_IN_USE: &str = "route_label_in_use";
@@ -47,6 +61,9 @@ pub struct RouteArgs {
     pub max_counter: Option<u64>,
     #[serde(default)]
     pub min_counter: Option<u64>,
+    /// Role Z: where the redeem (EVM: the claim) pays instead of our own wallet.
+    #[serde(default)]
+    pub payout_to: Option<String>,
 }
 
 impl RouteArgs {
@@ -86,6 +103,23 @@ impl RouteArgs {
                 "min_counter is for role Z only (the least it receives); role B sets max_counter"
                     .into(),
             );
+        }
+        if let Some(to) = &self.payout_to {
+            if role != Role::Z {
+                return bad(
+                    "payout_to is for role Z only: it says where Z's redeem or claim pays the coin \
+                     it receives (role B's ZEC destination is sweep_to)"
+                        .into(),
+                );
+            }
+            // The daemon parses it for its chain; this keeps anything that is not an address
+            // (bech32, base58 and hex are all ASCII letters and digits) away from the parser.
+            if to.is_empty()
+                || to.len() > MAX_PAYOUT
+                || !to.bytes().all(|b| b.is_ascii_alphanumeric())
+            {
+                return bad("payout_to must be an address (ASCII letters and digits)".into());
+            }
         }
         Ok(())
     }
@@ -231,6 +265,19 @@ pub fn leg_note(route: Option<&str>, sweep_to: Option<&str>) -> Option<String> {
     }
 }
 
+/// The timeline line of a Z swap started with `payout_to` (`what`: "redeem" or "claim").
+pub fn payout_note(to: &str, what: &str, punish_too: bool) -> String {
+    format!(
+        "The {what} pays {}, the payout address given for this swap, instead of Z's own wallet. {}",
+        short_address(to),
+        if punish_too {
+            "The contract's punish pays the same address; Z's ZEC comes back to Z's own wallet on a refund"
+        } else {
+            "The punish and any ZEC that comes back still go to Z's own wallet"
+        }
+    )
+}
+
 /// `utest1abcdefgh…` for timelines.
 pub fn short_address(a: &str) -> String {
     if a.chars().count() <= 20 {
@@ -285,6 +332,28 @@ mod tests {
             let a = args(serde_json::json!({ "sweep_to": bad }));
             assert_eq!(a.check(Role::B).unwrap_err().0, 400, "{bad:?}");
         }
+    }
+
+    /// `payout_to` is role Z's, and must look like an address before any chain parses it.
+    #[test]
+    fn payout_to_is_for_role_z_and_looks_like_an_address() {
+        for to in [
+            "bcrt1qn7uqc8hytxc7mhtsdszr9f5yc6hgmqqlc0wsks",
+            "0x2a3f1e19a0e7d7e1b0d0f5c4f9cd8ff2c3e4a7d1",
+            "mgiYMiKfxcUfKCq12DtcE3M3kZLuC1mvaJ",
+        ] {
+            let a = args(serde_json::json!({ "payout_to": to }));
+            assert!(a.check(Role::Z).is_ok(), "{to}");
+            let err = a.check(Role::B).unwrap_err();
+            assert_eq!(err.0, 400);
+            assert!(err.1.contains("payout_to is for role Z only"), "{}", err.1);
+        }
+        for bad in ["", "--help", "bc1q x", "0x12/34", "é", &"a".repeat(101)] {
+            let a = args(serde_json::json!({ "payout_to": bad }));
+            let err = a.check(Role::Z).unwrap_err();
+            assert!(err.1.contains("must be an address"), "{bad:?}: {}", err.1);
+        }
+        assert!(FEATURES.contains(&"route") && FEATURES.contains(&"payout"));
     }
 
     #[test]

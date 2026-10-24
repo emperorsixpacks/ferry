@@ -26,6 +26,11 @@ use serde_json::{json, Value};
 const TOKEN: &str = "evm-it-token";
 const RATE: u64 = 40_000_000; // 40 USDC per ZEC
 const T1_SECS: u64 = 120;
+
+/// The two tests that time a start (it must answer within 2 s, before any block) hold this, and
+/// so does the payout test, so its anvil and two daemons never compete with them for the CPU on
+/// a busy machine (their DLEQ proofs are the slow part of a start).
+static TIMED: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 // anvil's well-known test accounts (its default mnemonic): 0 deploys, 1 is B, 2 is Z
 const KEY_DEPLOYER: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const KEY_B: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -158,10 +163,11 @@ impl Chain {
     }
 
     async fn usdc_of(&self, key: &str) -> U256 {
-        self.deployer
-            .token_balance(self.usdc, signer(key).address())
-            .await
-            .unwrap()
+        self.usdc_at(signer(key).address()).await
+    }
+
+    async fn usdc_at(&self, who: Address) -> U256 {
+        self.deployer.token_balance(self.usdc, who).await.unwrap()
     }
 
     /// A ferryd for this chain; `extra` adds the role's own flags.
@@ -357,6 +363,7 @@ async fn propose(chain: &Chain, offer: &Value, sid: [u8; 32], zec_zat: u64) -> V
 /// locks from the tick loop, and refunds at t1 when the taker never locks ZEC.
 #[tokio::test]
 async fn slow_lock_maker_answers_at_once_and_still_refunds() {
+    let _timed = TIMED.lock().await;
     let Some(chain) = Chain::start().await else {
         return;
     };
@@ -446,6 +453,7 @@ async fn slow_lock_maker_answers_at_once_and_still_refunds() {
 /// loop), and the swap with a Z maker completes on a chain with 2 s blocks.
 #[tokio::test]
 async fn buy_zec_b_taker_with_a_z_maker() {
+    let _timed = TIMED.lock().await;
     let Some(chain) = Chain::start().await else {
         return;
     };
@@ -625,7 +633,7 @@ async fn route_leg_one_buys_zec_into_another_wallet() {
     user.ready(&http).await;
 
     let status = api_get(&http, &user, "/api/status").await;
-    assert_eq!(status["features"], json!(["route"]), "{status}");
+    assert_eq!(status["features"], json!(["route", "payout"]), "{status}");
     let addresses = api_get(&http, &user, "/api/addresses").await;
     assert_eq!(addresses["zec"]["address"], mock_wallet("user-b"));
 
@@ -800,4 +808,126 @@ async fn route_leg_two_price_floor_and_an_unsaved_swap() {
             "none on disk"
         );
     }
+}
+
+// ---------------------------------------------------------------- payout_to (role Z)
+
+/// anvil's account 3: an address neither daemon holds a key for (say, a 1Click deposit
+/// address).
+const PAYOUT: &str = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
+
+/// A Z taker's `payout_to` is the claimer in the FerryLock terms: the claim pays it, not Z's
+/// account (which still sends the claim). A bad address, FerryLock or the token itself, and
+/// `payout_to` on a B daemon are refused before any maker is contacted.
+#[tokio::test]
+async fn payout_to_claim_lands_at_a_third_address() {
+    let _timed = TIMED.lock().await;
+    let Some(chain) = Chain::start().await else {
+        return;
+    };
+    let http = api_client();
+    let maker = chain.ferryd(
+        "b",
+        "maker-b",
+        "b.key",
+        &["--maker-offer", &format!("{RATE}")],
+    );
+    let user = chain.ferryd("z", "user-z", "z.key", &["--zec-mock-balance", "500000000"]);
+    maker.ready(&http).await;
+    user.ready(&http).await;
+    let status = api_get(&http, &user, "/api/status").await;
+    assert!(
+        status["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("payout")),
+        "{status}"
+    );
+
+    // Checked before the maker is asked: these name a maker nobody listens on.
+    let nowhere = json!({"maker": "http://127.0.0.1:1", "zec_zat": 100_000_000u64});
+    let lock = format!("{:#x}", chain.lock);
+    let usdc = format!("{:#x}", chain.usdc);
+    let typo = PAYOUT.replacen('F', "f", 1);
+    for (to, why) in [
+        ("0x1234", "40 hex digits"),
+        (typo.as_str(), "checksum"),
+        ("0x0000000000000000000000000000000000000000", "zero address"),
+        (lock.as_str(), "FerryLock contract"),
+        (usdc.as_str(), "USDC contract"),
+        (
+            "bcrt1qn7uqc8hytxc7mhtsdszr9f5yc6hgmqqlc0wsks",
+            "starts with 0x",
+        ),
+    ] {
+        let (code, body) = post_swap(&http, &user, with(&nowhere, json!({"payout_to": to}))).await;
+        assert_eq!(code, 400, "{to}: {body}");
+        let e = body["error"].as_str().unwrap_or("");
+        assert!(
+            e.starts_with("payout_to: ") && e.contains(why),
+            "{to}: {body}"
+        );
+    }
+    let (code, body) = post_swap(&http, &maker, with(&nowhere, json!({"payout_to": PAYOUT}))).await;
+    assert_eq!(code, 400, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("role Z only"),
+        "{body}"
+    );
+    assert_eq!(api_get(&http, &user, "/api/swaps").await, json!([]));
+
+    let payout: Address = PAYOUT.parse().unwrap();
+    let (payout_before, z_before) = (chain.usdc_at(payout).await, chain.usdc_of(KEY_Z).await);
+    let (code, body) = post_swap(
+        &http,
+        &user,
+        json!({"maker": maker.peer, "zec_zat": 100_000_000u64, "payout_to": PAYOUT.to_lowercase(),
+               "min_counter": RATE}),
+    )
+    .await;
+    assert_eq!(code, 201, "{body}\n{}", tail(&user.log));
+    let id = body["id"].as_str().unwrap().to_string();
+    let v = user.swap(&http, &id).await;
+    assert_eq!(v["payout_to"], PAYOUT, "shown checksummed: {v}");
+    assert!(
+        v["timeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "payout_to"),
+        "{v}"
+    );
+    let z = user
+        .until(&http, &id, 120, "the swap", |v| v["outcome"] == "swapped")
+        .await;
+    // The terms bind it: both sides' view of the lock names the payout address as claimer.
+    assert_eq!(z["counter"]["claimer"], PAYOUT, "{z}");
+    let b = maker
+        .until(&http, &id, 30, "B's side", |v| v["outcome"] == "swapped")
+        .await;
+    assert_eq!(b["counter"]["claimer"], PAYOUT, "{b}");
+    assert!(b["payout_to"].is_null(), "the maker's own view: {b}");
+    assert_eq!(
+        chain.usdc_at(payout).await - payout_before,
+        U256::from(RATE),
+        "the claim paid 40 USDC to the payout address"
+    );
+    assert_eq!(
+        chain.usdc_of(KEY_Z).await,
+        z_before,
+        "Z's own account got nothing"
+    );
+    let done = z["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "swap_complete")
+        .unwrap();
+    assert!(
+        done["label"]
+            .as_str()
+            .unwrap()
+            .contains("the payout address given for this swap"),
+        "{done}"
+    );
 }
