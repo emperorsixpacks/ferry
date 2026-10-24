@@ -1768,6 +1768,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             out.push(EvmEvent::Chain(EvmChainEvent::ZecNoteSeen {
                 value: note.value,
                 confs: note.confirmations,
+                spent: note.spent_by.is_some(),
             }));
         }
         if let Some(txid) = rec.zec_sweep_txid.clone() {

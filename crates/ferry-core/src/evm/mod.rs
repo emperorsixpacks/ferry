@@ -74,10 +74,11 @@ pub struct EvmObservation {
 #[allow(clippy::large_enum_variant)] // transient values
 pub enum EvmChainEvent {
     Observed(EvmObservation),
-    /// The ZEC lock note at the joint address.
+    /// The ZEC lock note at the joint address. `spent`: a mined or live transaction spends it.
     ZecNoteSeen {
         value: u64,
         confs: u32,
+        spent: bool,
     },
     /// Our sweep of the joint address.
     ZecSwept {
