@@ -152,10 +152,12 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         let signer = load_key(e.evm_key_file.as_deref().context("--evm-key-file")?)?;
         let client = EvmClient::connect_http(&e.evm_rpc, Address::from(contract), signer.clone())?
             .with_log_chunk(e.evm_log_chunk);
-        let chain_id = client
-            .chain_id()
-            .await
-            .with_context(|| format!("reaching the EVM node at {}", e.evm_rpc))?;
+        let chain_id = client.chain_id().await.with_context(|| {
+            format!(
+                "reaching the EVM node at {}",
+                super::config::redacted_rpc(&e.evm_rpc)
+            )
+        })?;
         client.check_deployment().await.with_context(|| {
             format!(
                 "checking the FerryLock deployment at {}",

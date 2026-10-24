@@ -24,6 +24,11 @@ pub struct EvmArgs {
     /// EVM JSON-RPC endpoint (anvil, Base Sepolia...).
     #[arg(long, default_value = "http://127.0.0.1:18545")]
     pub evm_rpc: String,
+    /// Read the EVM JSON-RPC endpoint from this file instead of --evm-rpc, so a provider key in
+    /// the URL stays out of `ps` and `docker inspect`. Only its owner may read it (mode 0600 or
+    /// 0400): ferryd refuses to start otherwise.
+    #[arg(long, conflicts_with = "evm_rpc")]
+    pub evm_rpc_file: Option<PathBuf>,
     /// FerryLock deployment address. Both parties must use the same one, and ferryd refuses to
     /// start unless the code there is the FerryLock it was built with.
     #[arg(long)]
@@ -228,6 +233,57 @@ pub fn check_feed_pair(pair: crate::pricefeed::Pair, token_decimals: u8) -> Resu
     Ok(())
 }
 
+/// `--evm-rpc-file`: the endpoint from a file only its owner can read. The URL often carries a
+/// provider key, so it is never echoed back (errors name the file, not its content).
+pub fn read_rpc_file(path: &std::path::Path) -> Result<String, String> {
+    let shown = path.display();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)
+            .map_err(|e| format!("--evm-rpc-file {shown}: {e}"))?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "--evm-rpc-file {shown} can be read by other users (mode {:o}); chmod 600 it",
+                mode & 0o777
+            ));
+        }
+    }
+    let text = std::fs::read_to_string(path).map_err(|e| format!("--evm-rpc-file {shown}: {e}"))?;
+    let url = text.trim();
+    if url.is_empty() || url.lines().count() != 1 {
+        return Err(format!(
+            "--evm-rpc-file {shown} must hold one line: the JSON-RPC URL"
+        ));
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(format!(
+            "--evm-rpc-file {shown} must hold an http:// or https:// URL"
+        ));
+    }
+    Ok(url.to_string())
+}
+
+/// An RPC URL fit for logs and errors: scheme, host and port only, since providers put their
+/// API key in the path, the query or the user info.
+pub fn redacted_rpc(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(u) => {
+            let host = u.host_str().unwrap_or("?");
+            let port = u.port().map(|p| format!(":{p}")).unwrap_or_default();
+            let hidden = u.path() != "/" || u.query().is_some() || !u.username().is_empty();
+            format!(
+                "{}://{host}{port}{}",
+                u.scheme(),
+                if hidden { "/…" } else { "" }
+            )
+        }
+        Err(_) => "the EVM node".into(),
+    }
+}
+
 /// Which policy the operator asked for beyond the listed chains.
 pub fn policy_opt_in(cli: &crate::config::Cli) -> ferry_core::evm::PolicyOptIn {
     use ferry_core::evm::PolicyOptIn;
@@ -341,6 +397,62 @@ mod tests {
             PolicyOptIn::UnlistedTestnet
         );
         assert!(cli(&["--dev-policy", "--evm-testnet-policy"]).is_err());
+    }
+
+    /// `--evm-rpc-file`: one owner-only line holding an http(s) URL; its content never shows up
+    /// in an error, and it can't be combined with --evm-rpc.
+    #[cfg(unix)]
+    #[test]
+    fn rpc_url_from_a_private_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rpc");
+        let secret = "https://base-sepolia.example/v2/SECRETKEY123";
+        let write = |text: &str, mode: u32| {
+            let _ = std::fs::remove_file(&path);
+            std::fs::write(&path, text).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        write(&format!("{secret}\n"), 0o600);
+        assert_eq!(read_rpc_file(&path).unwrap(), secret);
+        write(secret, 0o400);
+        assert_eq!(read_rpc_file(&path).unwrap(), secret);
+        for mode in [0o640, 0o604, 0o644] {
+            write(secret, mode);
+            let err = read_rpc_file(&path).unwrap_err();
+            assert!(err.contains("chmod 600"), "{err}");
+            assert!(!err.contains("SECRETKEY"), "{err}");
+        }
+        for bad in ["", "ftp://x/SECRETKEY", "https://a/SECRETKEY\nhttps://b"] {
+            write(bad, 0o600);
+            let err = read_rpc_file(&path).unwrap_err();
+            assert!(!err.contains("SECRETKEY"), "{err}");
+        }
+        assert!(read_rpc_file(&dir.path().join("missing")).is_err());
+
+        assert_eq!(redacted_rpc(secret), "https://base-sepolia.example/…");
+        assert_eq!(
+            redacted_rpc("http://127.0.0.1:18545"),
+            "http://127.0.0.1:18545"
+        );
+        assert_eq!(
+            redacted_rpc("https://u:SECRETKEY@rpc.example"),
+            "https://rpc.example/…"
+        );
+        assert_eq!(
+            redacted_rpc("https://rpc.example/?key=SECRETKEY"),
+            "https://rpc.example/…"
+        );
+        assert_eq!(redacted_rpc("not a url SECRETKEY"), "the EVM node");
+
+        use clap::Parser;
+        let cli = |extra: &[&str]| {
+            let base = ["ferryd", "--role", "z", "--name", "n", "--data-dir", "/x"];
+            crate::config::Cli::try_parse_from(base.iter().chain(extra))
+        };
+        let file = path.to_str().unwrap();
+        assert!(cli(&["--evm-rpc-file", file]).is_ok());
+        assert!(cli(&["--evm-rpc-file", file, "--evm-rpc", "http://x"]).is_err());
     }
 
     #[test]

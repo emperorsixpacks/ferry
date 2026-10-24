@@ -344,6 +344,10 @@ Only the token changes.
   - **Flags:**
     - `--evm-rpc`, `--evm-contract`, `--evm-token`, `--evm-key-file` (hex key: Z's payout
       account, which also sends the claim; B's account, which locks, refunds and signs Ready).
+    - `--evm-rpc-file` instead of `--evm-rpc`: the RPC URL from a file only its owner can read
+      (0600 or 0400, or ferryd refuses to start), so a provider key in the URL stays out of `ps`
+      and `docker inspect`. Errors name the file, never its content, and the startup error for
+      an unreachable node shows only the URL's scheme, host and port.
     - `--evm-token-symbol`, `--evm-token-decimals` (0 to 18): checked against the token's own
       `symbol()` and `decimals()` at startup.
     - `--evm-t1-secs` (proposal to t1), `--evm-refund-secs` (t2 − t1), `--evm-delta-secs`.
