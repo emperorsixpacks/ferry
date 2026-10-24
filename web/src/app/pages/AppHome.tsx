@@ -303,7 +303,9 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
       Max
     </button>
   );
-  const youHave = (text: string | null, add?: string) => <YouHave text={text} add={info.own ? add : undefined} />;
+  const youHave = (text: string | null, add?: string, need?: bigint | null) => <YouHave text={text} add={info.own ? add : undefined} need={need} />;
+  // buying with a token the node is short of: by how much (base units), for Add funds to start from
+  const short = buying && evm && valid && coinBal != null && gross > coinBal ? BigInt(Math.ceil(gross - coinBal)) : null;
   const zecSide: Side = buying ? "buy" : "sell";
 
   const zecPanel = (
@@ -355,7 +357,7 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
       foot={
         buying ? (
           <>
-            {youHave(coinBal == null ? null : `${btcText(coinBal)} ${ticker}`, pair)}
+            {youHave(coinBal == null ? null : `${btcText(coinBal)} ${ticker}`, pair, short)}
             {maxButton}
           </>
         ) : (

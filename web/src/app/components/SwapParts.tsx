@@ -33,15 +33,16 @@ export function Panel({ label, pill, foot, onClick, children }: { label: string;
 }
 
 // "You have 4.99 ZEC · Add funds": what the node holds of a panel's coin; on the person's own node,
-// with a way to add more (`add`: the coin's key on /wallet).
-export function YouHave({ text, add }: { text: string | null; add?: string }) {
+// with a way to add more (`add`: the coin's key on /wallet; `need`: how much it is short, in base
+// units, for /wallet's Pay with MetaMask to start from).
+export function YouHave({ text, add, need }: { text: string | null; add?: string; need?: bigint | null }) {
   return (
     <span className="flex min-w-0 items-center gap-1.5">
       <span className="truncate tabular-nums">{text == null ? "You have –" : `You have ${text}`}</span>
       {add ? (
         <>
           <span aria-hidden>·</span>
-          <Link to={`/wallet?add=${add}`} className="shrink-0 rounded font-medium text-slate-700 underline-offset-4 transition-colors hover:text-slate-900 hover:underline" data-add-funds>
+          <Link to={`/wallet?add=${add}${need && need > 0n ? `&need=${need}` : ""}`} className="shrink-0 rounded font-medium text-slate-700 underline-offset-4 transition-colors hover:text-slate-900 hover:underline" data-add-funds>
             Add funds
           </Link>
         </>
