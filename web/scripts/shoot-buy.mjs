@@ -2,7 +2,7 @@
 // (its Z party sells ZEC as a maker, its B party is you). Flips the swap card, checks the buy side
 // (the coin on top, ZEC below, partners who sell ZEC, the direction remembered), buys 1 ZEC, and
 // shows Activity with a swap each way. Screenshots go to screenshots/app/buy/ (SHOOT_OUT=dir to
-// put them elsewhere).
+// put them elsewhere; SHOOT_THEME=dark to take them in dark mode).
 //
 // Ports (override with SHOOT_PORT_BASE): mock Z base+21, B base+22, Vite base+61.
 import { spawn } from "node:child_process";
@@ -68,7 +68,7 @@ async function until(port, id, pred, label) {
 const browser = await chromium.launch();
 const shots = [];
 async function page(width) {
-  const p = await browser.newPage({ viewport: { width, height: width < 500 ? 844 : 900 } });
+  const p = await browser.newPage({ viewport: { width, height: width < 500 ? 844 : 900 }, colorScheme: process.env.SHOOT_THEME === "dark" ? "dark" : "light" });
   p.on("console", (m) => m.type() === "error" && !/Failed to load resource/.test(m.text()) && console.log(`[${width}]`, m.text()));
   return p;
 }

@@ -4,7 +4,8 @@
 // one. Firm prices (POST /api/quotes) replace a partner's indicative rate when it gives one. Then
 // the same flow through the production server (server/prod.mjs, needs `pnpm build` first):
 // GET /api/makers, POST /api/quotes, a swap started by maker name and by firm quote, a raw URL
-// refused, and the quote rate limit.
+// refused, and the quote rate limit. SHOOT_OUT=dir puts the screenshots elsewhere, SHOOT_THEME=dark
+// takes them in dark mode.
 //
 // Ports (override with SHOOT_PORT_BASE): mock Z base+11, B base+12, Vite base+51, prod base+52.
 import { spawn } from "node:child_process";
@@ -17,7 +18,7 @@ const Z = BASE_PORT + 11;
 const B = BASE_PORT + 12;
 const VITE = BASE_PORT + 51;
 const PROD = BASE_PORT + 52;
-const OUT = new URL("../screenshots/app/makers/", import.meta.url).pathname;
+const OUT = (process.env.SHOOT_OUT ?? new URL("../screenshots/app/makers/", import.meta.url).pathname).replace(/\/?$/, "/");
 mkdirSync(OUT, { recursive: true });
 
 const env = {
@@ -65,7 +66,7 @@ const reset = () => post(`http://127.0.0.1:${Z}`, "/api/_mock/reset", {});
 const browser = await chromium.launch();
 const shots = [];
 async function page(width) {
-  const p = await browser.newPage({ viewport: { width, height: width < 500 ? 844 : 900 } });
+  const p = await browser.newPage({ viewport: { width, height: width < 500 ? 844 : 900 }, colorScheme: process.env.SHOOT_THEME === "dark" ? "dark" : "light" });
   p.on("console", (m) => m.type() === "error" && !/Failed to load resource/.test(m.text()) && console.log(`[${width}]`, m.text()));
   return p;
 }
