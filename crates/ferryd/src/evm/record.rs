@@ -168,6 +168,10 @@ pub struct EvmRecord {
     pub sweep_not_before: Option<u64>,
     #[serde(default)]
     pub zec_send_intent: bool,
+    /// Z, refunded after a send that may have gone out: our wallet showed the lock can never
+    /// land, so the joint address is no longer watched for it.
+    #[serde(default)]
+    pub late_note_closed: bool,
     #[serde(default)]
     pub created_ms: u64,
     pub mine_revealed: bool,
@@ -235,6 +239,7 @@ impl EvmRecord {
             route: None,
             sweep_to: None,
             payout_to: None,
+            late_note_closed: false,
         }
     }
 
@@ -325,22 +330,41 @@ impl EvmRecord {
     }
 
     /// Nothing left to do or to fill in.
-    pub fn settled(&self) -> bool {
-        let sweep_expected =
-            matches!(self.outcome(), Some("swapped" | "refunded")) && self.zec_lock_txid.is_some();
-        let late_note_possible = self.role() == Role::Z
+    /// Done watching: the tick skips it from here on ([`crate::record::settles`]). `describes_txs`: the Zcash
+    /// backend can describe a transaction to a chain observer (`ZecLeg::describes_txs`);
+    /// without that, the other side's sweep line never comes, so it isn't waited for.
+    pub fn settled(&self, describes_txs: bool, now_ms: u64) -> bool {
+        crate::record::settles(
+            crate::record::Settle {
+                finished: self.swap.is_final(),
+                pending: !self.pending.is_empty(),
+                late_note_possible: self.late_note_possible(),
+                sweep_expected: matches!(self.outcome(), Some("swapped" | "refunded"))
+                    && self.zec_lock_txid.is_some(),
+                sweep_seen: self.observer_zec.iter().any(|(k, _)| k == "sweep"),
+                heights_done: self
+                    .timeline
+                    .iter()
+                    .all(|e| e.txid.is_none() || e.height.is_some()),
+                quiet_ms: now_ms.saturating_sub(crate::record::last_activity_ms(
+                    &self.timeline,
+                    self.created_ms,
+                )),
+            },
+            describes_txs,
+        )
+    }
+
+    /// Z refunded without (knowingly) locking ZEC, but a send was attempted: the joint address
+    /// is watched, so a note that lands anyway is reclaimed rather than stranded, until our
+    /// wallet shows the lock can never land (`late_note_closed`).
+    pub fn late_note_possible(&self) -> bool {
+        self.role() == Role::Z
             && self.state() == "Refunded"
+            && !self.late_note_closed
             && (self.zec_send_intent
                 || self.has("zec_lock_refused")
-                || self.has("zec_send_uncertain"));
-        !late_note_possible
-            && self.swap.is_final()
-            && self.pending.is_empty()
-            && (!sweep_expected || self.observer_zec.iter().any(|(k, _)| k == "sweep"))
-            && self
-                .timeline
-                .iter()
-                .all(|e| e.txid.is_none() || e.height.is_some())
+                || self.has("zec_send_uncertain"))
     }
 
     pub fn set_observer(list: &mut Vec<(String, String)>, key: &str, line: String) {

@@ -8,6 +8,7 @@ mod http;
 mod mock_zec;
 mod pricefeed;
 mod quote;
+mod reads;
 mod rebroadcast;
 mod record;
 mod route;
@@ -57,7 +58,8 @@ async fn main() -> anyhow::Result<()> {
                 cli.zec_mock_block_secs,
                 cli.zec_mock_balance,
             )?
-            .with_network(cli.zec_network.clone());
+            .with_network(cli.zec_network.clone())
+            .with_describe(cli.zec_mock_describe);
             run(cli, leg).await
         }
         ZecBackend::Devtool => {
