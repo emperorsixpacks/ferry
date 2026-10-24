@@ -22,3 +22,6 @@ HANDOFF.md
 .demo-route/
 .mainnet-demo/
 .mainnet-demo-fork/
+.ferry-node/
+.ferry-node-mainnet/
+ferry-node-backup-*.enc
