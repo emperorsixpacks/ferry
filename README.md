@@ -87,18 +87,18 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
 - **Real shielded ZEC, end to end.** `infra/e2e-real.sh` starts a fresh regtest Bitcoin + Zebra +
   Zaino stack and runs all three stories with real Ironwood notes. In the happy story, a stranger also
   sends small notes to the joint address while B waits to sweep. A fourth story checks that a wallet
-  holding only transparent ZEC refuses to lock and gets its BTC-side refund. It also checks the balances, and
+  with too little shielded ZEC (only transparent coins on top) is turned away before anything is locked. It also checks the balances, and
   that the counterparty, who holds the joint viewing key, can't see where a sweep went. A control run
   without that protection shows the same check does catch the leak. It exits 0 only if every check passes. Every ZEC transaction it made, as mined
-  ([full log](docs/evidence/e2e-real-regtest-2026-10-17.txt)):
+  ([full log](docs/evidence/e2e-real-regtest-2026-10-19.txt)):
 
   | swap | tx | txid | transparent in/out | Sapling | Orchard | Ironwood actions |
   |---|---|---|---|---|---|---|
-  | happy | ZEC lock | `472d5f78…` | 0 / 0 | 0 | 0 | 5 |
-  | happy | B's sweep | `49e95295…` | 0 / 0 | 0 | 0 | 2 |
-  | refund | ZEC lock | `6dc5775e…` | 0 / 0 | 0 | 0 | 2 |
-  | refund | Z's reclaim | `7915d305…` | 0 / 0 | 0 | 0 | 2 |
-  | punish | ZEC lock | `3b1b85dc…` | 0 / 0 | 0 | 0 | 2 |
+  | happy | ZEC lock | `03cdaedd…` | 0 / 0 | 0 | 0 | 5 |
+  | happy | B's sweep | `4ec73022…` | 0 / 0 | 0 | 0 | 2 |
+  | refund | ZEC lock | `b5507e92…` | 0 / 0 | 0 | 0 | 2 |
+  | refund | Z's reclaim | `88d3d711…` | 0 / 0 | 0 | 0 | 2 |
+  | punish | ZEC lock | `7824cd2b…` | 0 / 0 | 0 | 0 | 2 |
 
 - **Nothing unshielded, enforced.** Before sending the lock, `ferry-zec` refuses unless the
   Ironwood balance alone covers it and the wallet's proposal touches only Ironwood. It refuses to

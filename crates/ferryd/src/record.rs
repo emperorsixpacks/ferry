@@ -93,9 +93,10 @@ pub struct SwapRecord {
     pub cancel_height: Option<u64>,
     /// The ZEC lock transaction (Z: ours, B: the note's).
     pub zec_lock_txid: Option<String>,
-    /// Our sweep of the joint address.
+    /// Our sweep of the joint address; cleared if it expires unmined, so we sweep again.
     pub zec_sweep_txid: Option<String>,
-    /// Whoever's transaction spent the joint note (seen with the viewing key).
+    /// Whoever's transaction spends the lock note (seen with the viewing key), mined or not
+    /// yet expired.
     #[serde(default)]
     pub zec_spent_by: Option<String>,
     /// Unix ms before which we do not sweep (random delay, set when the sweep is queued).
@@ -310,10 +311,10 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn sample_record() -> SwapRecord {
+    pub(crate) fn sample_record() -> SwapRecord {
         use ferry_btc::bitcoin::{Address, Network};
         use ferry_core::{accept, Proposal, SwapParams};
         let secp = ferry_btc::bitcoin::key::Secp256k1::new();

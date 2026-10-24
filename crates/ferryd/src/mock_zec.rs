@@ -192,6 +192,17 @@ impl ZecLeg for MockZecLeg {
         })
     }
 
+    /// A mock send is atomic: recorded with its note, or not at all. So no note means no lock.
+    async fn lock_lapsed(&self, fvk: &[u8; 96], amount: u64) -> Result<bool, MockZecError> {
+        let fvk = hex::encode(fvk);
+        self.with_chain(|c, _| {
+            Ok(!c
+                .txs
+                .iter()
+                .any(|t| t.kind == Kind::Send && t.fvk == fvk && t.value >= amount))
+        })
+    }
+
     async fn watch(&self, fvk: &[u8; 96]) -> Result<Vec<ZecNote>, MockZecError> {
         let fvk = hex::encode(fvk);
         self.with_chain(|c, height| {
@@ -310,7 +321,13 @@ mod tests {
         fvk[..32].copy_from_slice(&ferry_dleq::pallas_bytes(&(g * *ask)));
 
         assert!(z.send(&fvk, 2_000).await.is_err());
+        assert!(
+            z.lock_lapsed(&fvk, 600).await.unwrap(),
+            "a refused send locks nothing"
+        );
         let txid = z.send(&fvk, 600).await.unwrap();
+        assert!(!z.lock_lapsed(&fvk, 600).await.unwrap());
+        assert!(!b.lock_lapsed(&fvk, 600).await.unwrap());
         let notes = b.watch(&fvk).await.unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(

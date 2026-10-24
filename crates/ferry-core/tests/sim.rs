@@ -282,7 +282,8 @@ impl Sim {
                 confs: self.height - h,
             });
         }
-        if self.sweeps.iter().any(|(r, ..)| *r == swap.role()) {
+        // A sweep confirms only if there was a note to sweep.
+        if self.zec_note.is_some() && self.sweeps.iter().any(|(r, ..)| *r == swap.role()) {
             out.push(ChainEvent::ZecSwept { confs: 1 });
         }
         out
@@ -478,10 +479,60 @@ fn refund_when_z_never_locks() {
         ..Default::default()
     });
     sim.mine_until(40, |s| {
-        s.b_state() == BState::Refunded && s.z_state() == ZState::ZecReclaimed
+        s.b_state() == BState::Refunded && s.z_state() == ZState::ZecReclaiming
     });
-    // Z believes it locked (its wallet lied); reclaiming is still safe and harmless.
     assert!(sim.mined(&sim.txid(ferry_core::Spend::Refund)));
+    // Z believes it locked (its wallet lied), but there is no note: the sweep never confirms.
+    sim.mine(20);
+    assert_eq!(sim.z_state(), ZState::ZecReclaiming);
+    // The daemon finds no note and no lock that could still land: the swap ends as refunded.
+    sim.deliver(Role::Z, Event::ZecLockLapsed).unwrap();
+    assert_eq!(sim.z_state(), ZState::Refunded);
+    assert!(sim.z.is_final());
+}
+
+#[test]
+fn lock_that_lapses_before_cancel_ends_in_refund() {
+    // A "maybe sent" lock that never lands and expires before T1: no sweep is ever attempted.
+    let mut sim = Sim::new(Faults {
+        z_never_sends_zec: true,
+        ..Default::default()
+    });
+    sim.mine_until(10, |s| s.z_state() == ZState::ZecLocked);
+    sim.deliver(Role::Z, Event::ZecLockLapsed).unwrap();
+    assert_eq!(sim.z_state(), ZState::ZecLockRefused);
+    let Swap::Z(z) = &sim.z else { unreachable!() };
+    assert!(!z.zec_locked());
+    sim.mine_until(40, |s| {
+        s.b_state() == BState::Refunded && s.z_state() == ZState::Refunded
+    });
+    assert!(sim.sweeps.is_empty());
+}
+
+#[test]
+fn lapsed_lock_that_turns_up_after_all_is_reclaimed() {
+    let mut sim = Sim::new(Faults {
+        z_never_sends_zec: true,
+        ..Default::default()
+    });
+    sim.mine_until(40, |s| s.z_state() == ZState::ZecReclaiming);
+    sim.deliver(Role::Z, Event::ZecLockLapsed).unwrap();
+    assert_eq!(sim.z_state(), ZState::Refunded);
+    // The joint ask was kept when B refunded, so a note is still reclaimable.
+    sim.zec_note = Some((params().zec_amount, sim.height));
+    sim.mine_until(5, |s| s.z_state() == ZState::ZecReclaimed);
+    sim.assert_sweep_valid(Role::Z);
+}
+
+#[test]
+fn lapse_is_refused_once_the_lock_counted() {
+    let mut sim = Sim::new(Faults::default());
+    sim.mine_until(40, |s| s.z_state() == ZState::BtcRedeemed);
+    assert!(sim.deliver(Role::Z, Event::ZecLockLapsed).is_err());
+    assert!(matches!(
+        sim.b.handle(Event::ZecLockLapsed),
+        Err(Error::Unexpected { .. })
+    ));
 }
 
 #[test]

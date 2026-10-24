@@ -152,6 +152,7 @@ impl BSwap {
             }
             Event::LockFunded { tx, vout } => self.on_lock_funded(tx, vout),
             Event::ZecLockRefused => Err(self.unexpected("ZecLockRefused")),
+            Event::ZecLockLapsed => Err(self.unexpected("ZecLockLapsed")),
             Event::Chain(c) => self.on_chain(c),
             Event::Timeout => {
                 if matches!(self.state, BState::Negotiated | BState::LockBuilt) {

@@ -189,9 +189,9 @@ const CASES: { k: string; label: string; o: Outcome }[] = [
     k: "short",
     label: "Your shielded balance is too small",
     o: {
-      you: "Your ZEC, never sent",
-      them: "Their bitcoin, after the deadline",
-      why: "Ferry won't top up from transparent or other pools. It sends nothing and waits for the call-off.",
+      you: "Your ZEC, untouched",
+      them: "Their bitcoin, never locked",
+      why: "Ferry won't top up from transparent or other pools, so it turns the swap down before either side locks anything.",
       good: "both",
     },
   },
@@ -347,11 +347,11 @@ function Them() {
 // 05 ------------------------------------------------------------------------------------------
 
 const TXS = [
-  ["Normal swap", "Your ZEC sent to the swap", "472d5f78", 5],
-  ["Normal swap", "They collect the ZEC", "49e95295", 2],
-  ["Called off", "Your ZEC sent to the swap", "6dc5775e", 2],
-  ["Called off", "You take it back", "7915d305", 2],
-  ["Penalty", "Your ZEC sent to the swap", "3b1b85dc", 2],
+  ["Normal swap", "Your ZEC sent to the swap", "03cdaedd", 5],
+  ["Normal swap", "They collect the ZEC", "4ec73022", 2],
+  ["Called off", "Your ZEC sent to the swap", "b5507e92", 2],
+  ["Called off", "You take it back", "88d3d711", 2],
+  ["Penalty", "Your ZEC sent to the swap", "7824cd2b", 2],
 ] as const;
 
 function World() {

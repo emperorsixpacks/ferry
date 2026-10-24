@@ -14,60 +14,57 @@ Generating a new age identity to encrypt the mnemonic phrase
 [demo] UI: cd web && source /Users/ram/Desktop/ferry/.e2e-real/env && pnpm dev:ui
 
 == happy: B sweeps the joint note, Z redeems the BTC; foreign dust arrives meanwhile
-  swap 86ef532f75cbc7372baabdc64270a1073712ab5dfc80469f02ba7436fc17ace4
+  swap 5a578ba42478ca1dc7770bb529fddd8292ee30e942c5e34524d48d199863534d
   [PASS] foreign dust reached the joint address while B waited to sweep: 3 note(s) of 20000 zat
   [PASS] outcomes swapped/swapped: BtcRedeemed/ZecSwept
-  [PASS] B broadcast the ZEC sweep: 49e952955697568748b73b5eca79777c02f2b0f05e8707d610e5520188ec6e09
+  [PASS] B broadcast the ZEC sweep: 4ec73022eebfcc99afa25482dcaf2568382d6777cff225cf149b97e7fdb68be7
   [PASS] B received at least the swap amount (less fees) despite the dust: +99990000 zat
   [PASS] Z received the BTC: +408000 sat
   [PASS] Z spent the ZEC: -100025000 zat
-  lock 472d5f78cbf797231aea931609e483d60525c73e71ae99ea3d8583fd54101b65  sweep 49e952955697568748b73b5eca79777c02f2b0f05e8707d610e5520188ec6e09  btc redeem b32e6661ffbfa83d162955c4a6ba5a634d6e84046ba8ff8484c91c23832f1e38
+  lock 03cdaedd35fd2980bad005f1db45d9f4469ab8bce7a6080f88b77a08a922bee4  sweep 4ec73022eebfcc99afa25482dcaf2568382d6777cff225cf149b97e7fdb68be7  btc redeem 1a7fba26130133c26bd664a90453e60672f51565d11ba359f5d7f8b555f6f6a6
   [PASS] H4 B's sweep: Z sees the spend of the joint note: full transaction downloaded
   [PASS] H4 B's sweep: Z recovers no recipient or amount: sent_notes=[] received=[]
   [PASS] happy ZEC lock is Ironwood-only: transparent_inputs=0 transparent_outputs=0 sapling_spends=0 sapling_outputs=0 orchard_actions=0 ironwood_actions=5
   [PASS] happy B's sweep is Ironwood-only: transparent_inputs=0 transparent_outputs=0 sapling_spends=0 sapling_outputs=0 orchard_actions=0 ironwood_actions=2
 
 == refund: Z stalls after locking ZEC, B refunds, Z reclaims
-  swap 6ef7ac657e3ac91605f1d4f9be362a5913d213b3a7ae864a36bb99b970a22241
+  swap 51139794cb7540fb165cfbf42035a8e83e250e8681f66e66ca4c115c60158ca4
   Z stalled in ZecLocked
   [PASS] outcomes Z refunded (reclaimed) / B refunded: ZecReclaimed/Refunded
-  [PASS] Z broadcast the ZEC reclaim: 7915d3050e03bd3c03e89d908e1c7b4a83d3496c13557c3d8ad4fc3352e78f6c
+  [PASS] Z broadcast the ZEC reclaim: 88d3d711c100e0da6e716510f862dd96dadd3c5eb5394d2736688ae041fa564d
   [PASS] Z got its ZEC back (less fees): -20000 zat
-  lock 6dc5775e57abac562318b4bbe6856f22e030721334646509d638ad9cc64f8ba5  cancel 08d6121dcba5de13735e2e5d8fb9673d0792fd084fd9e012356d6fd8918bc814  refund e52369f75311215c896f0350d84df2a6164e60bbb14f4b64b12b98ca527e42d0  reclaim 7915d3050e03bd3c03e89d908e1c7b4a83d3496c13557c3d8ad4fc3352e78f6c
+  lock b5507e920a37d5cdac19a27b36dfa5a2ce57d78b0fa5b6f361cdde4639e21af5  cancel 33bc1cce65a8bb53f3d424cf67c3ad812b7f7355c3fc78c1645cfc0a05b5b4e2  refund ac1565d11e6d921a1bcca5fb4494aa9474163c15eea60f678d802e600093ab94  reclaim 88d3d711c100e0da6e716510f862dd96dadd3c5eb5394d2736688ae041fa564d
   [PASS] H4 Z's reclaim: B sees the spend of the joint note: full transaction downloaded
   [PASS] H4 Z's reclaim: B recovers no recipient or amount: sent_notes=[] received=[]
   [PASS] refund ZEC lock is Ironwood-only: transparent_inputs=0 transparent_outputs=0 sapling_spends=0 sapling_outputs=0 orchard_actions=0 ironwood_actions=2
   [PASS] refund Z's reclaim is Ironwood-only: transparent_inputs=0 transparent_outputs=0 sapling_spends=0 sapling_outputs=0 orchard_actions=0 ironwood_actions=2
 
 == punish: B stalls after locking BTC, Z cancels and punishes
-  swap 3560885dbb43ec9488c44fc5c892abb59595475c7d9dc0dcef8ff904d8013470
+  swap f71db2c02ff3bc3d7cc2bfc0b53c24bc9259b8b6dfef7e917dc4b6062a64c053
   B stalled in BtcLocked
   [PASS] outcomes punished/punished: Punished/Punished
   [PASS] Z took B's BTC: +119000 sat
   [PASS] nobody swept the joint note
-  btc lock a185658c97d4bd131f4f4a3d5325ff9c633cb7c4a30254a1658df79a22065c90  zec lock 3b1b85dc5aff929aa765ca52a874f30daea1e9852575c630be5700a83c009c92  cancel 89e47cec831e8a01c9f09ae1e2047887e7bebafc1a41882dd3f88b03ce2c7e4e  punish 42b276e3d379974120e64d69ee0fe9861cccdbdb963f66e37fcecd008bf11c0a
+  btc lock ec611ea8bf2083de400c856659ceb7bd6a86cf15a59eea1ff53f594b9e98f520  zec lock 7824cd2bc7d75df6af2e47ce6fbac8cb79eca3cb126b020c1cbdffe2bcf218c9  cancel e3b7a915efeee0eac39510527b05dea6ace6c0e52eee19e8917c7277934d8078  punish fc108dc16231693087ec286e12e3bd88a8c733e3c125f34e8d7fc371486f4b12
   [PASS] punish ZEC lock is Ironwood-only: transparent_inputs=0 transparent_outputs=0 sapling_spends=0 sapling_outputs=0 orchard_actions=0 ironwood_actions=2
 
-== refused: Z has transparent ZEC but too little Ironwood; the lock must be refused
+== refused: Z has transparent ZEC but too little Ironwood; the swap must be declined
   Z: 369945000 zat spendable Ironwood, plus 200000000 zat transparent
-  swap cf8ab901a78b2188c182143e9ec02e34fa793a1e5deb496e4b340658b9ea8bec
-  [PASS] Z's wallet refused the lock: Refused to lock ZEC, nothing was sent: refused: our Ironwood notes total 369945000 zat, short of 369925000 zat plus fees, and Ferry never funds the lock from transparent or other shielded pools. The swap now waits for tx_cancel and B's refund
-  [PASS] nothing was sent to the joint address
-  [PASS] outcomes refunded/refunded (B got its BTC back): Refunded/Refunded
-  [PASS] Z's states went ZecLockRefused -> Refunded
+  [PASS] Z declined the swap at negotiation with a clear message: (400, 'Z does not have enough shielded ZEC: 369945000 zat spendable in Ironwood, 369975000 zat needed (the amount plus fees)')
+  [PASS] no swap started on either side, so B locked no BTC and nothing reached a joint address: swaps before (3, 3)
   [PASS] Z's Ironwood balance is untouched: 369945000 zat
-  btc lock 20dc9a2580a2762a605cc8bb5080165795fb58787b743c25e83cbe5b61a10eac  cancel fde7b26939a9a344a9ca67bf8dc8450817e1619cfdde24979c4d525288e94248  refund 5698310ef3537b72a7dd384ebc9fdbe49c3a28284496163ec469373709bed794
 
 == H4 positive control: a sweep WITHOUT --discard-ovk is visible to the counterparty
   [PASS] H4 control: the observer sees the sender-OVK sweep: full transaction downloaded
-  [PASS] H4 control: the same query recovers the recipient of a sender-OVK sweep: sweep 7fd51ff494351b830016c0bea70d1c7e3dfa8b1c0dc492c0448b8712c984ef2c: sent_notes=[(49990000, 'uregtest17thjwcl996wz8nu6wyq6nsxs4mnpqclsqk0hzugdt47dk2743y6urhkefsfunujuvnrtapzc7v4frn2ju5x55ky2xulyjq00fcfzkfgk')]
+  [PASS] H4 control: the same query recovers the recipient of a sender-OVK sweep: sweep f19def226825613e154255c8e525b52a766eb4bc89504fd946867a5805d2326a: sent_notes=[(49990000, 'uregtest1jv7na3vmzy3chd6zvhh42t2jw8lh3n9zm945wfg8zc95sy2ec2y3m6d4r2qe6jglnjuzggcknw67laklft99larja65w96x4xuc2486n')]
 
 == every ZEC transaction, as mined
   swap    tx           txid                                                              t-in t-out sapling orchard ironwood
-  happy   ZEC lock     472d5f78cbf797231aea931609e483d60525c73e71ae99ea3d8583fd54101b65     0     0       0       0        5
-  happy   B's sweep    49e952955697568748b73b5eca79777c02f2b0f05e8707d610e5520188ec6e09     0     0       0       0        2
-  refund  ZEC lock     6dc5775e57abac562318b4bbe6856f22e030721334646509d638ad9cc64f8ba5     0     0       0       0        2
-  refund  Z's reclaim  7915d3050e03bd3c03e89d908e1c7b4a83d3496c13557c3d8ad4fc3352e78f6c     0     0       0       0        2
-  punish  ZEC lock     3b1b85dc5aff929aa765ca52a874f30daea1e9852575c630be5700a83c009c92     0     0       0       0        2
+  happy   ZEC lock     03cdaedd35fd2980bad005f1db45d9f4469ab8bce7a6080f88b77a08a922bee4     0     0       0       0        5
+  happy   B's sweep    4ec73022eebfcc99afa25482dcaf2568382d6777cff225cf149b97e7fdb68be7     0     0       0       0        2
+  refund  ZEC lock     b5507e920a37d5cdac19a27b36dfa5a2ce57d78b0fa5b6f361cdde4639e21af5     0     0       0       0        2
+  refund  Z's reclaim  88d3d711c100e0da6e716510f862dd96dadd3c5eb5394d2736688ae041fa564d     0     0       0       0        2
+  punish  ZEC lock     7824cd2bc7d75df6af2e47ce6fbac8cb79eca3cb126b020c1cbdffe2bcf218c9     0     0       0       0        2
 
 ALL PASS
+exit=0

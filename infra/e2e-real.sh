@@ -8,8 +8,9 @@
 #            through and pay B at least the swap amount (audit H1).
 #   refund   Z stalls after locking ZEC; B cancels and refunds; Z extracts b and reclaims its ZEC.
 #   punish   B stalls after locking BTC; Z cancels and, with no refund by T2, punishes.
-#   refused  Z holds transparent ZEC but not enough Ironwood for amount + fees: Z's wallet must
-#            refuse the lock before broadcasting anything, and the swap ends in cancel + refund.
+#   refused  Z holds transparent ZEC but not enough Ironwood for amount + fees: Z must decline the
+#            swap at negotiation, before B locks any BTC. (The wallet's own late refusal, for funds
+#            that move between negotiation and the lock, is covered by the ferry-core sim tests.)
 #
 # It also checks audit H4 on both sweeps: the counterparty's wallet, which holds the joint
 # viewing key, syncs and enhances (downloads the full transaction, so OVK decryption is tried)
@@ -280,7 +281,7 @@ print(f"  btc lock {txid_of(b, 'btc_lock_broadcast')}  zec lock {txid_of(z, 'zec
 
 shielded_only("punish", "ZEC lock", txid_of(z, "zec_lock_broadcast"))
 
-print("\n== refused: Z has transparent ZEC but too little Ironwood; the lock must be refused", flush=True)
+print("\n== refused: Z has transparent ZEC but too little Ironwood; the swap must be declined", flush=True)
 taddr = wallet_ua(f"{STATE}/zec/z", "transparent")
 miner_send(taddr, 200_000_000)
 wait_zec_blocks(3)
@@ -292,18 +293,21 @@ def settled():
     return a if a == b and a > 0 else None
 have = wait("Z's Ironwood balance to settle", settled, 600, 1)
 print(f"  Z: {have} zat spendable Ironwood, plus 200000000 zat transparent", flush=True)
-# Passes the daemon's balance check (amount <= balance) but not amount + fees in Ironwood.
-sid = start(have - 20_000)
-z, b = outcomes(sid, 1200)
-check("Z's wallet refused the lock", "zec_lock_refused" in kinds(z),
-      next((e["label"] for e in z["timeline"] if e["kind"] == "zec_lock_refused"), "no zec_lock_refused entry"))
-check("nothing was sent to the joint address", "zec_lock_broadcast" not in kinds(z) and "zec_note_seen" not in kinds(b))
-check("outcomes refunded/refunded (B got its BTC back)", (z["outcome"], b["outcome"]) == ("refunded", "refunded"),
-      f"{z['state']}/{b['state']}")
-check("Z's states went ZecLockRefused -> Refunded", z["state"] == "Refunded")
+# More than the amount, but short of amount + fees in Ironwood: the daemon checks the wallet's own
+# bar for the lock, so Z declines before proposing, and B never locks BTC.
+swaps_before = (len(api("z", "/api/swaps")), len(api("b", "/api/swaps")))
+try:
+    start(have - 20_000)
+    declined = None
+except urllib.error.HTTPError as e:
+    declined = (e.code, json.loads(e.read() or b"{}").get("error", ""))
+check("Z declined the swap at negotiation with a clear message",
+      declined is not None and declined[0] == 400 and "not have enough shielded ZEC" in declined[1]
+      and "plus fees" in declined[1], str(declined))
+check("no swap started on either side, so B locked no BTC and nothing reached a joint address",
+      (len(api("z", "/api/swaps")), len(api("b", "/api/swaps"))) == swaps_before,
+      f"swaps before {swaps_before}")
 check("Z's Ironwood balance is untouched", balances("z")["zec_shielded_zat"] == have, f"{balances('z')['zec_shielded_zat']} zat")
-print(f"  btc lock {txid_of(b, 'btc_lock_broadcast')}  cancel {txid_of(b, 'cancel_broadcast') or txid_of(z, 'cancel_broadcast')}  "
-      f"refund {txid_of(b, 'refund_broadcast')}", flush=True)
 
 print("\n== H4 positive control: a sweep WITHOUT --discard-ovk is visible to the counterparty", flush=True)
 tmp = tempfile.mkdtemp()

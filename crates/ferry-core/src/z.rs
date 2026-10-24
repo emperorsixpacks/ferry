@@ -27,8 +27,9 @@ pub enum ZState {
     BtcLockSeen,
     /// ZEC sent to the joint address; waiting for B's redeem adaptor.
     ZecLocked,
-    /// Our wallet refused to fund the ZEC lock and nothing was sent; waiting for tx_cancel,
-    /// after which B's refund moves us to `Refunded`.
+    /// Our wallet refused to fund the ZEC lock and nothing was sent (or a lock that may have
+    /// gone out provably never landed); waiting for tx_cancel, after which B's refund moves us
+    /// to `Refunded`.
     ZecLockRefused,
     /// B's redeem adaptor verified.
     RedeemSigReceived,
@@ -104,8 +105,8 @@ pub struct ZSwap {
     #[serde(default)]
     keypath_enc_sig: Option<EncryptedSignature>,
     zec_locked: bool,
-    /// The joint `ask`, kept when B refunded while we believed no ZEC was locked, so a note
-    /// that turns up at the joint address anyway can still be reclaimed.
+    /// The joint `ask`, kept once B refunded, so a note that turns up at the joint address
+    /// after we concluded none was locked (refused or lapsed) can still be reclaimed.
     #[serde(default)]
     reclaim_ask: Option<Secret32>,
     lock_confs: u32,
@@ -167,6 +168,19 @@ impl ZSwap {
                 // Nothing reached the joint address, so a refund leaves nothing to reclaim.
                 self.zec_locked = false;
                 self.state = ZState::ZecLockRefused;
+                Ok(vec![])
+            }
+            Event::ZecLockLapsed => {
+                // A lock we may have sent can no longer land. Before cancel the swap runs into
+                // cancel + refund as if refused; after B's refund there is nothing to reclaim.
+                // The joint ask stays kept, so a note that turns up anyway is still reclaimed.
+                match self.state {
+                    ZState::ZecLocked => self.state = ZState::ZecLockRefused,
+                    ZState::Cancelled => {}
+                    ZState::ZecReclaiming => self.state = ZState::Refunded,
+                    _ => return Err(self.unexpected("ZecLockLapsed")),
+                }
+                self.zec_locked = false;
                 Ok(vec![])
             }
             Event::Chain(c) => self.on_chain(c),
@@ -386,8 +400,8 @@ impl ZSwap {
                 )?;
                 let b = self.session.peer_share_from_secp(&y)?;
                 let ask = self.session.joint_ask(&b)?;
+                self.reclaim_ask = Some(Secret32::new(*ask));
                 if !self.zec_locked {
-                    self.reclaim_ask = Some(Secret32::new(*ask));
                     self.state = ZState::Refunded;
                     return Ok(vec![]);
                 }

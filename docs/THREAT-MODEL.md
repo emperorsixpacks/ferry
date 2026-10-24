@@ -30,7 +30,7 @@ Z has ZEC and wants bitcoin. B has bitcoin and wants ZEC. B always locks first.
 | Everything goes to plan | the bitcoin | the ZEC | Claiming the bitcoin reveals Z's half of the key, and that opens the ZEC for B [adaptor signature] |
 | Z never locks ZEC | its ZEC (never sent) | its bitcoin, after the deadline | B calls the swap off and takes the refund [tx_cancel after T1, then tx_refund] |
 | Z locks the wrong amount | its ZEC back | its bitcoin back | B never sends the signature Z needs; the swap is called off, and B's refund reveals B's half, so Z can reclaim |
-| Z's wallet lacks enough shielded ZEC | its ZEC (nothing sent) | its bitcoin back | Ferry refuses to lock from transparent or other pools, sends nothing, and waits for the refund |
+| Z's wallet lacks enough shielded ZEC | its ZEC (untouched) | its bitcoin (never locked) | Ferry won't top up from transparent or other pools, so it turns the swap down before either side locks anything. If the balance drops after the swap starts, it sends nothing and waits for the refund |
 | Z locks ZEC, then vanishes | its ZEC back, whenever it returns | its bitcoin back | B refunds before the second deadline; the refund reveals B's half, so Z can reclaim the ZEC later |
 | B locks bitcoin, then vanishes | the bitcoin | nothing | After the second deadline Z takes B's bitcoin [tx_punish]. Z's ZEC stays locked, so for Z it works out as a completed swap. Going quiet only hurts the one who went quiet |
 | Someone tries to take both | — | — | Not possible: each way out reveals the half the other side needs, or happens only after a deadline |
@@ -68,7 +68,7 @@ Z has ZEC and wants bitcoin. B has bitcoin and wants ZEC. B always locks first.
   pool, with no transparent, Sapling or Orchard part, and Ferry enforces this. Before locking it
   refuses unless your shielded [Ironwood] balance alone covers the swap, and it refuses to sign any
   transaction with a non-shielded part. The end-to-end test checks every transaction as mined:
-  0 transparent in, 0 out, 0 Sapling, 0 Orchard ([evidence](evidence/e2e-real-regtest-2026-10-17.txt)).
+  0 transparent in, 0 out, 0 Sapling, 0 Orchard ([evidence](evidence/e2e-real-regtest-2026-10-19.txt)).
 - **On Bitcoin: an ordinary payment** when the swap goes to plan. The lock and the claim look like a
   normal single-key wallet sending and spending [MuSig2 key path]. When a swap is called off, the
   refund or penalty does show the swap's shape [script-path spends].

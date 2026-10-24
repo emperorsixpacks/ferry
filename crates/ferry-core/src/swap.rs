@@ -29,6 +29,10 @@ pub enum Event {
     /// example, not enough Ironwood notes to fund it shielded-only). No ZEC is locked; the
     /// swap waits for tx_cancel and B's refund.
     ZecLockRefused,
+    /// Z only: a lock that may have been sent provably never landed: no note worth the amount
+    /// at the joint address, and no transaction of ours that could still create one (see
+    /// [`crate::ZecLeg::lock_lapsed`]). Nothing is locked, so nothing is reclaimed.
+    ZecLockLapsed,
 }
 
 /// What the chain watchers report. Emitted again whenever the confirmation count changes.

@@ -502,6 +502,67 @@ impl Inner {
         }
     }
 
+    /// The account's received (non-change) Ironwood notes from mined or unexpired
+    /// transactions: (txid, mined height, value, spending txid). Only a mined or unexpired spend
+    /// counts, a mined one first, so an expired attempt never shadows the spend that confirmed.
+    async fn joint_notes(&self, account: String) -> Result<Vec<NoteRow>, ZecError> {
+        Ok(query(&self.cfg.wallet_dir, move |c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT nt.txid, nt.mined_height, n.value,
+                    (SELECT t.txid FROM ironwood_received_note_spends s
+                       JOIN transactions t ON t.id_tx = s.transaction_id
+                      WHERE s.ironwood_received_note_id = n.id AND {LIVE_TX}
+                      ORDER BY t.mined_height IS NULL, t.mined_height LIMIT 1)
+                 FROM ironwood_received_notes n
+                 JOIN accounts a ON a.id = n.account_id
+                 JOIN transactions nt ON nt.id_tx = n.transaction_id
+                 WHERE lower(hex(a.uuid)) = ?1 AND n.value > 0 AND n.is_change = 0
+                   AND EXISTS (SELECT 1 FROM transactions t WHERE t.id_tx = nt.id_tx AND {LIVE_TX})
+                 ORDER BY nt.mined_height IS NULL, nt.mined_height, n.id"
+            ))?;
+            let rows = stmt
+                .query_map([account.replace('-', "")], |r| {
+                    Ok((
+                        r.get::<_, Vec<u8>>(0)?,
+                        r.get::<_, Option<u64>>(1)?,
+                        r.get::<_, u64>(2)?,
+                        r.get::<_, Option<Vec<u8>>>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await?)
+    }
+
+    /// No note worth `amount` in the joint account from a mined or unexpired transaction, and
+    /// no unmined, unexpired transaction of ours spending our own notes (a lock still in flight:
+    /// devtool stores a transaction before broadcasting it, so one that may be out is here).
+    /// Expiry is judged against the wallet's scanned tip, which is also where it learns what was
+    /// mined, so an unscanned mined lock still counts as in flight. One query, one snapshot.
+    async fn lock_lapsed_in(&self, joint: String, amount: u64) -> Result<bool, ZecError> {
+        let own = self.own_account.replace('-', "");
+        Ok(query(&self.cfg.wallet_dir, move |c| {
+            c.query_row(
+                &format!(
+                    "SELECT NOT EXISTS (SELECT 1 FROM ironwood_received_notes n
+                                          JOIN accounts a ON a.id = n.account_id
+                                          JOIN transactions t ON t.id_tx = n.transaction_id
+                                         WHERE lower(hex(a.uuid)) = ?1 AND n.value >= ?2 AND {LIVE_TX})
+                        AND NOT EXISTS (SELECT 1 FROM transactions t
+                                         WHERE t.created IS NOT NULL AND t.mined_height IS NULL AND {LIVE_TX}
+                                           AND t.id_tx IN (SELECT s.transaction_id FROM ironwood_received_note_spends s
+                                                           JOIN ironwood_received_notes n ON n.id = s.ironwood_received_note_id
+                                                           JOIN accounts a ON a.id = n.account_id
+                                                           WHERE lower(hex(a.uuid)) = ?3))"
+                ),
+                rusqlite::params![joint.replace('-', ""), amount, own],
+                |r| r.get::<_, bool>(0),
+            )
+        })
+        .await?)
+    }
+
     /// Hands every transaction we built that is neither mined nor expired back to the node
     /// (devtool stores before it broadcasts, so a failed broadcast would otherwise leave a lock
     /// or sweep stuck until it expires). Needs the node RPC; best effort.
@@ -545,13 +606,7 @@ impl Inner {
                 .await
             {
                 Ok(_) => Ok(()),
-                Err(ZecError::Rpc(e))
-                    if ["already", "known", "duplicate", "-27"]
-                        .iter()
-                        .any(|k| e.contains(k)) =>
-                {
-                    Ok(())
-                }
+                Err(ZecError::Rpc(e)) if node_has_tx(&e) => Ok(()),
                 Err(e) => Err(ZecError::Other(format!("rebroadcasting {txid}: {e}"))),
             };
         }
@@ -601,6 +656,8 @@ impl Inner {
         if let Some((u, p)) = &self.cfg.node_rpc_auth {
             req = req.basic_auth(u, Some(p));
         }
+        // A hung node must not hold up the caller (and so the daemon's Bitcoin deadlines).
+        req = req.timeout(NODE_RPC_TIMEOUT);
         let resp: Value = req
             .send()
             .await
@@ -724,6 +781,15 @@ impl ZecLeg for DevtoolZecLeg {
         Ok(txid)
     }
 
+    fn send_fee_reserve(&self) -> u64 {
+        SEND_FEE_RESERVE
+    }
+
+    async fn lock_lapsed(&self, fvk: &[u8; 96], amount: u64) -> Result<bool, ZecError> {
+        let account = self.0.joint_account(fvk).await?;
+        self.0.lock_lapsed_in(account, amount).await
+    }
+
     fn send_failure(&self, err: &ZecError) -> SendFailure {
         match err {
             ZecError::Refused(_) => SendFailure::Refused,
@@ -735,32 +801,7 @@ impl ZecLeg for DevtoolZecLeg {
 
     async fn watch(&self, fvk: &[u8; 96]) -> Result<Vec<ZecNote>, ZecError> {
         let account = self.0.joint_account(fvk).await?;
-        let rows = query(&self.0.cfg.wallet_dir, move |c| {
-            let mut stmt = c.prepare(
-                "SELECT t.txid, t.mined_height, n.value,
-                    (SELECT t2.txid FROM ironwood_received_note_spends s
-                       JOIN transactions t2 ON t2.id_tx = s.transaction_id
-                      WHERE s.ironwood_received_note_id = n.id
-                      ORDER BY t2.mined_height IS NULL, t2.mined_height LIMIT 1)
-                 FROM ironwood_received_notes n
-                 JOIN accounts a ON a.id = n.account_id
-                 JOIN transactions t ON t.id_tx = n.transaction_id
-                 WHERE lower(hex(a.uuid)) = ?1 AND n.value > 0 AND n.is_change = 0
-                 ORDER BY t.mined_height IS NULL, t.mined_height, n.id",
-            )?;
-            let rows = stmt
-                .query_map([account.replace('-', "")], |r| {
-                    Ok((
-                        r.get::<_, Vec<u8>>(0)?,
-                        r.get::<_, Option<u64>>(1)?,
-                        r.get::<_, u64>(2)?,
-                        r.get::<_, Option<Vec<u8>>>(3)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .await?;
+        let rows = self.0.joint_notes(account).await?;
         if rows.is_empty() {
             return Ok(vec![]);
         }
@@ -1138,6 +1179,35 @@ async fn run_devtool_wallet(
     let mut full = vec!["wallet".to_string(), "-w".into(), path_str(&cfg.wallet_dir)];
     full.extend_from_slice(args);
     run_devtool(cfg, &full, limit).await
+}
+
+/// A received note as stored: (txid, mined height, value, spending txid), txids in raw order.
+type NoteRow = (Vec<u8>, Option<u64>, u64, Option<Vec<u8>>);
+
+/// Time limit for one call to the node's JSON-RPC.
+const NODE_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Whether a `sendrawtransaction` error says the node already has this very transaction, in its
+/// mempool or a block. A rejection (a conflicting spend, an expired or invalid transaction) is
+/// not: "already" alone also appears in Zebra's "another transaction in the mempool has already
+/// spent some of its inputs", and "known" in "unknown".
+fn node_has_tx(err: &str) -> bool {
+    // zcashd: RPC_VERIFY_ALREADY_IN_CHAIN.
+    if serde_json::from_str::<Value>(err).is_ok_and(|v| v["code"].as_i64() == Some(-27)) {
+        return true;
+    }
+    [
+        // Zebra (code -26, the mempool's own message)
+        "transaction already exists in mempool",
+        "transaction dropped because it is already queued for download",
+        "transaction is already in state",
+        "transaction was committed to the best chain",
+        // zcashd / bitcoind
+        "txn-already-in-mempool",
+        "txn-already-known",
+    ]
+    .iter()
+    .any(|k| err.contains(k))
 }
 
 /// Time limits for subprocesses. A light wallet server that stops answering must not hold the
@@ -1539,6 +1609,127 @@ mod tests {
             Some((20_000, Some(105)))
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn exec(dir: &Path, sql: &str) {
+        rusqlite::Connection::open(dir.join("data.sqlite"))
+            .unwrap()
+            .execute_batch(sql)
+            .unwrap();
+    }
+
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ferry-zec-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// An expired spend neither marks the lock note spent nor shadows the spend that is mined
+    /// later, and a note whose own transaction expired unmined does not exist.
+    #[tokio::test]
+    async fn watch_reports_only_live_spends_and_notes() {
+        let dir = test_dir("watch");
+        let w = fake_wallet(&dir);
+        let joint = "00000000-0000-0000-0000-000000000001".to_string();
+        let spent = |rows: &[NoteRow]| {
+            rows.iter()
+                .map(|r| (r.0.clone(), r.3.clone()))
+                .collect::<Vec<_>>()
+        };
+        // A note from a stored lock that never got mined and expires after height 140.
+        exec(
+            &dir,
+            "INSERT INTO transactions VALUES (5, x'05', '2026-10-17', NULL, 140, x'aa');
+             INSERT INTO ironwood_received_notes VALUES (3, 5, 1, 100000000, 0);",
+        );
+        let rows = w.joint_notes(joint.clone()).await.unwrap();
+        assert_eq!(
+            spent(&rows),
+            vec![(vec![1], Some(vec![3])), (vec![2], None), (vec![5], None)]
+        );
+
+        // Both stored transactions expire: the lock note is unspent, the phantom note gone.
+        exec(&dir, "INSERT INTO blocks VALUES (150);");
+        let rows = w.joint_notes(joint.clone()).await.unwrap();
+        assert_eq!(spent(&rows), vec![(vec![1], None), (vec![2], None)]);
+
+        // A second sweep confirms: it is the spend, not the expired first attempt.
+        exec(
+            &dir,
+            "INSERT INTO transactions VALUES (4, x'04', '2026-10-17', 151, 190, x'bb');
+             INSERT INTO ironwood_received_note_spends VALUES (1, 4);
+             INSERT INTO blocks VALUES (151);",
+        );
+        let rows = w.joint_notes(joint).await.unwrap();
+        assert_eq!(
+            spent(&rows),
+            vec![(vec![1], Some(vec![4])), (vec![2], None)]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lock lapses only once nothing can land: no live note worth the amount at the joint
+    /// address and no unmined, unexpired transaction of ours still in flight.
+    #[tokio::test]
+    async fn lock_lapses_only_when_nothing_can_land() {
+        let dir = test_dir("lapse");
+        let w = fake_wallet(&dir);
+        let joint = "00000000-0000-0000-0000-000000000001".to_string();
+        let amount = 200_000_000;
+        // The existing 1 ZEC note is too small to be this lock.
+        assert!(w.lock_lapsed_in(joint.clone(), amount).await.unwrap());
+        assert!(!w.lock_lapsed_in(joint.clone(), 100_000_000).await.unwrap());
+
+        // Our own account's note, spent by our lock: stored, unmined, expires after 160.
+        exec(
+            &dir,
+            "INSERT INTO accounts VALUES (2, x'00000000000000000000000000000002', 'ferry', 1);
+             INSERT INTO transactions VALUES (10, x'0a', NULL, 90, NULL, NULL);
+             INSERT INTO ironwood_received_notes VALUES (10, 10, 2, 500000000, 0);
+             INSERT INTO transactions VALUES (11, x'0b', '2026-10-17', NULL, 160, x'cc');
+             INSERT INTO ironwood_received_note_spends VALUES (10, 11);",
+        );
+        assert!(
+            !w.lock_lapsed_in(joint.clone(), amount).await.unwrap(),
+            "a lock in flight may still land"
+        );
+        exec(&dir, "INSERT INTO blocks VALUES (160);");
+        assert!(w.lock_lapsed_in(joint.clone(), amount).await.unwrap());
+
+        // A note worth the amount, even unmined, means it did not lapse.
+        exec(
+            &dir,
+            "INSERT INTO transactions VALUES (12, x'0c', NULL, NULL, 200, NULL);
+             INSERT INTO ironwood_received_notes VALUES (12, 12, 1, 200000000, 0);",
+        );
+        assert!(!w.lock_lapsed_in(joint, amount).await.unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rebroadcast_accepts_only_a_transaction_the_node_already_has() {
+        let zebra = |msg: &str| json!({"code": -26, "message": msg}).to_string();
+        for known in [
+            zebra("transaction already exists in mempool"),
+            zebra("transaction dropped because it is already queued for download"),
+            zebra("transaction is already in state"),
+            zebra("the transaction will be rejected from the mempool until the next chain tip block: transaction was committed to the best chain"),
+            json!({"code": -27, "message": "transaction already in block chain"}).to_string(),
+            json!({"code": -26, "message": "txn-already-in-mempool"}).to_string(),
+        ] {
+            assert!(node_has_tx(&known), "{known}");
+        }
+        for rejected in [
+            zebra("transaction rejected because another transaction in the mempool has already spent some of its inputs"),
+            zebra("the transaction will be rejected from the mempool until a chain reset: transaction inputs were spent, or nullifiers were revealed, in the best chain"),
+            zebra("best chain tip has reached transaction expiry height"),
+            zebra("unknown transaction"),
+            json!({"code": -25, "message": "duplicate nullifier"}).to_string(),
+            "error sending request: operation timed out".to_string(),
+        ] {
+            assert!(!node_has_tx(&rejected), "{rejected}");
+        }
     }
 
     #[test]

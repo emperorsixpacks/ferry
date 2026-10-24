@@ -65,7 +65,27 @@ pub trait ZecLeg: Send + Sync {
         SendFailure::MaybeSent
     }
 
+    /// Zatoshi the wallet needs on top of the amount to fund a lock (fees): [`ZecLeg::send`]
+    /// refuses with less, so a party checks it before anything is locked.
+    fn send_fee_reserve(&self) -> u64 {
+        0
+    }
+
+    /// Whether a lock of ours to the joint address provably never landed and never will: no
+    /// note worth at least `amount` there (from a mined or unexpired transaction), and no
+    /// transaction we built that could still create one. Only answer true when that is
+    /// certain; the default never concludes it.
+    fn lock_lapsed(
+        &self,
+        _fvk: &[u8; 96],
+        _amount: u64,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send {
+        async { Ok(false) }
+    }
+
     /// Notes received by the joint address, found by scanning with the joint viewing key.
+    /// Notes of a transaction that expired unmined are not listed, and `spent_by` only names a
+    /// spend that is mined or not yet expired (a mined one first).
     fn watch(
         &self,
         fvk: &[u8; 96],

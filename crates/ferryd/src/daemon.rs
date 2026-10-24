@@ -12,7 +12,7 @@ use ferry_btc::bitcoin::{Address, Amount, Network, Transaction, Txid};
 use ferry_btc::rpc::{BitcoinRpc, RpcError};
 use ferry_core::{
     accept, ChainEvent, Envelope, Event, Message, Policy, Proposal, Role, SendFailure, Spend, Swap,
-    ZecLeg,
+    ZecLeg, ZecNote,
 };
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
@@ -120,6 +120,43 @@ async fn watch_swap(rpc: &BitcoinRpc, rec: &SwapRecord) -> Result<(), RpcError> 
 
 fn zec_str(zat: u64) -> String {
     format!("{:.2} ZEC", zat as f64 / 1e8)
+}
+
+/// Bookkeeping on the lock note from one look at the joint address; returns who spends it.
+fn track_lock_note(rec: &mut SwapRecord, notes: &[ZecNote], amount: u64) -> Option<String> {
+    // The lock note: the one from the lock transaction we know of, else the first (oldest)
+    // note worth the amount.
+    let lock = notes
+        .iter()
+        .filter(|n| n.value >= amount)
+        .find(|n| rec.zec_lock_txid.as_deref() == Some(n.txid.as_str()))
+        .or_else(|| notes.iter().find(|n| n.value >= amount))
+        .cloned();
+    if let Some(lock) = &lock {
+        // B tracks the qualifying lock note; Z's lock txid only ever comes from its own send.
+        if rec.role() == Role::B {
+            rec.zec_lock_txid.get_or_insert(lock.txid.clone());
+        }
+        // Our sweep expired unmined: it spends nothing any more and the lock note is
+        // unspent again, so the still-queued SweepZec builds another.
+        let ours_live = |t: &str| notes.iter().any(|n| n.spent_by.as_deref() == Some(t));
+        if lock.spent_by.is_none() && rec.zec_sweep_txid.as_deref().is_some_and(|t| !ours_live(t)) {
+            rec.zec_sweep_txid = None;
+            rec.log(
+                "zec",
+                "zec_sweep_expired",
+                "The ZEC sweep expired without being mined. The lock note is unspent again; sweeping it again",
+                None,
+            );
+        }
+        // Only a mined or unexpired spend is reported, so a confirmed spend replaces a
+        // stale one.
+        if rec.zec_spent_by != lock.spent_by {
+            rec.zec_spent_by = lock.spent_by.clone();
+            rec.observer_zec.retain(|(k, _)| k != "sweep");
+        }
+    }
+    lock.and_then(|n| n.spent_by)
 }
 
 impl<L: ZecLeg + 'static> Daemon<L> {
@@ -426,8 +463,14 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     .await
                     .map_err(|e| ApiError(503, e.to_string()))?
                     .shielded_balance;
-                if have < params.zec_amount {
-                    return Err(ApiError::bad("Z does not have enough shielded ZEC"));
+                // The same bar the wallet sets for the lock itself (amount plus fees), so Z
+                // declines here rather than refusing the lock after B has locked BTC.
+                let need = params.zec_amount + self.leg.send_fee_reserve();
+                if have < need {
+                    return Err(ApiError::bad(format!(
+                        "Z does not have enough shielded ZEC: {have} zat spendable in Ironwood, \
+                         {need} zat needed (the amount plus fees)"
+                    )));
                 }
             }
             Role::B => {
@@ -752,17 +795,25 @@ impl<L: ZecLeg + 'static> Daemon<L> {
 
     async fn run_pending(&self, rec: &mut SwapRecord) -> Vec<Event> {
         let mut follow = vec![];
-        while let Some(p) = rec.pending.first().cloned() {
+        let mut i = 0;
+        while let Some(p) = rec.pending.get(i).cloned() {
             // Never act on state that is not on disk: after a crash the action would be
             // repeated or its effect forgotten.
             if rec.stalled || !self.save(rec) {
                 break;
             }
+            let zec = matches!(p, Pending::SendZec { .. } | Pending::SweepZec { .. });
             match self.execute(rec, p).await {
                 Ok(ev) => follow.extend(ev),
+                // A Zcash action waiting on its chain stays queued but never holds up what
+                // follows it, above all the Bitcoin deadline spends (cancel, refund, punish).
+                Err(Retry) if zec => {
+                    i += 1;
+                    continue;
+                }
                 Err(Retry) => break,
             }
-            rec.pending.remove(0);
+            rec.pending.remove(i);
         }
         self.save(rec);
         follow
@@ -814,8 +865,23 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             }
             Pending::SendZec { fvk, amount } => {
                 let fvk = fvk_from_hex(&fvk);
-                // Already refused (and applied) before a crash removed this entry: nothing to do.
+                // Already refused or lapsed (and applied) before a crash removed this entry:
+                // nothing to do.
                 if matches!(&rec.swap, Swap::Z(z) if !z.zec_locked()) {
+                    return Ok(None);
+                }
+                // Only while the swap waits for our lock. Once tx_cancel is out (or the swap
+                // moved on) no lock may go out any more; one that may already be out is still
+                // watched for, and reclaimed after B's refund.
+                if rec.state() != "ZecLocked" {
+                    if rec.zec_lock_txid.is_none() && !rec.has("zec_send_stopped") {
+                        rec.log(
+                            "local",
+                            "zec_send_stopped",
+                            "Stopped trying to lock ZEC: the swap is past the lock. No ZEC is sent from here on",
+                            None,
+                        );
+                    }
                     return Ok(None);
                 }
                 if rec.zec_send_intent {
@@ -833,6 +899,12 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                             }
                         }
                         Err(e) => tracing::warn!(id = %rec.id, "zec watch: {e}"),
+                    }
+                    // No note, and no transaction of ours that could still create one: the
+                    // send never went out, or expired unmined. Nothing is locked.
+                    if matches!(self.leg.lock_lapsed(&fvk, amount).await, Ok(true)) {
+                        self.lock_lapsed(rec);
+                        return Ok(None);
                     }
                     if !rec.has("zec_send_uncertain") {
                         rec.log(
@@ -901,18 +973,21 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 }
             }
             Pending::SweepZec { fvk, ask } => {
-                if rec.zec_sweep_txid.is_some() {
+                // Done once the swap is over: our sweep confirmed (or Z's lock lapsed).
+                if rec.swap.is_final() {
                     return Ok(None);
+                }
+                // Our sweep is out: kept queued until it confirms. If it expires unmined,
+                // zec_events clears the txid and the next attempt sweeps again.
+                if rec.zec_sweep_txid.is_some() {
+                    return Err(Retry);
                 }
                 if rec.sweep_not_before.is_some_and(|t| now_ms() < t) {
                     return Err(Retry);
                 }
+                let fvk = fvk_from_hex(&fvk);
                 let lock_value = rec.swap.session().params.zec_amount;
-                match self
-                    .leg
-                    .sweep(&fvk_from_hex(&fvk), ask.expose(), lock_value)
-                    .await
-                {
+                match self.leg.sweep(&fvk, ask.expose(), lock_value).await {
                     Ok(txid) => {
                         rec.zec_sweep_txid = Some(txid.clone());
                         let (kind, label) = match rec.role() {
@@ -923,14 +998,34 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                             Role::Z => ("zec_reclaim_broadcast", "Swept the joint note back to Z's own shielded address"),
                         };
                         rec.log("zec", kind, label, Some(txid));
-                        Ok(None)
+                        Err(Retry)
                     }
                     Err(e) => {
                         tracing::warn!(id = %rec.id, "zec sweep: {e}");
+                        // Z reclaiming a lock that never landed: nothing to sweep, ever.
+                        if rec.state() == "ZecReclaiming"
+                            && matches!(self.leg.lock_lapsed(&fvk, lock_value).await, Ok(true))
+                        {
+                            self.lock_lapsed(rec);
+                            return Ok(None);
+                        }
                         Err(Retry)
                     }
                 }
             }
+        }
+    }
+
+    /// Z: our ZEC lock provably never landed (see [`ZecLeg::lock_lapsed`]).
+    fn lock_lapsed(&self, rec: &mut SwapRecord) {
+        rec.log(
+            "zec",
+            "zec_lock_lapsed",
+            "The ZEC lock never reached the chain and its transaction has expired, so no ZEC is locked",
+            None,
+        );
+        if let Err(err) = self.apply(rec, Event::ZecLockLapsed) {
+            tracing::error!(id = %rec.id, "applying the lapsed lock: {err}");
         }
     }
 
@@ -1169,7 +1264,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     Self::spend_txid(rec, Spend::Refund),
                 );
             }
-            (Role::Z, "Refunded") => {
+            (Role::Z, "Refunded") if !rec.has("secret_extracted") => {
                 rec.peer_learned = true;
                 rec.log(
                     "btc",
@@ -1492,18 +1587,9 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         }
         let fvk = rec.swap.session().joint_fvk()?;
         let amount = rec.swap.session().params.zec_amount;
-        let mut lock_spent_by = None;
-        for note in self.leg.watch(&fvk).await? {
-            if note.value >= amount && lock_spent_by.is_none() {
-                lock_spent_by = note.spent_by.clone();
-            }
-            // B tracks the qualifying lock note; Z's lock txid only ever comes from its own send.
-            if rec.role() == Role::B && note.value >= amount {
-                rec.zec_lock_txid.get_or_insert(note.txid.clone());
-            }
-            if let Some(by) = note.spent_by {
-                rec.zec_spent_by.get_or_insert(by);
-            }
+        let notes = self.leg.watch(&fvk).await?;
+        let lock_spent_by = track_lock_note(rec, &notes, amount);
+        for note in notes {
             out.push(Event::Chain(ChainEvent::ZecNoteSeen {
                 value: note.value,
                 confs: note.confirmations,
@@ -1562,5 +1648,71 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             };
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::record::tests::sample_record;
+
+    fn note(txid: &str, value: u64, spent_by: Option<&str>) -> ZecNote {
+        ZecNote {
+            txid: txid.into(),
+            value,
+            confirmations: 12,
+            spent_by: spent_by.map(Into::into),
+        }
+    }
+
+    /// Our sweep expires unmined: the record lets go of it, so the still-queued SweepZec builds
+    /// another, and the sweep that confirms later is the one reported.
+    #[test]
+    fn expired_sweep_is_dropped_and_a_later_one_tracked() {
+        let mut rec = sample_record();
+        assert_eq!(rec.role(), Role::B);
+        let amount = rec.swap.session().params.zec_amount;
+        rec.zec_sweep_txid = Some("s1".into());
+
+        // S1 live: it spends the lock note.
+        let spent = track_lock_note(&mut rec, &[note("lock", amount, Some("s1"))], amount);
+        assert_eq!(spent.as_deref(), Some("s1"));
+        assert_eq!(rec.zec_lock_txid.as_deref(), Some("lock"));
+        assert_eq!(rec.zec_spent_by.as_deref(), Some("s1"));
+        assert_eq!(rec.zec_sweep_txid.as_deref(), Some("s1"));
+        rec.observer_zec.push(("sweep".into(), "S1".into()));
+
+        // S1 expired: the lock note is unspent again.
+        let spent = track_lock_note(&mut rec, &[note("lock", amount, None)], amount);
+        assert_eq!(spent, None);
+        assert_eq!(rec.zec_sweep_txid, None);
+        assert_eq!(rec.zec_spent_by, None);
+        assert!(rec.observer_zec.is_empty(), "the stale sweep line goes");
+        assert!(rec.has("zec_sweep_expired"));
+
+        // S2 is built and mined.
+        rec.zec_sweep_txid = Some("s2".into());
+        let spent = track_lock_note(&mut rec, &[note("lock", amount, Some("s2"))], amount);
+        assert_eq!(spent.as_deref(), Some("s2"));
+        assert_eq!(rec.zec_spent_by.as_deref(), Some("s2"));
+        assert_eq!(rec.zec_sweep_txid.as_deref(), Some("s2"));
+    }
+
+    /// A sweep of ours that is still live (spending some joint note) is never dropped, and the
+    /// lock note is the one from the known lock transaction, not just any note worth as much.
+    #[test]
+    fn live_sweep_is_kept_and_the_lock_note_is_the_known_one() {
+        let mut rec = sample_record();
+        let amount = rec.swap.session().params.zec_amount;
+        rec.zec_lock_txid = Some("lock".into());
+        rec.zec_sweep_txid = Some("s1".into());
+        let notes = [
+            note("big-foreign", amount * 2, Some("s1")),
+            note("lock", amount, None),
+        ];
+        let spent = track_lock_note(&mut rec, &notes, amount);
+        assert_eq!(spent, None, "the lock note itself is unspent");
+        assert_eq!(rec.zec_sweep_txid.as_deref(), Some("s1"));
+        assert!(!rec.has("zec_sweep_expired"));
     }
 }
