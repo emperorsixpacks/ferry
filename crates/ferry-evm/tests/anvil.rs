@@ -1,8 +1,10 @@
-//! FerryLock + ferry-evm against a local anvil on 127.0.0.1:18545: a happy claim through a
-//! relayer, a refund and a punish, with Ferry shares (Pallas scalars with a cross-group DLEQ).
+//! FerryLock + ferry-evm against a local anvil: a happy claim through a relayer, a refund and a
+//! punish, with Ferry shares (Pallas scalars with a cross-group DLEQ); and the same lock with
+//! WETH (18 decimals) at an amount above 2^64 base units.
 //!
-//! Spawns `anvil` from PATH or ~/.foundry/bin and kills it (by its own child handle) at the end.
-//! Without an anvil binary the test prints a note and passes. Install: `foundryup`.
+//! Each test spawns its own `anvil` from PATH or ~/.foundry/bin on a port the OS picks (so tests
+//! in parallel and other local nodes never collide) and kills it (by its own child handle) at
+//! the end. Without an anvil binary the tests print a note and pass. Install: `foundryup`.
 
 use std::path::PathBuf;
 
@@ -12,15 +14,14 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use ferry_dleq::k256::elliptic_curve::PrimeField;
 use ferry_dleq::{PallasPoint, PallasScalar};
-use ferry_evm::bindings::{FerryLock, MockUSDC};
+use ferry_evm::bindings::{FerryLock, MockUSDC, MockWETH};
 use ferry_evm::{
     point_address_sec1, scalar_address, sign_ready, swap_id, Error, EvmClient, Revealed,
-    SwapEventKind, SwapState, SwapWatcher, Terms,
+    SwapEventKind, SwapState, SwapWatcher, Terms, TokenInfo,
 };
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
 
-const PORT: u16 = 18545;
 const AMOUNT: u64 = 250_000_000; // 250 USDC
 const MAX_TIP: u64 = 1_000_000;
 
@@ -111,7 +112,8 @@ async fn start() -> Option<Net> {
         eprintln!("SKIP: no anvil binary (install with foundryup)");
         return None;
     };
-    let anvil = Anvil::at(bin).port(PORT).spawn();
+    // No port: anvil binds port 0 and alloy reads back the one the OS chose.
+    let anvil = Anvil::at(bin).spawn();
     let keys: Vec<PrivateKeySigner> = anvil.keys().iter().map(|k| k.clone().into()).collect();
     let url = anvil.endpoint();
     let deployer = ProviderBuilder::new()
@@ -184,6 +186,104 @@ async fn ferry_lock_on_anvil() {
     happy_claim_with_relayer(&net, &b, &z, &relayer).await;
     refund(&net, &b, &z).await;
     punish(&net, &b, &relayer).await;
+}
+
+/// WETH: 18 decimals, wrapped from ETH, locked and claimed at 50 WETH (5e19 base units, above
+/// u64::MAX). The client keeps every amount in U256; `token_info` reads what each token says
+/// about itself, which ferryd checks against its flags at startup.
+#[tokio::test]
+async fn weth_above_u64_on_anvil() {
+    let Some(net) = start().await else { return };
+    let (b, z, relayer) = (net.client(B), net.client(Z), net.client(RELAYER));
+    let weth = MockWETH::deploy(b.provider().clone()).await.unwrap();
+    let weth_addr = *weth.address();
+
+    assert_eq!(
+        b.token_info(weth_addr).await.unwrap(),
+        TokenInfo {
+            symbol: "WETH".into(),
+            decimals: 18
+        }
+    );
+    assert_eq!(
+        b.token_info(net.usdc).await.unwrap(),
+        TokenInfo {
+            symbol: "USDC".into(),
+            decimals: 6
+        }
+    );
+    // No code there, or a contract that is not an ERC-20: an error, never a guess.
+    assert!(b.token_info(net.keys[Z].address()).await.is_err());
+    assert!(b.token_info(net.lock).await.is_err());
+
+    // B wraps 60 ETH, then locks 50 WETH with a 0.01 WETH tip cap.
+    let wei = |eth: u64| U256::from(eth) * U256::from(10u64).pow(U256::from(18));
+    let amount = wei(50);
+    let max_tip = wei(1) / U256::from(100);
+    assert!(amount > U256::from(u64::MAX));
+    weth.deposit()
+        .value(wei(60))
+        .send()
+        .await
+        .unwrap()
+        .get_receipt()
+        .await
+        .unwrap();
+    assert_eq!(
+        b.token_balance(weth_addr, b.address()).await.unwrap(),
+        wei(60)
+    );
+
+    let (zs, bs) = (Share::new(b"weth/Z"), Share::new(b"weth/B"));
+    let now = b.latest_timestamp().await.unwrap();
+    let t = Terms {
+        token: weth_addr,
+        amount,
+        zAddr: zs.addr,
+        bAddr: bs.addr,
+        claimer: net.keys[Z].address(),
+        refunder: net.keys[B].address(),
+        t1: now + 3_600,
+        t2: now + 7_200,
+        maxTip: max_tip,
+    };
+    let (id, lock_tx) = b.lock(random_salt(), &t).await.unwrap();
+    z.check_lock(id, &t).await.unwrap();
+    let mut short = t.clone();
+    short.amount = amount - U256::from(1);
+    assert!(matches!(
+        z.check_lock(id, &short).await,
+        Err(Error::TermsMismatch("amount"))
+    ));
+
+    let ready = sign_ready(&net.keys[B], b.chain_id().await.unwrap(), net.lock, id);
+    relayer
+        .claim(id, &zs.secp_be, max_tip, &ready)
+        .await
+        .unwrap();
+    assert_eq!(
+        b.token_balance(weth_addr, net.keys[Z].address())
+            .await
+            .unwrap(),
+        amount - max_tip
+    );
+    assert_eq!(
+        b.token_balance(weth_addr, relayer.address()).await.unwrap(),
+        max_tip
+    );
+    assert_eq!(
+        b.token_balance(weth_addr, b.address()).await.unwrap(),
+        wei(10)
+    );
+
+    // B reads z from the Claimed event exactly as with USDC.
+    let events = SwapWatcher::new(id, lock_tx.block_number, 1)
+        .poll(&b)
+        .await
+        .unwrap();
+    assert_eq!(events[0].kind, SwapEventKind::Locked(t.clone()));
+    let revealed = events[1].revealed_share(&t).unwrap().unwrap();
+    assert!(zs.matches_revealed(&revealed));
 }
 
 async fn happy_claim_with_relayer(net: &Net, b: &EvmClient, z: &EvmClient, relayer: &EvmClient) {

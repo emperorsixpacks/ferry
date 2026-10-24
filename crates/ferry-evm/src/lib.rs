@@ -1,4 +1,4 @@
-//! EVM leg of Ferry: shielded ZEC <-> an ERC-20 (USDC) locked in the `FerryLock` contract
+//! EVM leg of Ferry: shielded ZEC <-> an ERC-20 (USDC, WETH) locked in the `FerryLock` contract
 //! (`contracts/src/FerryLock.sol`).
 //!
 //! Always available (no I/O; ferry-core uses these):
@@ -29,7 +29,7 @@ pub use ready::{ready_digest, ready_signer, swap_id};
 #[cfg(feature = "client")]
 pub use alloy::signers::local::PrivateKeySigner;
 #[cfg(feature = "client")]
-pub use client::{EvmClient, OnChainSwap, SwapState, TxInfo};
+pub use client::{EvmClient, OnChainSwap, SwapState, TokenInfo, TxInfo};
 #[cfg(feature = "client")]
 pub use events::{revealed_in_calldata, Revealed, SwapEvent, SwapEventKind, SwapWatcher};
 #[cfg(feature = "client")]
@@ -54,12 +54,20 @@ pub mod bindings {
         "artifacts/MockUSDC.json"
     );
 
+    alloy::sol!(
+        #[sol(rpc)]
+        MockWETH,
+        "artifacts/MockWETH.json"
+    );
+
     alloy::sol! {
         #[sol(rpc)]
         interface IERC20 {
             function allowance(address owner, address spender) external view returns (uint256);
             function approve(address spender, uint256 amount) external returns (bool);
             function balanceOf(address who) external view returns (uint256);
+            function symbol() external view returns (string);
+            function decimals() external view returns (uint8);
         }
     }
 }
