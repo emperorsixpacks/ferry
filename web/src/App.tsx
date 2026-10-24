@@ -6,6 +6,7 @@ import { Observer } from "./components/Observer";
 import { PartyPanel } from "./components/PartyPanel";
 import { deriveCrossing, deriveDeadlines, latestEvent } from "./derive";
 import { btcShort, zec } from "./format";
+import { Link } from "./router";
 import { currentSwapId, useDaemon } from "./useDaemon";
 
 function useNarrow(query = "(max-width: 720px)") {
@@ -78,6 +79,9 @@ export default function App() {
       <header className="masthead">
         <h1 className="wordmark">Ferry</h1>
         <p className="thesis">Shielded ZEC ⇄ BTC. No bridge. No custodian. Nothing unshielded.</p>
+        <Link to="/" className="back-link">
+          ← Back to the app
+        </Link>
       </header>
 
       <form

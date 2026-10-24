@@ -143,7 +143,7 @@ const context = await browser.newContext({
 const page = await context.newPage();
 const t0 = Date.now(); // the recording starts with the page
 page.on("console", (m) => m.type() === "error" && console.log("console:", m.text()));
-await page.goto(BASE);
+await page.goto(BASE + "/how-it-works");
 await page.evaluate(OVERLAY);
 await sleep(2500); // fonts, first SSE events
 

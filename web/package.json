@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "shoot": "node scripts/shoot.mjs",
     "shoot:real": "node scripts/shoot.mjs --real",
-    "film": "node scripts/film.mjs"
+    "film": "node scripts/film.mjs",
+    "shoot:app": "node scripts/shoot-app.mjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",

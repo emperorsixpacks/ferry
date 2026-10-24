@@ -1,59 +1,59 @@
 1
-00:00:00,000 --> 00:00:04,000
+00:00:00,000 --> 00:00:04,001
 Ferry. Atomic swaps between shielded ZEC and Bitcoin.
 
 2
-00:00:04,000 --> 00:00:08,803
+00:00:04,001 --> 00:00:08,815
 Two parties. Z holds shielded ZEC, B holds bitcoin. Nobody in between.
 
 3
-00:00:08,803 --> 00:00:14,803
+00:00:08,815 --> 00:00:14,815
 B locks BTC first: a Taproot output that needs both keys, with a timelocked way back.
 
 4
-00:00:14,803 --> 00:00:20,803
+00:00:14,815 --> 00:00:20,815
 Z locks ZEC, Ironwood to Ironwood, to an address whose spend key is split: z plus b.
 
 5
-00:00:20,803 --> 00:00:26,803
+00:00:20,815 --> 00:00:26,815
 B signs the redeem as an adaptor signature. Only Z's secret, z, can complete it.
 
 6
-00:00:26,803 --> 00:00:31,803
+00:00:26,815 --> 00:00:31,815
 Z completes it and claims the BTC. One key-path signature.
 
 7
-00:00:31,803 --> 00:00:37,005
+00:00:31,815 --> 00:00:37,096
 That signature is the key. B subtracts its adaptor and recovers z.
 
 8
-00:00:37,005 --> 00:00:43,005
+00:00:37,096 --> 00:00:43,096
 After a random delay, B sweeps the note into its own shielded wallet. Done.
 
 9
-00:00:43,005 --> 00:00:53,014
+00:00:43,096 --> 00:00:53,177
 What did the chains see? Bitcoin: a Taproot output and a single-signature spend, like any payment. Zcash: encrypted actions. Nothing links them.
 
 10
-00:00:53,014 --> 00:00:56,615
+00:00:53,177 --> 00:00:56,779
 Now, what if Z vanishes?
 
 11
-00:00:56,615 --> 00:01:02,615
+00:00:56,779 --> 00:01:02,779
 Same start: B locks bitcoin, Z locks shielded ZEC.
 
 12
-00:01:02,615 --> 00:01:05,620
+00:01:02,779 --> 00:01:05,846
 Then Z goes silent.
 
 13
-00:01:05,620 --> 00:01:13,620
+00:01:05,846 --> 00:01:13,846
 After timelock T1, B cancels and takes its bitcoin back. The refund signature reveals b.
 
 14
-00:01:13,620 --> 00:01:20,620
+00:01:13,846 --> 00:01:20,846
 Z reads b from the refund and sweeps its ZEC home. Nobody loses a coin.
 
 15
-00:01:20,620 --> 00:01:27,621
+00:01:20,846 --> 00:01:27,847
 No custodian. ZEC never leaves the shielded pool. And when it succeeds, the Bitcoin side looks like any other payment.

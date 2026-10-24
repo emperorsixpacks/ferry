@@ -15,7 +15,7 @@ mkdirSync(OUT, { recursive: true });
 
 const env = REAL
   ? { ...process.env, PORT }
-  : { ...process.env, MOCK_SPEED: SPEED, MOCK_Z_PORT: "7111", MOCK_B_PORT: "7112", FERRY_Z_URL: "http://127.0.0.1:7111", FERRY_B_URL: "http://127.0.0.1:7112", PORT };
+  : { ...process.env, MOCK_SPEED: SPEED, MOCK_Z_PORT: "7161", MOCK_B_PORT: "7162", FERRY_Z_URL: "http://127.0.0.1:7161", FERRY_B_URL: "http://127.0.0.1:7162", PORT };
 if (REAL && !(env.FERRY_Z_URL && env.FERRY_B_URL)) throw new Error("--real needs FERRY_Z_URL and FERRY_B_URL");
 const procs = [spawn("pnpm", ["exec", "vite"], { env, stdio: "ignore" })];
 if (!REAL) procs.push(spawn(process.execPath, ["mock/server.mjs"], { env, stdio: "ignore" }));
@@ -44,7 +44,7 @@ for (const v of views) {
   const ctx = await browser.newContext({ viewport: v.viewport, deviceScaleFactor: v.deviceScaleFactor, colorScheme: v.colorScheme, reducedMotion: "no-preference" });
   const page = await ctx.newPage();
   page.on("console", (m) => m.type() === "error" && console.log(`[${v.tag}] console:`, m.text()));
-  await page.goto(BASE);
+  await page.goto(BASE + "/how-it-works");
   pages.push({ ...v, page });
 }
 const main = pages[0].page;

@@ -14,7 +14,8 @@ export function Deadlines({ d, height, path, t1Blocks, t2Blocks }: { d: D | null
   }
 
   const start = d.lock - 1;
-  const end = Math.max(d.t2 + 6, height + 1);
+  // the bar spans the deadlines only; long after a swap the needle just rests at the end
+  const end = d.t2 + 6;
   const span = end - start;
   const pct = (h: number) => `${((h - start) / span) * 100}%`;
   const blocks = Array.from({ length: span }, (_, i) => start + i);
@@ -38,7 +39,7 @@ export function Deadlines({ d, height, path, t1Blocks, t2Blocks }: { d: D | null
         {blocks.map((h) => (
           <i key={h} className={h <= height ? (h % 2 ? "b-past b-odd" : "b-past") : h % 2 ? "b-odd" : undefined} />
         ))}
-        <div className="needle" style={{ left: pct(height + 1) }} />
+        <div className="needle" style={{ left: pct(Math.min(height + 1, end)) }} />
       </div>
 
       <div className="marks">

@@ -138,6 +138,20 @@ b {
   max-width: 60ch;
 }
 
+.back-link {
+  margin-left: auto;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+  text-decoration: none;
+  border-bottom: 1px solid var(--ink-3);
+}
+
+.back-link:hover {
+  color: var(--magenta);
+  border-bottom-color: var(--magenta);
+}
+
 /* controls ---------------------------------------------------------------- */
 
 .controls {

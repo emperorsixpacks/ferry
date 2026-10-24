@@ -11,7 +11,18 @@ export interface Status {
     btc: { network: string; height: number };
     zec: { network: string; height: number; pool: string };
   };
-  offer: { pair: string; rate_sat_per_zec: number; min_zat: number; max_zat: number };
+  offer: {
+    pair: string;
+    rate_sat_per_zec: number;
+    min_zat: number;
+    max_zat: number;
+    // optional terms; older daemons leave them out and the UI falls back to defaults
+    fee_sat?: number;
+    t1_blocks?: number;
+    t2_blocks?: number;
+    btc_lock_confs?: number;
+    zec_confs?: number;
+  };
 }
 
 export interface TimelineEntry {
@@ -48,6 +59,12 @@ export interface SwapView {
 
 export const DAEMONS: Record<Role, string> = { Z: "/daemon/z", B: "/daemon/b" };
 export const MAKER_URL: string = __FERRY_MAKER_URL__;
+// Which party this browser is: the swap app shows only that side. `?as=b` overrides it.
+export const LOCAL_ROLE: Role = (() => {
+  const q = new URLSearchParams(window.location.search).get("as");
+  const v = (q ?? __FERRY_LOCAL__).toUpperCase();
+  return v === "B" ? "B" : "Z";
+})();
 
 async function call<T>(base: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(base + path, body === undefined ? undefined : {
@@ -68,7 +85,7 @@ async function call<T>(base: string, path: string, body?: unknown): Promise<T> {
 
 export const getStatus = (role: Role) => call<Status>(DAEMONS[role], "/api/status");
 export const getSwaps = (role: Role) => call<SwapView[]>(DAEMONS[role], "/api/swaps");
-export const startSwap = (zec_zat: number) =>
-  call<{ id: string }>(DAEMONS.Z, "/api/swaps", { maker: MAKER_URL, zec_zat });
+export const startSwap = (zec_zat: number, as: Role = "Z") =>
+  call<{ id: string }>(DAEMONS[as], "/api/swaps", { maker: MAKER_URL, zec_zat });
 export const injectStall = (role: Role, id: string) =>
   call<unknown>(DAEMONS[role], `/api/swaps/${id}/fault`, { fault: "stall" });

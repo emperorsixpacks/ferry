@@ -37,6 +37,8 @@ export default defineConfig({
   define: {
     // The maker URL is handed to Z's daemon, so it must be reachable from Z, not from the browser.
     __FERRY_MAKER_URL__: JSON.stringify(process.env.FERRY_MAKER_URL ?? B_URL),
+    // The party the swap app at / belongs to (z or b).
+    __FERRY_LOCAL__: JSON.stringify(process.env.FERRY_LOCAL ?? "z"),
   },
   server: { port: Number(process.env.PORT ?? 5180), strictPort: true, proxy },
   preview: { port: Number(process.env.PORT ?? 5180), strictPort: true, proxy },

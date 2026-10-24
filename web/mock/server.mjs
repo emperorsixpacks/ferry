@@ -31,6 +31,7 @@ const BTC_CONFS = 2; // Z waits for this many confirmations of tx_lock
 const ZEC_CONFS = 3; // B waits for this many confirmations of the lock note
 const CANCEL_CONFS = 1;
 const RATE = 410000; // sat per ZEC
+const FEE_SAT = 2000; // per presigned BTC transaction, like ferryd's --fee-sat
 
 // ---------------------------------------------------------------------------------------------
 // world
@@ -277,7 +278,8 @@ function stepZ(s) {
   if (s.tx.cancel && !f.cancelSeen && !["BtcRedeemed", "Punished", "ZecReclaimed"].includes(v.state)) {
     f.cancelSeen = true;
     v.state = "Cancelled";
-    if (!f.cancelledByMe && !v.stalled) log(s, v, "btc", "cancel_seen", "Saw B broadcast tx_cancel after T1. Waiting for B's refund", s.tx.cancel);
+    // the watcher keeps running while stalled, as in ferryd
+    if (!f.cancelledByMe) log(s, v, "btc", "cancel_seen", "Saw B broadcast tx_cancel after T1", s.tx.cancel);
     return;
   }
   if (v.stalled) return;
@@ -333,8 +335,8 @@ function stepZ(s) {
       if (s.tx.btc_redeem && mined("btc", s.tx.btc_redeem)) {
         v.state = "BtcRedeemed";
         v.outcome = "swapped";
-        parties.Z.balances.btc_sat += s.amounts.btc_sat;
-        log(s, v, "local", "swap_complete", `Swap complete. ${btcAmount(s.amounts.btc_sat)} is in Z's wallet`);
+        parties.Z.balances.btc_sat += s.amounts.btc_sat - FEE_SAT;
+        log(s, v, "local", "swap_complete", `Swap complete. ${btcAmount(s.amounts.btc_sat - FEE_SAT)} is in Z's wallet`);
         return;
       }
       if (!s.tx.btc_redeem && lockH != null && h >= lockH + T1) return cancelZ(s, v);
@@ -445,7 +447,7 @@ function statusView(role) {
       btc: { network: chains.btc.network, height: chains.btc.height },
       zec: { network: chains.zec.network, height: chains.zec.height, pool: chains.zec.pool },
     },
-    offer: { pair: "ZEC/BTC", rate_sat_per_zec: RATE, min_zat: 10000000, max_zat: 1000000000 },
+    offer: { pair: "ZEC/BTC", rate_sat_per_zec: RATE, min_zat: 10000000, max_zat: 1000000000, fee_sat: FEE_SAT, t1_blocks: T1, t2_blocks: T2, btc_lock_confs: BTC_CONFS, zec_confs: ZEC_CONFS },
   };
 }
 
