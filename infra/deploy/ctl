@@ -124,6 +124,11 @@ cmd_compose() {
     fi
     export "$(buy_url_var "$p")="
   done
+  # Every daemon's --max-swaps: passed through only when .env sets MAX_SWAPS, so ferryd's own
+  # default (by network) applies otherwise; ferryd refuses an empty value.
+  local max
+  max=$(env_get MAX_SWAPS)
+  if [ -n "$max" ]; then export FERRY_MAX_SWAPS="$max"; else unset FERRY_MAX_SWAPS; fi
   export FERRY_B_BUYS=0
   for p in $buys; do
     if [ "$p" = btc ]; then

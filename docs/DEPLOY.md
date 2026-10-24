@@ -164,9 +164,13 @@ protocol working.
 
 The public UI is guarded by `web/server/prod.mjs`: visitors can only read status and start a swap
 on a Z (selling ZEC), or on a B for the pairs `BUY_ZEC` names (buying it, section 7.6). Starts
-are capped at `DEMO_MAX_ZAT` (0.5 ZEC), one active swap at a time per pair, `DEMO_RATE_PER_HOUR`
-per IP and `DEMO_SWAPS_PER_HOUR` across all visitors. These limits are shared by every pair and
-both directions.
+are capped at `DEMO_MAX_ZAT` (0.5 ZEC), `DEMO_RATE_PER_HOUR` per IP and `DEMO_SWAPS_PER_HOUR`
+across all visitors. These limits are shared by every pair and both directions.
+
+Each daemon runs several swaps at once, as many as its free funds cover, up to `MAX_SWAPS` in
+`.env` (ferryd `--max-swaps`; empty: ferryd's default, 4 on these test networks). Past that, or
+when its funds are tied up in swaps in progress, a start is refused as busy and the swap card
+says that every partner is busy. Lower it to 1 to go back to one swap at a time per daemon.
 
 ## 7. More pairs: ZEC/LTC, ZEC/USDC, ZEC/WETH (optional)
 
@@ -350,8 +354,9 @@ What changes:
   names (`/api/makers`: `Demo maker (ZEC for USDC)` and so on, with `"role": "Z"`).
 - **The wallets and funding are the same as for a sell**: both sides are still this server's
   wallets, ZEC still goes from Z to B and the coin from B to Z. Only who proposes the swap changes.
-- **The same guard** applies (section 6): the caps, both rate limits, one swap at a time per pair
-  whichever way, and no visitor can say where coins go.
+- **The same guard** applies (section 6): the caps and both rate limits, whichever way, and no
+  visitor can say where coins go. A daemon counts its swaps as maker and taker together against
+  `MAX_SWAPS`.
 - If you set `FERRY_MAKERS` yourself, list the Z makers in it too, e.g.
   `Demo maker (ZEC for USDC)|http://ferryd-z-usdc-base:7111|ZEC/USDC|base`, or
   `Demo maker (ZEC for BTC)|http://ferryd-z:7111|ZEC/BTC`. List only your own Z there: a
@@ -394,11 +399,11 @@ sudo ufw allow OpenSSH && sudo ufw allow 80,443/tcp && sudo ufw allow 443/udp &&
 Ports that Docker publishes bypass ufw, which is why the compose file publishes nothing but
 Caddy's 80/443.
 
-**Outside takers are not supported yet.** The makers' peer listeners (7112) are reachable only by
-the takers on the private network. Publishing one would hand the internet an unauthenticated
-maker API, which skips every guard of the public UI (swap size, rate limits) and lets anyone tie
-up the maker's one swap slot. Opening a maker to other people's ferryd needs a rate-limited,
-authenticated proxy in front of it first.
+**Outside takers are not supported yet.** The makers' peer listeners (7112, and Z's 7111 for
+`BUY_ZEC`) are reachable only by the daemons on the private network. Publishing one would hand
+the internet an unauthenticated maker API, which skips every guard of the public UI (swap size,
+rate limits) and lets anyone tie up the maker's swap slots (`MAX_SWAPS`). Opening a maker to
+other people's ferryd needs a rate-limited, authenticated proxy in front of it first.
 
 ## 10. Backups
 

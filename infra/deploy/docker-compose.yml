@@ -136,6 +136,7 @@ services:
     environment:
       FERRY_TOKEN_FILE: /run/ferry-token/api-token
       FERRY_API_PORT: "7102"
+      FERRY_MAX_SWAPS:
     volumes:
       - ferryd-b:/data
       - token-b:/run/ferry-token
@@ -178,6 +179,7 @@ services:
     environment:
       FERRY_TOKEN_FILE: /run/ferry-token/api-token
       FERRY_API_PORT: "7101"
+      FERRY_MAX_SWAPS:
     volumes:
       - ferryd-z:/data
       - token-z:/run/ferry-token
@@ -265,6 +267,7 @@ services:
     environment:
       FERRY_TOKEN_FILE: /run/ferry-token/api-token
       FERRY_API_PORT: "7102"
+      FERRY_MAX_SWAPS:
     volumes:
       - ferryd-b-ltc:/data
       - token-b-ltc:/run/ferry-token
@@ -306,6 +309,7 @@ services:
     environment:
       FERRY_TOKEN_FILE: /run/ferry-token/api-token
       FERRY_API_PORT: "7101"
+      FERRY_MAX_SWAPS:
     volumes:
       - ferryd-z-ltc:/data
       - token-z-ltc:/run/ferry-token
@@ -356,6 +360,7 @@ services:
     environment:
       FERRY_TOKEN_FILE: /run/ferry-token/api-token
       FERRY_API_PORT: "7102"
+      FERRY_MAX_SWAPS:
     volumes:
       - ferryd-b-usdc-base:/data
       - token-b-usdc-base:/run/ferry-token
@@ -401,6 +406,7 @@ services:
     environment:
       FERRY_TOKEN_FILE: /run/ferry-token/api-token
       FERRY_API_PORT: "7101"
+      FERRY_MAX_SWAPS:
     volumes:
       - ferryd-z-usdc-base:/data
       - token-z-usdc-base:/run/ferry-token
@@ -446,6 +452,7 @@ services:
     environment:
       FERRY_TOKEN_FILE: /run/ferry-token/api-token
       FERRY_API_PORT: "7102"
+      FERRY_MAX_SWAPS:
     volumes:
       - ferryd-b-weth-base:/data
       - token-b-weth-base:/run/ferry-token
@@ -491,6 +498,7 @@ services:
     environment:
       FERRY_TOKEN_FILE: /run/ferry-token/api-token
       FERRY_API_PORT: "7101"
+      FERRY_MAX_SWAPS:
     volumes:
       - ferryd-z-weth-base:/data
       - token-z-weth-base:/run/ferry-token
