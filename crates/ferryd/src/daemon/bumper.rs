@@ -300,8 +300,13 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                         "soft_cap",
                         format!(
                             "{name} is below the fee wanted and the child has reached the soft cap \
-                             ({}% of the payout); the cap rises as the deadline nears",
-                            self.cli.bump_soft_cap_percent
+                             ({}% of the payout); {}",
+                            self.cli.bump_soft_cap_percent,
+                            if spend == Spend::Punish {
+                                "a penalty has no deadline, so the cap stays"
+                            } else {
+                                "the cap rises as the deadline nears"
+                            }
                         ),
                     );
                 }
