@@ -74,8 +74,15 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
   const otherDaemon = pairs.list.find((p) => p.id === pair)?.[flip(dir)].daemon ?? null;
   const others = usePolledSwaps(otherDaemon === daemon ? null : otherDaemon);
 
-  // by id, the followed daemon's (live) view first; the list keeps the person's own swaps
-  const swaps = useMemo(() => ({ ...Object.fromEntries(others.map((s) => [s.id, s])), ...d.swaps }), [others, d.swaps]);
+  // by id, the followed daemon's (live) view first; the list keeps the person's own swaps. When
+  // both of a swap's sides are daemons here (a node trading between its own Z and B, or a demo whose
+  // Z is also the maker visitors buy from), each holds the same id: the person's own side (the
+  // taker's) wins, so a page never shows the maker's copy of their swap.
+  const swaps = useMemo(() => {
+    const byId: Record<string, SwapView> = Object.fromEntries(others.map((s) => [s.id, s]));
+    for (const [id, s] of Object.entries(d.swaps)) if (!byId[id] || isMine(s) || !isMine(byId[id])) byId[id] = s;
+    return byId;
+  }, [others, d.swaps]);
   const list = useMemo(() => {
     const byId = new Map<string, SwapView>();
     for (const s of [...Object.values(d.swaps), ...others]) if (isMine(s) && !byId.has(s.id)) byId.set(s.id, s);
