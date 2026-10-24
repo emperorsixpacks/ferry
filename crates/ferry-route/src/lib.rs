@@ -5,7 +5,14 @@
 //! - [`legs`]: the ferryd control-API contract, behind the [`legs::Ferryd`] trait.
 //! - [`route`]: the route record and its pure state machine.
 //! - [`store`]: one atomic, private JSON file per route.
+//! - [`hub`]: the driver (observe, step, persist, act) and route creation.
+//! - [`api`]: the HTTP API.
 
+pub mod api;
+#[cfg(test)]
+pub(crate) mod fake;
+pub mod hub;
 pub mod legs;
 pub mod route;
 pub mod store;
+pub mod view;
