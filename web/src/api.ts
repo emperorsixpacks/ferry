@@ -30,12 +30,18 @@ export interface Status {
     // a maker's live rate (--maker-price-feed): "fixed" or the feeds; unix seconds of the price
     rate_source?: string;
     rate_updated_at?: number;
-    // the largest ZEC amount this party's balance covers as maker
+    // the largest ZEC amount this party's free balance covers as maker (less what live swaps hold)
     liquidity_zat?: number;
     paused?: boolean;
     // started with --maker-offer (older daemons leave it out)
     maker?: boolean;
+    // as maker: how many more swaps it takes right now
+    free_slots?: number;
   };
+  // several swaps at once (ferryd --max-swaps): the cap, the swaps that aren't over, those of them
+  // whose partner never locked (they no longer count against the cap), and how many more it takes.
+  // Older daemons leave it out (they run one at a time).
+  capacity?: { max_swaps: number; live: number; late: number; free_slots: number };
   // what this ferryd supports beyond the base API: "route" (route legs, sweep_to), "payout"
   // (payout_to), "withdraw" (POST /api/withdraw), "withdraw_preview" (its dry_run)
   features?: string[];
@@ -309,8 +315,12 @@ export interface Maker {
   name: string;
   pair: string;
   online: boolean;
-  // online, making and not paused: it takes a swap now
+  // online, making, not paused and not full: it takes a swap now
   available: boolean;
+  // making offers, but already running as many swaps as it takes at once (ferryd --max-swaps)
+  busy?: boolean;
+  // how many more swaps it takes right now; null: it doesn't say (an older ferryd)
+  free_slots?: number | null;
   paused: boolean;
   role: Role | null;
   rate_sat_per_zec: number | null;

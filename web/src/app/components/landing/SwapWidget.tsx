@@ -4,7 +4,7 @@ import { Link } from "@/router";
 import { coin } from "@/format";
 import { btcText } from "@/swap/shared";
 import { useLocal } from "../../lib/daemon";
-import { bestMaker, counterFor, quoteOf, selectable, useMakers } from "../../lib/makers";
+import { BUSY_TEXT, availability, bestMaker, counterFor, quoteOf, selectable, swappable, useMakers } from "../../lib/makers";
 import { pairName } from "../../lib/pairs";
 import { PairLogo, TokenLogo } from "../Logos";
 import { TokenPicker } from "../TokenPicker";
@@ -22,14 +22,20 @@ export function SwapWidget() {
   const out = quote ? counterFor(quote, 1e8, d.role) : 0;
   const name = pairName(d.pair);
   const z = d.role === "Z";
+  // the partners for this way that are full right now, or all offline
+  const listed = makers.list ? makers.list.filter((m) => swappable(m) && (m.role == null || m.role !== d.role)) : [];
   const line =
     makers.list === undefined
       ? "Finding the best rate…"
       : makers.list === null
         ? "This server lists no swap partners yet."
         : !quote || !maker
-          ? "No partner is taking swaps for this coin right now."
+          ? listed.some((m) => m.busy)
+            ? BUSY_TEXT
+            : "No partner is taking swaps for this coin right now."
           : `1 ZEC = ${btcText(quote.rate)} ${coin().ticker} · best rate, from ${maker.name}`;
+  // is that partner taking swaps now, and how many more: small, under the rate
+  const avail = quote && maker ? availability(maker) : listed.length && listed.every((m) => !m.online) ? "Partner offline" : null;
   const zecSide = (
     <Box label={z ? "You sell" : "You get"} pill={<ZecPill />}>
       <span className="text-slate-900">1</span>
@@ -68,6 +74,7 @@ export function SwapWidget() {
       </div>
       <p className="min-h-10 px-3 pt-3 pb-1 text-[13px] text-slate-600" aria-live="polite">
         {line}
+        {avail ? <span className="block text-slate-500" data-availability>{avail}</span> : null}
       </p>
       <Link to="/app" className="mt-1 flex h-14 w-full items-center justify-center rounded-2xl bg-slate-900 text-base font-semibold text-white transition-colors hover:bg-slate-800">
         {z ? "Sell ZEC" : "Buy ZEC"} in the app
