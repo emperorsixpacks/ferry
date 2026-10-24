@@ -1,6 +1,9 @@
 # TLS for the public demo (certificates from Let's Encrypt, kept in the caddy_data volume).
 {$DOMAIN} {
-	encode zstd gzip
+	# Compress everything but the SSE swap updates: a compressed event stream waits in the encoder
+	# until enough has piled up, so a quiet daemon's updates never reach the page.
+	@compress not header Accept *text/event-stream*
+	encode @compress zstd gzip
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		X-Content-Type-Options nosniff

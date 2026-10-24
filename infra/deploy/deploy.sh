@@ -137,6 +137,9 @@ cmd_up() {
   ensure_env
   log "building and starting (the first build compiles zcash-devtool: allow 20-40 minutes)"
   rcompose up -d --build
+  # Caddy reads the Caddyfile once, at start, and a sync replaces the file under its bind mount:
+  # restart it so a changed Caddyfile applies (the front is down for about a second).
+  rcompose restart caddy
   rctl stop-disabled
   rcompose ps
   log "done. Follow the sync with: infra/deploy/deploy.sh $HOST status"
