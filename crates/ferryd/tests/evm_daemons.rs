@@ -633,7 +633,11 @@ async fn route_leg_one_buys_zec_into_another_wallet() {
     user.ready(&http).await;
 
     let status = api_get(&http, &user, "/api/status").await;
-    assert_eq!(status["features"], json!(["route", "payout"]), "{status}");
+    assert_eq!(
+        status["features"],
+        json!(["route", "payout", "withdraw"]),
+        "{status}"
+    );
     let addresses = api_get(&http, &user, "/api/addresses").await;
     assert_eq!(addresses["zec"]["address"], mock_wallet("user-b"));
 
@@ -930,4 +934,265 @@ async fn payout_to_claim_lands_at_a_third_address() {
             .contains("the payout address given for this swap"),
         "{done}"
     );
+}
+
+// ------------------------------------------------------------------------- withdrawals
+
+/// POST to a daemon that may exit while answering (a demo crash): None then.
+async fn post_maybe(
+    http: &reqwest::Client,
+    d: &Daemon,
+    path: &str,
+    body: Value,
+) -> Option<(u16, Value)> {
+    let r = http
+        .post(format!("{}{path}", d.api))
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+    Some((r.status().as_u16(), r.json().await.unwrap_or_default()))
+}
+
+async fn post_api(http: &reqwest::Client, d: &Daemon, path: &str, body: Value) -> (u16, Value) {
+    post_maybe(http, d, path, body)
+        .await
+        .expect("the daemon answers")
+}
+
+/// The newest withdrawal, once `ok` holds.
+async fn newest_withdrawal(
+    http: &reqwest::Client,
+    d: &Daemon,
+    ok: impl Fn(&Value) -> bool,
+) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let all = api_get(http, d, "/api/withdrawals").await;
+        if ok(&all[0]) {
+            return all[0].clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "withdrawal never matched: {all}\n{}",
+            tail(&d.log)
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// "Send to my wallet" on EVM daemons: their addresses (account, token, decimals, chain id, the
+/// shielded address); refusals (another asset, the zero address, FerryLock, the token itself, a
+/// bad checksum, our own account, more than the wallet has); a token transfer and a gas-coin send
+/// that land; gas kept for a live swap's actions (the refusal says how much is free) while the
+/// swap completes; and a crash after the record is saved or after the broadcast never sends
+/// twice: the same signed transaction goes out after the restart, once.
+#[tokio::test]
+async fn withdraw_tokens_and_gas_coin() {
+    let _timed = TIMED.lock().await;
+    let Some(chain) = Chain::start().await else {
+        return;
+    };
+    let http = api_client();
+    let maker_args = ["--maker-offer", &format!("{RATE}"), "--demo-faults"];
+    let user_args = ["--zec-mock-balance", "500000000", "--demo-faults"];
+    let mut maker = chain.ferryd("b", "maker-b", "b.key", &maker_args);
+    let mut user = chain.ferryd("z", "user-z", "z.key", &user_args);
+    maker.ready(&http).await;
+    user.ready(&http).await;
+    let status = api_get(&http, &user, "/api/status").await;
+    assert!(
+        status["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("withdraw")),
+        "{status}"
+    );
+    // ferryd runs with umask 077: a file it creates without setting a mode (here the mock
+    // Zcash chain) is owner-only, as is anything its child processes write.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let file = chain.dir.path().join("zec-chain.json");
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{}", file.display());
+    }
+
+    let a = api_get(&http, &maker, "/api/addresses").await;
+    let b_account = signer(KEY_B).address().to_checksum(None);
+    assert_eq!(a["btc"]["address"], b_account, "{a}");
+    assert_eq!(a["btc"]["token"], chain.usdc.to_checksum(None));
+    assert_eq!(
+        (
+            a["btc"]["coin"].as_str(),
+            a["btc"]["symbol"].as_str(),
+            a["btc"]["decimals"].as_u64(),
+            a["btc"]["chain_id"].as_u64()
+        ),
+        (Some("usdc"), Some("USDC"), Some(6), Some(31337))
+    );
+    assert_eq!(
+        a["zec"]["address"],
+        format!("uregtest1mockwallet{}", hex::encode("maker-b"))
+    );
+
+    // Refusals: nothing recorded.
+    let dest = PrivateKeySigner::random();
+    let to = dest.address().to_checksum(None);
+    let token = |amount: Value, to: &str| json!({"asset": "token", "amount": amount, "to": to});
+    let typo = PAYOUT.replacen('F', "f", 1);
+    for (body, why) in [
+        (
+            json!({"asset": "btc", "amount": 1, "to": to}),
+            "asset must be one of",
+        ),
+        (
+            token(json!(1), "0x0000000000000000000000000000000000000000"),
+            "zero address",
+        ),
+        (
+            token(json!(1), &format!("{:#x}", chain.lock)),
+            "FerryLock contract",
+        ),
+        (
+            token(json!(1), &format!("{:#x}", chain.usdc)),
+            "USDC contract",
+        ),
+        (token(json!(1), &typo), "checksum"),
+        (token(json!(1), &b_account), "own account"),
+        (token(json!("2000000000"), &to), "Not enough"),
+        (token(json!(0), &to), "more than 0"),
+    ] {
+        let (code, resp) = post_api(&http, &maker, "/api/withdraw", body.clone()).await;
+        assert_eq!(code, 400, "{body} -> {resp}");
+        let e = resp["error"].as_str().unwrap_or_default();
+        assert!(e.contains(why), "{body} -> {e:?}, expected {why:?}");
+    }
+    assert_eq!(api_get(&http, &maker, "/api/withdrawals").await, json!([]));
+
+    // 10 USDC (named by its symbol) land at a fresh address; the fee is gas, in wei.
+    let (code, wd) = post_api(
+        &http,
+        &maker,
+        "/api/withdraw",
+        json!({"asset": "usdc", "amount": "10000000", "to": to.to_lowercase()}),
+    )
+    .await;
+    assert_eq!(code, 201, "{wd}\n{}", tail(&maker.log));
+    assert_eq!(
+        (
+            wd["asset"].as_str(),
+            wd["coin"].as_str(),
+            wd["fee_coin"].as_str(),
+            wd["to"].as_str()
+        ),
+        (Some("token"), Some("usdc"), Some("eth"), Some(to.as_str()))
+    );
+    let done = newest_withdrawal(&http, &maker, |v| v["status"] == "confirmed").await;
+    assert_eq!(done["txid"], wd["txid"]);
+    assert_eq!(
+        chain.usdc_at(dest.address()).await,
+        U256::from(10_000_000u64)
+    );
+
+    // 1 ETH from Z's account.
+    let dest_client = EvmClient::connect_http(&chain.url, chain.lock, dest.clone()).unwrap();
+    let one_eth = U256::from(10u64).pow(U256::from(18u64));
+    let (code, wd) = post_api(
+        &http,
+        &user,
+        "/api/withdraw",
+        json!({"asset": "eth", "amount": one_eth.to_string(), "to": to}),
+    )
+    .await;
+    assert_eq!(code, 201, "{wd}");
+    newest_withdrawal(&http, &user, |v| v["status"] == "confirmed").await;
+    assert_eq!(dest_client.eth_balance().await.unwrap(), one_eth);
+
+    // A live swap keeps its gas: Z can't send all its ETH while its claim is still to come.
+    let (code, body) = post_swap(
+        &http,
+        &user,
+        json!({"maker": maker.peer, "zec_zat": 100_000_000u64}),
+    )
+    .await;
+    assert_eq!(code, 201, "{body}");
+    let id = body["id"].as_str().unwrap().to_string();
+    let all_eth = user_eth(&chain).await;
+    let (code, resp) = post_api(
+        &http,
+        &user,
+        "/api/withdraw",
+        json!({"asset": "eth", "amount": all_eth.to_string(), "to": to}),
+    )
+    .await;
+    assert_eq!(code, 400, "{resp}");
+    let e = resp["error"].as_str().unwrap();
+    assert!(
+        e.starts_with("Only ")
+            && e.contains("held for a swap in progress (gas for the swap actions still to come)"),
+        "{e}"
+    );
+    user.until(&http, &id, 120, "the swap", |v| v["outcome"] == "swapped")
+        .await;
+
+    // Crashes: after the save (nothing broadcast yet) on Z, after the broadcast on B. Each
+    // restart finds the same signed transaction and it pays once.
+    let before = dest_client.eth_balance().await.unwrap();
+    let r = post_api(
+        &http,
+        &user,
+        "/api/withdraw/fault",
+        json!({"crash": "after_save"}),
+    )
+    .await;
+    assert_eq!(r.0, 200);
+    let r = post_maybe(
+        &http,
+        &user,
+        "/api/withdraw",
+        json!({"asset": "eth", "amount": "5000", "to": to}),
+    )
+    .await;
+    assert!(r.as_ref().is_none_or(|(c, _)| *c >= 500), "{r:?}");
+    drop(user);
+    user = chain.ferryd("z", "user-z", "z.key", &user_args);
+    user.ready(&http).await;
+    let done = newest_withdrawal(&http, &user, |v| v["status"] == "confirmed").await;
+    assert_eq!(done["amount"], "5000");
+    assert_eq!(
+        dest_client.eth_balance().await.unwrap() - before,
+        U256::from(5000u64),
+        "paid once"
+    );
+
+    let r = post_api(
+        &http,
+        &maker,
+        "/api/withdraw/fault",
+        json!({"crash": "after_broadcast"}),
+    )
+    .await;
+    assert_eq!(r.0, 200);
+    let r = post_maybe(&http, &maker, "/api/withdraw", token(json!(1_000_000), &to)).await;
+    assert!(r.as_ref().is_none_or(|(c, _)| *c >= 500), "{r:?}");
+    drop(maker);
+    maker = chain.ferryd("b", "maker-b", "b.key", &maker_args);
+    maker.ready(&http).await;
+    newest_withdrawal(&http, &maker, |v| v["status"] == "confirmed").await;
+    assert_eq!(
+        chain.usdc_at(dest.address()).await,
+        U256::from(11_000_000u64)
+    );
+    let all = api_get(&http, &maker, "/api/withdrawals").await;
+    assert_eq!(all.as_array().unwrap().len(), 2, "{all}");
+}
+
+/// Z's (anvil account 2's) ETH.
+async fn user_eth(chain: &Chain) -> U256 {
+    EvmClient::connect_http(&chain.url, chain.lock, signer(KEY_Z))
+        .unwrap()
+        .eth_balance()
+        .await
+        .unwrap()
 }

@@ -12,6 +12,7 @@ mod record;
 mod route;
 mod tower;
 mod view;
+mod withdraw;
 
 use anyhow::{bail, Context};
 use clap::Parser;

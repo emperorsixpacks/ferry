@@ -30,7 +30,7 @@ use crate::daemon::ApiError;
 /// What `GET /api/status` lists in `features`. The router starts a leg only on a daemon that
 /// lists `route`, and passes `payout_to` only to one that lists `payout` (an older ferryd would
 /// silently ignore the fields above, and pay our own wallet).
-pub const FEATURES: &[&str] = &["route", PAYOUT_FEATURE];
+pub const FEATURES: &[&str] = &["route", PAYOUT_FEATURE, crate::withdraw::WITHDRAW_FEATURE];
 
 /// `POST /api/swaps` takes `payout_to` (in `GET /api/status` `features`), and, in a Bitcoin or
 /// Litecoin maker's `/peer/offer` `features`, the maker takes a Propose that names one.
@@ -79,6 +79,11 @@ impl RouteArgs {
                     "sweep_to is for role B only: it says where B's sweep pays the ZEC it buys"
                         .into(),
                 );
+            }
+            // The same refusal as a withdrawal's: shielded only.
+            if crate::withdraw::zec_address_kind(to) == crate::withdraw::ZecAddressKind::Transparent
+            {
+                return bad(format!("sweep_to: {}", crate::withdraw::SHIELDED_ONLY));
             }
             // The backend checks the address itself; this keeps anything that is not an
             // address (an option, a path, a huge string) away from it.
@@ -194,11 +199,20 @@ pub struct Held<'a> {
 
 /// The swap a `POST /api/swaps` is starting, if any: one at a time, like the swaps themselves.
 /// Starting takes a while (the maker is asked, our wallet is checked), and until the record is
-/// in memory nothing else shows that a swap is on its way.
+/// in memory nothing else shows that a swap is on its way. A withdrawal (crate::withdraw) takes
+/// the same slot: its free-balance check must not race a swap's funds check, so neither starts
+/// while the other runs (and a maker takes no proposal meanwhile).
 #[derive(Default)]
 pub struct Starts {
+    slot: Mutex<Slot>,
+}
+
+#[derive(Default)]
+struct Slot {
     /// `Some(label)` while a start runs (`Some(None)`: one without a route label).
-    slot: Mutex<Option<Option<String>>>,
+    start: Option<Option<String>>,
+    /// A withdrawal is being sent.
+    withdrawing: bool,
 }
 
 impl Starts {
@@ -219,25 +233,57 @@ impl Starts {
                     h.id
                 )));
             }
-            if slot.as_ref().is_some_and(|s| s.as_deref() == Some(label)) {
+            if slot
+                .start
+                .as_ref()
+                .is_some_and(|s| s.as_deref() == Some(label))
+            {
                 return Err(ApiError::label_in_use(format!(
                     "a swap with the route label {label} is being started"
                 )));
             }
         }
-        if slot.is_some() {
+        if slot.start.is_some() {
             return Err(ApiError(409, "Another swap is being started".into()));
+        }
+        if slot.withdrawing {
+            return Err(ApiError(
+                409,
+                "A withdrawal is being sent; try again in a moment".into(),
+            ));
         }
         if held.iter().any(|h| !h.finished) {
             return Err(ApiError(409, "A swap is already in progress".into()));
         }
-        *slot = Some(label.map(str::to_string));
+        slot.start = Some(label.map(str::to_string));
         Ok(StartGuard(self))
     }
 
-    /// A start is in progress (a maker must not take a proposal meanwhile).
+    /// Claim the slot for a withdrawal: 409 while a swap is being started or another
+    /// withdrawal is being sent. Swaps that are already running do not stop it (their funds
+    /// are held instead, crate::withdraw).
+    pub fn begin_withdrawal(&self) -> Result<WithdrawGuard<'_>, ApiError> {
+        let mut slot = self.slot.lock().expect("not poisoned");
+        if slot.start.is_some() {
+            return Err(ApiError(
+                409,
+                "A swap is being started; try again once it has started".into(),
+            ));
+        }
+        if slot.withdrawing {
+            return Err(ApiError(
+                409,
+                "Another withdrawal is being sent; try again in a moment".into(),
+            ));
+        }
+        slot.withdrawing = true;
+        Ok(WithdrawGuard(self))
+    }
+
+    /// A start or a withdrawal is in progress (a maker must not take a proposal meanwhile).
     pub fn busy(&self) -> bool {
-        self.slot.lock().expect("not poisoned").is_some()
+        let slot = self.slot.lock().expect("not poisoned");
+        slot.start.is_some() || slot.withdrawing
     }
 }
 
@@ -247,7 +293,18 @@ pub struct StartGuard<'s>(&'s Starts);
 impl Drop for StartGuard<'_> {
     fn drop(&mut self) {
         if let Ok(mut slot) = self.0.slot.lock() {
-            *slot = None;
+            slot.start = None;
+        }
+    }
+}
+
+/// Frees the slot when the withdrawal request ends, however it ends.
+pub struct WithdrawGuard<'s>(&'s Starts);
+
+impl Drop for WithdrawGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.0.slot.lock() {
+            slot.withdrawing = false;
         }
     }
 }
@@ -332,6 +389,36 @@ mod tests {
             let a = args(serde_json::json!({ "sweep_to": bad }));
             assert_eq!(a.check(Role::B).unwrap_err().0, 400, "{bad:?}");
         }
+        // A transparent address gets the same refusal as a withdrawal to one.
+        let t = args(serde_json::json!({ "sweep_to": "tmBsTi2xWTjUdEXnuTceL7fecEQKeWaPDJd" }));
+        assert_eq!(
+            t.check(Role::B).unwrap_err().1,
+            "sweep_to: Ferry only sends shielded ZEC; use a shielded address"
+        );
+    }
+
+    /// A withdrawal and a swap start never run together: each refuses while the other runs,
+    /// and a maker is busy for both. Running swaps do not stop a withdrawal.
+    #[test]
+    fn withdrawals_and_starts_exclude_each_other() {
+        let starts = Starts::default();
+        let w = starts.begin_withdrawal().unwrap();
+        assert!(starts.busy());
+        let e = starts.begin(None, []).err().unwrap();
+        assert_eq!(e.0, 409);
+        assert!(e.1.contains("withdrawal is being sent"), "{}", e.1);
+        assert!(
+            starts.begin_withdrawal().is_err(),
+            "one withdrawal at a time"
+        );
+        drop(w);
+        assert!(!starts.busy());
+        let s = starts.begin(Some("r1/1"), []).unwrap();
+        let e = starts.begin_withdrawal().err().unwrap();
+        assert!(e.1.contains("swap is being started"), "{}", e.1);
+        drop(s);
+        let _w = starts.begin_withdrawal().unwrap();
+        assert!(FEATURES.contains(&"withdraw"));
     }
 
     /// `payout_to` is role Z's, and must look like an address before any chain parses it.

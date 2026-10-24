@@ -368,7 +368,7 @@ pub fn parse_payout(s: &str) -> Result<[u8; 20], String> {
             .map_err(|e| format!("not an EVM address: {e}"))?
     };
     if a.is_zero() {
-        return Err("the zero address can't receive a payout".into());
+        return Err("the zero address can't receive anything".into());
     }
     Ok(a.0 .0)
 }
