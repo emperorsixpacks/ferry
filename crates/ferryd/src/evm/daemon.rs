@@ -1542,6 +1542,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             if rec.taker {
                 self.exchange(rec).await;
             }
+            crate::tower::arm_evm(&self.cli, rec).await;
         }
         self.maybe_timeout(rec).await;
         for ev in self.chain_events(rec).await {
