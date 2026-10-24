@@ -244,6 +244,10 @@ pub struct Route {
     pub not_before: Option<u64>,
     /// L2's own shielded address: where leg 1's sweep pays.
     pub sweep_to: String,
+    /// Where leg 2's redeem (EVM: claim) pays coin C instead of L2's own wallet, as the request
+    /// gave it (a NEAR Intents 1Click deposit address, say). ferryd checks it for its chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payout_to: Option<String>,
     pub maker1: Maker,
     /// Leg 2's partners, tried in order.
     pub maker2: Vec<Maker>,
@@ -278,6 +282,7 @@ pub struct NewRoute {
     pub min_out: u64,
     pub delay_secs: [u64; 2],
     pub sweep_to: String,
+    pub payout_to: Option<String>,
     pub maker1: Maker,
     pub maker2: Vec<Maker>,
 }
@@ -311,6 +316,7 @@ impl Route {
             delay_secs: p.delay_secs,
             not_before: None,
             sweep_to: p.sweep_to,
+            payout_to: p.payout_to,
             maker1: p.maker1,
             maker2: p.maker2,
             phase: Phase::Leg1Starting,
@@ -383,6 +389,7 @@ impl Route {
                 sweep_to: Some(self.sweep_to.clone()),
                 max_counter: Some(self.max_in),
                 min_counter: None,
+                payout_to: None,
             },
             _ => StartSwap {
                 maker: maker.url.clone(),
@@ -391,6 +398,7 @@ impl Route {
                 sweep_to: None,
                 max_counter: None,
                 min_counter: Some(self.out_min()),
+                payout_to: self.payout_to.clone(),
             },
         }
     }
@@ -786,6 +794,25 @@ fn check_terms(r: &mut Route, n: u8, s: &LegSwap, ctx: &Ctx) {
                 units_str(r.out_min(), &unit)
             ));
         }
+        // ferryd writes the address in its chain's normal form (lowercase bech32, checksummed
+        // hex), so compare without case.
+        let same = |a: &Option<String>, b: &Option<String>| match (a, b) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same(&s.payout_to, &r.payout_to) {
+            warn.push(match &r.payout_to {
+                Some(to) => format!(
+                    "its {} doesn't go to {to}, your payout address",
+                    unit.ticker
+                ),
+                None => format!(
+                    "its {} goes to another address than your wallet",
+                    unit.ticker
+                ),
+            });
+        }
     }
     let text = format!("Swap {n} doesn't match the route: {}", warn.join("; "));
     if !warn.is_empty() && !r.timeline.iter().any(|e| e.label == text) {
@@ -928,7 +955,13 @@ fn on_leg2(r: &mut Route, s: &LegSwap, ctx: &Ctx) {
     check_terms(r, 2, s, ctx);
     let got = units_str(s.amounts.btc_sat, &r.legs[1].unit);
     match s.outcome.as_deref() {
-        Some("swapped") => done(r, format!("Done: you received {got}."), ctx),
+        Some("swapped") => {
+            let text = match &r.payout_to {
+                None => format!("Done: you received {got}."),
+                Some(to) => format!("Done: {got} went to {to}, your payout address."),
+            };
+            done(r, text, ctx)
+        }
         Some("punished") => done(
             r,
             format!("Done: your partner vanished after locking, so you claimed their {got} as the penalty."),
@@ -1199,6 +1232,7 @@ pub(crate) mod tests {
                 min_out: 39_200_000,
                 delay_secs: [300, 1800],
                 sweep_to: "utest1l2".into(),
+                payout_to: None,
                 maker1: maker("http://127.0.0.1:7111", "Kestrel"),
                 maker2: vec![
                     maker("http://127.0.0.1:7912", "Heron"),
@@ -1212,9 +1246,15 @@ pub(crate) mod tests {
 
     /// A swap as leg `n`'s daemon would show it, terms matching the route.
     pub(crate) fn swap(r: &Route, n: u8, state: &str, outcome: Option<&str>) -> LegSwap {
-        let (role, zec, units, sweep_to) = match n {
-            1 => (Role::B, r.zec_zat, 400_000, Some(r.sweep_to.clone())),
-            _ => (Role::Z, r.zec2_zat, r.out_min() + 1, None),
+        let (role, zec, units, sweep_to, payout_to) = match n {
+            1 => (Role::B, r.zec_zat, 400_000, Some(r.sweep_to.clone()), None),
+            _ => (
+                Role::Z,
+                r.zec2_zat,
+                r.out_min() + 1,
+                None,
+                r.payout_to.clone(),
+            ),
         };
         LegSwap {
             id: format!("swap{n}"),
@@ -1234,6 +1274,7 @@ pub(crate) mod tests {
             watchtower: None,
             route: Some(r.label(n)),
             sweep_to,
+            payout_to,
         }
     }
 
@@ -1352,6 +1393,78 @@ pub(crate) mod tests {
         serde_json::from_slice(&serde_json::to_vec(r).unwrap()).unwrap()
     }
 
+    /// A route ending on NEAR Intents: `payout_to` goes to leg 2's start only (leg 1 sweeps into
+    /// the user's own leg-2 wallet as always), survives a save, and the end says where coin C
+    /// went. A leg-2 swap that doesn't pay it (a daemon that ignored the field) is flagged.
+    #[test]
+    fn leg_two_pays_the_payout_address() {
+        const PAY: &str = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
+        let mut run = Run::new();
+        let mut r = new_route(&run.policy);
+        r.payout_to = Some(PAY.into());
+        let (_, cmd) = run.step(&r, Obs::Lookup { n: 1, swap: None });
+        let Some(Command::Start { n: 1, request }) = cmd else {
+            panic!("{cmd:?}")
+        };
+        assert_eq!(
+            (request.payout_to, request.sweep_to.as_deref()),
+            (None, Some("utest1l2"))
+        );
+
+        let mut r = run.to(Phase::Leg2Starting);
+        r.payout_to = Some(PAY.into());
+        let r = roundtrip(&r);
+        assert_eq!(r.payout_to.as_deref(), Some(PAY));
+        let (r, cmd) = run.step(&r, Obs::Lookup { n: 2, swap: None });
+        let Some(Command::Start { n: 2, request }) = cmd else {
+            panic!("{cmd:?}")
+        };
+        assert_eq!(request.payout_to.as_deref(), Some(PAY));
+        assert_eq!(
+            request.min_counter,
+            Some(39_200_000),
+            "the floor still holds"
+        );
+        let body = serde_json::to_value(&request).unwrap();
+        assert_eq!(body["payout_to"], PAY);
+        let (r, _) = run.step(
+            &r,
+            Obs::Started {
+                n: 2,
+                result: Ok("swap2".into()),
+            },
+        );
+        // ferryd shows the address in its own form (here lowercase): the same address.
+        let mut done = swap(&r, 2, "Claimed", Some("swapped"));
+        done.payout_to = Some(PAY.to_lowercase());
+        let (end, _) = run.step(&r, Obs::Swap { n: 2, swap: done });
+        assert_eq!(end.phase, Phase::Done);
+        assert_eq!(
+            end.reason.as_deref(),
+            Some(format!("Done: 39.200001 USDC went to {PAY}, your payout address.").as_str())
+        );
+        assert!(!end.timeline.iter().any(|e| e.kind == "warning"));
+
+        // The daemon paid its own wallet instead: said plainly.
+        let mut ignored = swap(&r, 2, "ZecLocked", None);
+        ignored.payout_to = None;
+        let (r, _) = run.step(
+            &r,
+            Obs::Swap {
+                n: 2,
+                swap: ignored,
+            },
+        );
+        let warning = r.timeline.iter().find(|e| e.kind == "warning").unwrap();
+        assert!(
+            warning.label.contains(&format!(
+                "its USDC doesn't go to {PAY}, your payout address"
+            )),
+            "{}",
+            warning.label
+        );
+    }
+
     #[test]
     fn happy_path() {
         let mut run = Run::new();
@@ -1373,6 +1486,7 @@ pub(crate) mod tests {
                 sweep_to: Some("utest1l2".into()),
                 max_counter: Some(412_500),
                 min_counter: None,
+                payout_to: None,
             }
         );
         assert_eq!(
@@ -1446,6 +1560,7 @@ pub(crate) mod tests {
                 sweep_to: None,
                 max_counter: None,
                 min_counter: Some(39_200_000),
+                payout_to: None,
             }
         );
         let (r, _) = run.step(
@@ -2253,6 +2368,7 @@ pub(crate) mod tests {
             min_out: r.min_out,
             delay_secs: r.delay_secs,
             sweep_to: r.sweep_to,
+            payout_to: None,
             maker1: r.maker1,
             maker2: r.maker2,
         }

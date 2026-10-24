@@ -108,6 +108,10 @@ pub struct CreateRoute {
     pub delay_secs: Option<[u64; 2]>,
     #[serde(default)]
     pub keep_bps: Option<u32>,
+    /// Where leg 2 pays coin C instead of the leg-2 wallet (a NEAR Intents 1Click deposit
+    /// address, say). Leg 2's ferryd checks it for its chain before it contacts a maker.
+    #[serde(default)]
+    pub payout_to: Option<String>,
 }
 
 /// `POST /api/routes/:id/continue`.
@@ -268,6 +272,13 @@ impl<F: Ferryd> Hub<F> {
                         Ok(s) => {
                             if let Err(e) = verify(&s, &l.pair, l.role) {
                                 return unreachable(n, e);
+                            }
+                            // A daemon replaced by an older one since the route was created
+                            // would pay its own wallet: hold off instead.
+                            if n == 2 && r.payout_to.is_some() {
+                                if let Err(e) = legs::verify_payout(&s, &l.pair) {
+                                    return unreachable(n, e);
+                                }
                             }
                         }
                     }
@@ -431,6 +442,10 @@ impl<F: Ferryd> Hub<F> {
                 self.settings.max_keep_bps
             )));
         }
+        let payout_to = req.payout_to.map(|p| p.trim().to_string());
+        if let Some(p) = &payout_to {
+            legs::check_payout(p).map_err(HubError::bad)?;
+        }
 
         let _g = self.drive.lock().await;
         let busy = self.routes.lock().unwrap().values().any(|r| {
@@ -446,6 +461,9 @@ impl<F: Ferryd> Hub<F> {
         }
         let s1 = self.status_of(&from, Role::B).await?;
         let s2 = self.status_of(&to, Role::Z).await?;
+        if payout_to.is_some() {
+            legs::verify_payout(&s2, &to).map_err(HubError::bad)?;
+        }
         if s1.zec_network != s2.zec_network {
             return Err(HubError::bad(format!(
                 "your {from} daemon is on Zcash {} and your {to} daemon on Zcash {}",
@@ -505,6 +523,7 @@ impl<F: Ferryd> Hub<F> {
                 min_out: req.min_out,
                 delay_secs: delay,
                 sweep_to,
+                payout_to,
                 maker1,
                 maker2,
             },
@@ -688,6 +707,67 @@ pub(crate) mod tests {
         assert_eq!((rig.l1.starts().len(), rig.l2.starts().len()), (1, 1));
         // Persisted.
         assert_eq!(rig.hub().route(&r.id).unwrap(), r);
+    }
+
+    /// `payout_to` (a route that ends on NEAR Intents): refused unless it looks like an address
+    /// and leg 2's daemon takes it; sent with leg 2's start only, and not to a daemon that has
+    /// stopped taking it since the route was created.
+    #[tokio::test]
+    async fn payout_to_reaches_leg_two_only_on_a_daemon_that_takes_it() {
+        const PAY: &str = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
+        let rig = Rig::new();
+        let hub = rig.hub();
+        let with = |to: &str| CreateRoute {
+            payout_to: Some(to.into()),
+            ..request()
+        };
+        let err = hub.create(with(PAY)).await.unwrap_err();
+        assert_eq!(err.0, 400);
+        assert!(err.1.contains("does not take payout_to"), "{}", err.1);
+        let err = hub.create(with("0x12/34")).await.unwrap_err();
+        assert!(err.1.contains("must be an address"), "{}", err.1);
+        assert!(hub.routes().is_empty() && rig.l1.starts().is_empty());
+
+        let features = || vec!["route".to_string(), "payout".to_string()];
+        rig.l2.set_features(features());
+        let r = hub.create(with(PAY)).await.unwrap();
+        assert_eq!(r.payout_to.as_deref(), Some(PAY));
+        assert_eq!(hub.view(&r).payout_to.as_deref(), Some(PAY));
+        assert_eq!(rig.l1.starts()[0].payout_to, None, "leg 1 never gets it");
+        let id1 = r.legs[0].swap_id.clone().unwrap();
+        rig.l1.set_state(&id1, "ZecSwept", Some("swapped"));
+        rig.l1.push_timeline(&id1, sweep(100));
+        rig.l1.set_zec(109, 0);
+        rig.l2.set_zec(109, 99_990_000);
+        hub.tick().await; // settling
+        hub.tick().await; // pausing
+        rig.advance(342);
+        rig.l2.set_features(vec!["route".into()]);
+        hub.tick().await; // leg2_starting
+        hub.tick().await; // the daemon no longer takes payout_to: no start
+        let r = hub.route(&r.id).unwrap();
+        assert_eq!(r.phase, Phase::Leg2Starting);
+        assert!(rig.l2.starts().is_empty());
+        assert!(
+            r.problem.as_deref().unwrap_or("").contains("payout_to"),
+            "{:?}",
+            r.problem
+        );
+        rig.l2.set_features(features());
+        rig.advance(60);
+        hub.tick().await;
+        let r = hub.route(&r.id).unwrap();
+        assert_eq!(r.phase, Phase::Leg2);
+        let starts = rig.l2.starts();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].payout_to.as_deref(), Some(PAY));
+        let id2 = r.legs[1].swap_id.clone().unwrap();
+        rig.l2.set_state(&id2, "Claimed", Some("swapped"));
+        hub.tick().await;
+        let r = hub.route(&r.id).unwrap();
+        assert_eq!(r.phase, Phase::Done);
+        assert!(r.reason.unwrap().contains("your payout address"));
+        assert!(!r.timeline.iter().any(|e| e.kind == "warning"));
     }
 
     #[tokio::test]
