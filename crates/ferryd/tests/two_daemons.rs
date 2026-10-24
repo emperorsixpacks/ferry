@@ -526,10 +526,20 @@ async fn happy_swap_over_http_with_restart() {
         .status_until(&w.z.url, |s| s["balances"]["btc_sat"] == 410_000 - 2_000)
         .await;
     assert_eq!(zs["balances"]["zec_shielded_zat"], 400_000_000);
-    w.status_until(&w.b.url, |s| {
-        s["balances"]["zec_shielded_zat"] == 100_000_000
-    })
-    .await;
+    let bs = w
+        .status_until(&w.b.url, |s| {
+            s["balances"]["zec_shielded_zat"] == 100_000_000
+        })
+        .await;
+    let offer = &bs["offer"];
+    assert_eq!(
+        (offer["fee_sat"].as_u64(), offer["t1_blocks"].as_u64()),
+        (Some(2_000), Some(u64::from(T1)))
+    );
+    assert_eq!(
+        (offer["t2_blocks"].as_u64(), offer["zec_confs"].as_u64()),
+        (Some(u64::from(T2)), Some(2))
+    );
 
     // A second swap is refused only while one is running; the SSE stream replays state.
     let mut sse = w
