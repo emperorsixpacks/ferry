@@ -7,6 +7,7 @@ members = [
     "crates/ferryd",
     "crates/ferry-zec",
     "crates/ferry-watchtower",
+    "crates/ferry-evm",
 ]
 exclude = ["spikes", "third_party", "vendor"]
 

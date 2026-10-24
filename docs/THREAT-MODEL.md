@@ -95,6 +95,20 @@ Z has ZEC and wants bitcoin. B has bitcoin and wants ZEC. B always locks first.
 - **Testnet only.** Ferry has run real swaps on test networks and in a full local test with real
   shielded notes. It has not been independently reviewed, and it has not run on mainnet.
 
+## USDC on Base (in development)
+
+A version that swaps shielded ZEC for USDC on Base is being built ([details](EVM.md)). The same
+protections apply. It differs from the Bitcoin version in three ways:
+
+- **Every step on Base is visible as a swap**, not only the abort paths. The lock, the "ready"
+  step and the claim or refund are public calls to the Ferry contract, with the USDC amount and
+  the deadlines. The Zcash side stays fully shielded, and there is still no link between the two
+  chains.
+- **The halves of the key are revealed publicly** rather than only to the other side. This is
+  safe: one half opens nothing, and nobody else can find the shared ZEC note.
+- **You also trust USDC's issuer**, which can freeze transfers, and Base's sequencer to include
+  transactions on time. Ferry leaves a margin for that before each deadline.
+
 ## How we checked
 
 - `cargo test --workspace`: unit tests, a two-daemon simulation of every outcome above, and

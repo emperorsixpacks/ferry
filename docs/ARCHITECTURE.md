@@ -9,11 +9,14 @@ ferry/
                              RPC, chain parameters (BTC or LTC: address encoding, dust, confirmations)
     ferry-zec/               joint Ironwood key (ak = ±(Z_p+B_p)), UFVK/UA, PCZT signer with raw ask,
                              wallet ops (drives zcash-devtool / zcash_client_* at devtool's pinned revs)
+    ferry-evm/               EVM leg (USDC on Base / anvil): FerryLock client, event watcher, share
+                             extraction, secp256k1 point -> Ethereum address (alloy)
     ferry-core/              swap session: params, messages, state machine, timelock policy (no I/O)
     ferryd/                  daemon + CLI: runs one party (role Z or B), HTTP API for peer + UI,
                              chain watchers, persistence (one JSON file per swap)
     ferry-watchtower/        keyless tower: broadcasts an offline party's presigned cancel/refund/punish
                              on time (HTTP upload, bitcoind polling; docs/WATCHTOWER.md)
+  contracts/                 Foundry: FerryLock (EVM counter-chain lock), MockUSDC, tests (docs/EVM.md)
   web/                       demo UI (two parties side by side + "what each chain sees")
   infra/                     docker: bitcoind regtest, litecoind regtest (infra/ltc), Zebra regtest (NU6.3 at 1), Zaino
   docs/                      PROTOCOL.md, ARCHITECTURE.md, THREAT-MODEL.md, LITECOIN.md, DEMO.md

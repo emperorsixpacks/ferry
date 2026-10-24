@@ -122,3 +122,10 @@ internal key, so cancel/refund/punish are script-path spends.
   or delegate its fully signed tx_cancel + tx_refund (B) or tx_cancel + tx_punish (Z) to a
   keyless watchtower ([WATCHTOWER.md](WATCHTOWER.md)). B's completed tx_refund reveals `b` to Z,
   so B's tower must not collude with Z.
+
+## Other counter-chains
+
+[EVM.md](EVM.md) describes the same construction with USDC on an EVM chain (Base) as the
+counter-asset. The `FerryLock` contract replaces the Taproot scripts, an on-chain `ready` by B
+takes the place of the redeem adaptor signature, and the shares are revealed in calldata, which
+the contract checks with the ecrecover scalar-multiplication trick.
