@@ -12,6 +12,7 @@ import { HowItWorks } from "./app/pages/HowItWorks";
 import { Landing } from "./app/pages/Landing";
 import { NearDetail } from "./app/pages/NearDetail";
 import { Privacy } from "./app/pages/Privacy";
+import { Ramp } from "./app/pages/Ramp";
 import { RouteDetail } from "./app/pages/RouteDetail";
 import { Safety } from "./app/pages/Safety";
 import { SwapDetail } from "./app/pages/SwapDetail";
@@ -37,6 +38,7 @@ function Root() {
   if (path === "/how-it-works") return <HowItWorks />;
   if (path === "/safety") return <Safety />;
   if (path === "/privacy") return <Privacy />;
+  if (path === "/ramp") return <Ramp />;
   if (path === "/inspect") return <App />;
   return <Landing />;
 }
