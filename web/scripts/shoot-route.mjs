@@ -7,8 +7,7 @@
 // `pnpm build` first): GET /api/pairs, a route started by partner names, URLs never forwarded or
 // shown, the read-only allowlist, one live route, and, while a route is between its swaps, a direct
 // sell refused on the pair it sells ZEC on (its ZEC waits there) but not on another pair.
-// Screenshots go to screenshots/app/route/ (SHOOT_OUT=dir to put them elsewhere; SHOOT_THEME=dark to
-// take them in dark mode).
+// Screenshots go to screenshots/app/route/ (SHOOT_OUT=dir to put them elsewhere).
 //
 // Ports (override with SHOOT_PORT_BASE): mock Z base+31, B base+32, router base+33, Vite base+71,
 // prod base+72; SHOOT_VITE_PORT and SHOOT_PROD_PORT set those two on their own.
@@ -95,7 +94,7 @@ async function until(id, pred, label, tries = 900) {
 const browser = await chromium.launch();
 const shots = [];
 async function page(width) {
-  const p = await browser.newPage({ viewport: { width, height: width < 500 ? 844 : 900 }, colorScheme: process.env.SHOOT_THEME === "dark" ? "dark" : "light" });
+  const p = await browser.newPage({ viewport: { width, height: width < 500 ? 844 : 900 } });
   p.on("console", (m) => m.type() === "error" && !/Failed to load resource|EventSource/.test(m.text()) && console.log(`[${width}]`, m.text()));
   return p;
 }

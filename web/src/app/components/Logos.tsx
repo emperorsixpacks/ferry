@@ -236,7 +236,7 @@ export function NearTokenLogo({ symbol, chain, size = 32, className }: { symbol:
   );
 }
 
-// NEAR Intents, as a small mark: an N on an ink tile (not its logo), so it follows the theme
+// NEAR Intents, as a small mark: an N on an ink tile (not its logo)
 export function NearMark({ size = 16, className }: { size?: number; className?: string }) {
   return (
     <svg viewBox="0 0 32 32" width={size} height={size} className={cn("shrink-0", className)} aria-hidden>

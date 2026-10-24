@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { CircleNotch } from "@phosphor-icons/react";
 
 // A QR code of `text`, drawn as one SVG path: black modules on a white tile with the quiet zone
-// scanners need, in both themes (an inverted code scans badly). qrcode-generator (MIT, no
+// scanners need (an inverted code scans badly). qrcode-generator (MIT, no
 // dependencies, ~20 KB minified, ~8 KB gzipped) is loaded the first time a code is shown, so it
 // stays out of the bundle every other page loads. Error correction M: a phone at arm's length.
 

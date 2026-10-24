@@ -1,4 +1,4 @@
-/* Ferry: a nautical chart of the crossing. Day chart in light mode, night chart in dark mode.
+/* Ferry: a nautical chart of the crossing.
    Land is buff, water is pale blue, tracks and the one signal are chart magenta. */
 
 :root {
@@ -22,42 +22,6 @@
 
   --ease: cubic-bezier(0.45, 0, 0.2, 1);
   color-scheme: light;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --ink: #dbe5eb;
-    --ink-2: #9aabb8;
-    --ink-3: #5b6f80;
-    --rule: #263a4b;
-    --paper: #0c1722;
-    --water: #11263a;
-    --land: #2a2b24;
-    --land-edge: #4d4a39;
-    --magenta: #e46ab6;
-    --magenta-wash: #34182b;
-    --abort: #e48d6c;
-    --abort-wash: #33201a;
-    --on-ink: #0c1722;
-    color-scheme: dark;
-  }
-}
-
-:root[data-theme="dark"] {
-  --ink: #dbe5eb;
-  --ink-2: #9aabb8;
-  --ink-3: #5b6f80;
-  --rule: #263a4b;
-  --paper: #0c1722;
-  --water: #11263a;
-  --land: #2a2b24;
-  --land-edge: #4d4a39;
-  --magenta: #e46ab6;
-  --magenta-wash: #34182b;
-  --abort: #e48d6c;
-  --abort-wash: #33201a;
-  --on-ink: #0c1722;
-  color-scheme: dark;
 }
 
 /* The inspector lives inside the app shell, so its base styles are scoped to its root rather

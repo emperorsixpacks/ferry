@@ -68,7 +68,7 @@ export function SwapWidget() {
         </button>
       }
     >
-      <span className={out ? "text-slate-900" : "text-slate-300 dark:text-slate-400"}>{out ? `≈ ${btcText(out)}` : "–"}</span>
+      <span className={out ? "text-slate-900" : "text-slate-300"}>{out ? `≈ ${btcText(out)}` : "–"}</span>
     </Box>
   );
   return (

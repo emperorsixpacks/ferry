@@ -84,7 +84,7 @@ function Hero() {
 
 function ProofSection() {
   return (
-    <section aria-labelledby="proof-title" className="border-t border-slate-100 bg-slate-50/70 dark:bg-white/40">
+    <section aria-labelledby="proof-title" className="border-t border-slate-100 bg-slate-50/70">
       <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6 sm:py-28">
         <h2 id="proof-title" data-reveal className={h2}>
           Private. Direct. Cross-chain.
@@ -160,7 +160,7 @@ function NetworksSection() {
 
 function How() {
   return (
-    <section id="how" aria-labelledby="how-title" className="scroll-mt-20 border-t border-slate-100 bg-slate-50/70 dark:bg-white/40">
+    <section id="how" aria-labelledby="how-title" className="scroll-mt-20 border-t border-slate-100 bg-slate-50/70">
       <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6 sm:py-28">
         <h2 id="how-title" data-reveal className={h2}>
           How it works

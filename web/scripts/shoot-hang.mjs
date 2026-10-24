@@ -8,7 +8,7 @@
 //   - a link to LTC opens the card on LTC within a few seconds, and it says "Partner offline"
 //   - once LTC's daemon answers again, the card and the picker are back to normal by themselves
 //   - when the main daemon (BTC) hangs, a fresh page opens the card on the next coin that answers (LTC)
-// Screenshots (the picker and the card, light and dark) into screenshots/app/hang/ (SHOOT_OUT=dir
+// Screenshots (the picker and the card) into screenshots/app/hang/ (SHOOT_OUT=dir
 // for elsewhere). `--dev` or `--prod` runs one server only.
 //
 // Ports (SHOOT_PORT_BASE, default 7520): mock Z base+1, B base+2, LTC base+3, USDC base+4, Vite base+5,
@@ -85,8 +85,8 @@ const shot = async (p, name) => {
   await sleep(400);
   await p.screenshot({ path: OUT + name + ".png" });
 };
-async function fresh(theme = "light") {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: theme });
+async function fresh() {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const p = await ctx.newPage();
   p.on("console", (m) => m.type() === "error" && !/Failed to load resource/.test(m.text()) && console.log("[page]", m.text()));
   // SHOOT_DEBUG=1: the page's requests still out, for pending(p)
@@ -184,20 +184,6 @@ async function run(name, BASE) {
   await p.context().close();
 }
 
-// dark mode: the picker and the card with LTC offline
-async function dark(BASE) {
-  await hang("ltc", true);
-  const p = await fresh("dark");
-  await cardIn(p, BASE + "/app?sell=zec&buy=ltc");
-  await p.waitForFunction(() => document.querySelector("[data-availability]")?.textContent === "Partner offline", null, { timeout: FEW_S + 2000 });
-  await shot(p, "card-ltc-offline-dark");
-  await openPicker(p);
-  await row(p, "LTC").filter({ hasText: "Partner offline" }).waitFor({ timeout: FEW_S });
-  await shot(p, "picker-ltc-offline-dark");
-  await p.context().close();
-  await hang("ltc", false);
-}
-
 try {
   if (only !== "prod") {
     // Vite builds its modules on the first load: not part of what is timed
@@ -205,7 +191,6 @@ try {
     await cardIn(warm, DEV + "/app");
     await warm.context().close();
     await run("dev", DEV);
-    await dark(DEV);
   }
   if (only !== "dev") await run("prod", PRD);
   console.log(`\nall checks passed; screenshots in ${OUT}`);

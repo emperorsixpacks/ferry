@@ -467,7 +467,7 @@ function LaneBox({ lane }: { lane: Lane }) {
   return (
     <section
       aria-label={`On ${ch.name}`}
-      className={cn("rounded-2xl border p-3.5", shielded ? "border-[#F4B728]/45 bg-[#FFFBF0] dark:border-[#F4B728]/35 dark:bg-[#F4B728]/[0.06]" : "border-slate-200 bg-slate-50/80")}
+      className={cn("rounded-2xl border p-3.5", shielded ? "border-[#F4B728]/45 bg-[#FFFBF0]" : "border-slate-200 bg-slate-50/80")}
     >
       <div className="flex items-center justify-between gap-2">
         <span className="flex items-center gap-2 text-[13px] font-semibold text-slate-900">
@@ -534,7 +534,7 @@ function AliceTag({ reveal = false }: { reveal?: boolean }) {
 function Secret() {
   return (
     <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-[#F4B728]/20 px-1.5 py-px text-[12px] font-medium text-slate-800">
-      <LockSimple size={11} weight="bold" className="text-[#A87A00] dark:text-[#F4B728]" aria-hidden />
+      <LockSimple size={11} weight="bold" className="text-[#A87A00]" aria-hidden />
       encrypted
     </span>
   );
@@ -647,7 +647,7 @@ const LIMITS: [string, string][] = [
 
 function Limits() {
   return (
-    <section aria-labelledby="pv-limits" className="mt-20 border-t border-slate-100 bg-slate-50/70 py-16 sm:mt-24 sm:py-20 dark:bg-white/40">
+    <section aria-labelledby="pv-limits" className="mt-20 border-t border-slate-100 bg-slate-50/70 py-16 sm:mt-24 sm:py-20">
       <div className={wrap}>
         <h2 id="pv-limits" className={h2}>
           What Ferry can't hide

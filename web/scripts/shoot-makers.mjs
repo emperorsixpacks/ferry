@@ -4,8 +4,7 @@
 // one. Firm prices (POST /api/quotes) replace a partner's indicative rate when it gives one. Then
 // the same flow through the production server (server/prod.mjs, needs `pnpm build` first):
 // GET /api/makers, POST /api/quotes, a swap started by maker name and by firm quote, a raw URL
-// refused, and the quote rate limit. SHOOT_OUT=dir puts the screenshots elsewhere, SHOOT_THEME=dark
-// takes them in dark mode.
+// refused, and the quote rate limit. SHOOT_OUT=dir puts the screenshots elsewhere.
 //
 // Several swaps at once: the card says whether the swap can start now, from both the partner and
 // the node it runs through, their slots and free funds for the amount ("Partner online · can take
@@ -80,7 +79,7 @@ const reset = () => post(`http://127.0.0.1:${Z}`, "/api/_mock/reset", {});
 const browser = await chromium.launch();
 const shots = [];
 async function page(width) {
-  const p = await browser.newPage({ viewport: { width, height: width < 500 ? 844 : 900 }, colorScheme: process.env.SHOOT_THEME === "dark" ? "dark" : "light" });
+  const p = await browser.newPage({ viewport: { width, height: width < 500 ? 844 : 900 } });
   p.on("console", (m) => m.type() === "error" && !/Failed to load resource/.test(m.text()) && console.log(`[${width}]`, m.text()));
   return p;
 }

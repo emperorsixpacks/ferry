@@ -378,7 +378,7 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
         aria-invalid={!!problem && valid}
         aria-describedby="swap-message"
         className={cn(
-          "h-12 w-full min-w-0 bg-transparent leading-none font-medium tracking-tight text-slate-900 tabular-nums placeholder:text-slate-300 dark:placeholder:text-slate-400 focus:outline-none focus-visible:outline-none",
+          "h-12 w-full min-w-0 bg-transparent leading-none font-medium tracking-tight text-slate-900 tabular-nums placeholder:text-slate-300 focus:outline-none focus-visible:outline-none",
           amountSize(amount),
         )}
       />
@@ -407,7 +407,7 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
       <output
         aria-live="polite"
         aria-label={buying ? `You pay ${ticker}` : `You get ${ticker}`}
-        className={cn("flex h-12 items-center truncate leading-none font-medium tracking-tight tabular-nums", amountSize(out ? btcText(out) : "0"), out ? "text-slate-900" : "text-slate-300 dark:text-slate-400")}
+        className={cn("flex h-12 items-center truncate leading-none font-medium tracking-tight tabular-nums", amountSize(out ? btcText(out) : "0"), out ? "text-slate-900" : "text-slate-300")}
       >
         {out ? btcText(out) : "0"}
       </output>

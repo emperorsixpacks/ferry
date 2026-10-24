@@ -7,8 +7,7 @@
 // Activity and Help. Then the production server (server/prod.mjs, needs `pnpm build` first) as a
 // public demo: quotes only, no NEAR swap starts, no payout_to from a browser, the rate limit; and with
 // FERRY_NEAR=1 on test-network nodes: still no swaps (NEAR Intents is mainnet only).
-// Screenshots go to screenshots/app/near/ (SHOOT_OUT=dir to put them elsewhere; SHOOT_THEME=dark to
-// take them in dark mode).
+// Screenshots go to screenshots/app/near/ (SHOOT_OUT=dir to put them elsewhere).
 //
 // Ports (override with SHOOT_PORT_BASE, default 7450): mock Z base+1, B base+2, 1Click base+3,
 // prod base+10 and base+11; Vite on SHOOT_VITE_PORT (5198).
@@ -108,7 +107,7 @@ async function idle() {
 const browser = await chromium.launch();
 const shots = [];
 async function page(width) {
-  const p = await browser.newPage({ viewport: { width, height: width < 500 ? 844 : 900 }, colorScheme: process.env.SHOOT_THEME === "dark" ? "dark" : "light" });
+  const p = await browser.newPage({ viewport: { width, height: width < 500 ? 844 : 900 } });
   p.on("console", (m) => m.type() === "error" && !/Failed to load resource|EventSource/.test(m.text()) && console.log(`[${width}]`, m.text()));
   return p;
 }

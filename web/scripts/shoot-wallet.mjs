@@ -1,4 +1,4 @@
-// `node scripts/shoot-wallet.mjs`: Ferry with your own wallets, at 1440 and 390, in light and dark,
+// `node scripts/shoot-wallet.mjs`: Ferry with your own wallets, at 1440 and 390,
 // against the node mock (its Z sells ZEC, its B buys it, a mock router, and a node for USDC on Base
 // Sepolia that only holds coins). On your own node (the Vite dev server):
 //   - "Receive to" under the Buy panel: your Ferry node by default; your own wallet's address,
@@ -27,8 +27,7 @@
 // one origin. With FERRY_OWN_NODE=1 it passes them for the node's own page only (a loopback Host, no
 // other site's Origin; PUBLIC_ORIGIN's other loopback name, http://localhost:<port>, is the node's
 // own page too).
-// Screenshots go to screenshots/app/wallet/ (SHOOT_OUT=dir to put them elsewhere); SHOOT_THEME=light
-// or dark takes one theme only.
+// Screenshots go to screenshots/app/wallet/ (SHOOT_OUT=dir to put them elsewhere).
 //
 // Ports (override with SHOOT_PORT_BASE, default 7600): mock Z base+41, B base+42, router base+43,
 // USDC node base+44, Vite base+45, prod as a public demo base+46, prod on an own node base+47.
@@ -41,7 +40,7 @@ import { mockMakersEnv } from "../mock/makers.mjs";
 const BASE = Number(process.env.SHOOT_PORT_BASE ?? 7600);
 const [Z, B, ROUTER, USDC, VITE, PUB, OWN] = [41, 42, 43, 44, 45, 46, 47].map((n) => BASE + n);
 const OUT = (process.env.SHOOT_OUT ?? new URL("../screenshots/app/wallet/", import.meta.url).pathname).replace(/\/?$/, "/");
-const THEMES = process.env.SHOOT_THEME === "dark" ? ["dark"] : process.env.SHOOT_THEME === "light" ? ["light"] : ["light", "dark"];
+const THEMES = ["light"];
 mkdirSync(OUT, { recursive: true });
 
 const env = {
@@ -228,7 +227,7 @@ for (const theme of THEMES) {
     await sleep(settle);
     for (const p of on) {
       const w = p.viewportSize().width;
-      const path = `${OUT}${name}-${w}${theme === "dark" ? "-dark" : ""}.png`;
+      const path = `${OUT}${name}-${w}.png`;
       await p.screenshot({ path });
       shots.push(path);
       const overflow = await p.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
@@ -600,7 +599,7 @@ for (const theme of THEMES) {
   check((await demo[0].getByRole("button", { name: /Add funds|Send to my wallet/ }).count()) === 0, t("public demo: /wallet shows balances and a note, no Add funds or Send"));
   for (const p of demo) {
     const w = p.viewportSize().width;
-    const path = `${OUT}21-public-demo-wallet-${w}${theme === "dark" ? "-dark" : ""}.png`;
+    const path = `${OUT}21-public-demo-wallet-${w}.png`;
     await sleep(500);
     await p.screenshot({ path });
     shots.push(path);

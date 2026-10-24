@@ -1,5 +1,5 @@
 // `pnpm shoot`: runs the mock and the UI, drives a happy swap, a Z stall (refund) and a B stall
-// (punish), and saves screenshots at 1440 and 390 wide, light and dark, into screenshots/.
+// (punish), and saves screenshots at 1440 and 390 wide into screenshots/.
 //
 // `pnpm shoot:real`: the same against running ferryd daemons (FERRY_Z_URL, FERRY_B_URL; the maker
 // URL defaults to FERRY_B_URL) instead of the mock, saving into screenshots/real/.
@@ -36,8 +36,6 @@ const browser = await chromium.launch();
 const views = [
   { tag: "1440", viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1, colorScheme: "light" },
   { tag: "390", viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, colorScheme: "light" },
-  { tag: "1440-dark", viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1, colorScheme: "dark" },
-  { tag: "390-dark", viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, colorScheme: "dark" },
 ];
 const pages = [];
 for (const v of views) {

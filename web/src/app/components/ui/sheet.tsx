@@ -67,7 +67,7 @@ export function Sheet({
   if (!open) return null;
   const body = (
     <div className={cn("fixed inset-0 z-50 flex items-end justify-center", anchored ? "sm:contents" : "sm:items-center sm:p-6")}>
-      <div className={cn("sheet-fade absolute inset-0 bg-slate-900/20 dark:bg-black/60", anchored && "sm:fixed sm:z-40 sm:bg-transparent sm:dark:bg-transparent")} onClick={onClose} aria-hidden />
+      <div className={cn("sheet-fade absolute inset-0 bg-slate-900/20", anchored && "sm:fixed sm:z-40 sm:bg-transparent")} onClick={onClose} aria-hidden />
       <div
         ref={panel}
         role="dialog"

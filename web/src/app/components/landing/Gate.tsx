@@ -1,5 +1,4 @@
 import { useEffect, useRef, type RefObject } from "react";
-import { currentTheme, onThemeChange, type Theme } from "../../lib/theme";
 import { Mark, type MarkId } from "./marks";
 import { useOnScreen, useReducedMotion } from "./motion";
 
@@ -13,26 +12,17 @@ import { useOnScreen, useReducedMotion } from "./motion";
 // hero is on screen and the tab is visible, at no more than 1.5 device pixels per CSS pixel.
 // `anchor` is an empty element the page places where the gate stands (below the text on wide
 // screens, above it on phones). Reduced motion: the same scene, still.
-//
-// It follows the theme (app/lib/theme.ts): every frame takes its colours from the palette below,
-// and a change of theme repaints at once, even when the scene is still. In dark mode the ink
-// lines are near-white on the dark canvas, the gate's face is the card colour and the shadows are
-// black; the gold and the coins stay as they are.
 
 type RGB = [number, number, number];
 interface Palette {
   ink: RGB; // the gate's hairlines and the faint field round it
   face: string; // the gate's face
   shadow: RGB; // under the gate and the coins
-  shade: number; // how strong those shadows are, as a multiple of light mode's
   ring: string; // the ciphertext round the gate
   trail: RGB; // behind each coin
   glyph: RGB; // the glyphs scattering out of the gate
 }
-const PALETTES: Record<Theme, Palette> = {
-  light: { ink: [24, 24, 27], face: "#fff", shadow: [24, 24, 27], shade: 1, ring: "#a1a1aa", trail: [161, 161, 170], glyph: [113, 113, 122] },
-  dark: { ink: [232, 233, 236], face: "#16171b", shadow: [0, 0, 0], shade: 2.6, ring: "#5f626b", trail: [104, 107, 116], glyph: [138, 141, 150] },
-};
+const pal: Palette = { ink: [24, 24, 27], face: "#fff", shadow: [24, 24, 27], ring: "#a1a1aa", trail: [161, 161, 170], glyph: [113, 113, 122] };
 const rgba = ([r, g, b]: RGB, a: number) => `rgba(${r},${g},${b},${a})`;
 // Zcash gold (#F4B728) appears only at the core: its glow, the emblem, and the pulse as a coin passes
 const GLYPHS = "░▒▓#%&@$01<>/=+*";
@@ -216,7 +206,6 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
     const frame = (dt: number) => {
       const g = s.geo;
       if (!g) return;
-      const pal = PALETTES[currentTheme()];
       s.t += dt;
       const { W, H, gx, gy, R } = g;
       ctx.setTransform(s.dpr, 0, 0, s.dpr, 0, 0);
@@ -266,7 +255,7 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
       // behind its face and come out from under it
       const cs = g.narrow ? 38 : 50;
       ctx.save();
-      ctx.shadowColor = rgba(pal.shadow, Math.min(1, 0.18 * pal.shade));
+      ctx.shadowColor = rgba(pal.shadow, 0.18);
       ctx.shadowBlur = 14;
       ctx.shadowOffsetY = 5;
       for (const h of heads) {
@@ -303,7 +292,7 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
       // the hexagon: the paper's colour, a soft shadow, an ink hairline (warming to gold as a coin
       // passes)
       ctx.save();
-      ctx.shadowColor = rgba(pal.shadow, Math.min(1, 0.16 * pal.shade));
+      ctx.shadowColor = rgba(pal.shadow, 0.16);
       ctx.shadowBlur = 36;
       ctx.shadowOffsetY = 14;
       hexPath(ctx, gx, gy, R);
@@ -420,12 +409,7 @@ export function Gate({ anchor }: { anchor: RefObject<HTMLElement> }) {
     ro.observe(box);
     // the gate's spot moves when the text above it settles (web fonts), without the hero resizing
     if (anchor.current) ro.observe(anchor.current);
-    // light or dark: repaint at once, whether the scene runs, stands still or waits off screen
-    const off = onThemeChange(redraw);
-    return () => {
-      ro.disconnect();
-      off();
-    };
+    return () => ro.disconnect();
   }, [reduced, anchor]);
 
   useEffect(() => {

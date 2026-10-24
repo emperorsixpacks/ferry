@@ -16,8 +16,7 @@
 // panel beside the card, empty and then full. Then the production server (server/prod.mjs, needs
 // `pnpm build` first) as a public demo: a coin-to-NEAR swap quotes only, a start is refused, and a
 // browser's payout_to never reaches the router; and one without a router.
-// Screenshots go to screenshots/app/any/ (SHOOT_OUT=dir to put them elsewhere; SHOOT_THEME=dark to
-// take them in dark mode).
+// Screenshots go to screenshots/app/any/ (SHOOT_OUT=dir to put them elsewhere).
 //
 // Ports (override with SHOOT_PORT_BASE, default 7600): mock Z base+81, B base+82, 1Click base+83,
 // router base+84, Z-as-LTC base+85, Vite base+91, prod base+92 (public demo) and base+93 (no router).
@@ -128,7 +127,7 @@ const near = (id) => `near:${id}`;
 const browser = await chromium.launch();
 const shots = [];
 async function page(width) {
-  const p = await browser.newPage({ viewport: { width, height: width < 500 ? 844 : 900 }, colorScheme: process.env.SHOOT_THEME === "dark" ? "dark" : "light" });
+  const p = await browser.newPage({ viewport: { width, height: width < 500 ? 844 : 900 } });
   p.on("console", (m) => m.type() === "error" && !/Failed to load resource|EventSource/.test(m.text()) && console.log(`[${width}]`, m.text()));
   p.on("pageerror", (e) => console.log(`[${width}] page error:`, e.message));
   return p;

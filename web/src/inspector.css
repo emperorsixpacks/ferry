@@ -33,34 +33,6 @@
   color-scheme: light;
 }
 
-/* dark mode (the `dark` class on <html>, index.css): the same parts on the app's dark canvas */
-.dark .insp {
-  --ink: #f2f2f4;
-  --ink-2: #9fa2aa;
-  --ink-3: #8a8d96;
-  --rule: #2c2e34;
-  --paper: #16171b;
-  --water: #1a1b20;
-  --land: #212328;
-  --land-edge: #3c3f46;
-  --magenta: #959dd6;
-  --magenta-wash: #1d1f2b;
-  --abort: #f87171;
-  --abort-wash: #2b1519;
-  --on-ink: #16171b;
-  --card: #16171b;
-  --card-ring: rgba(255, 255, 255, 0.09);
-  --btn: #f2f2f4;
-  --btn-hover: #e0e1e4;
-  --btn-off: #2c2e34;
-  --btn-off-ink: #8a8d96;
-  --hairline: #2c2e34;
-  --hairline-strong: #5f626b;
-  --shore: #e0e1e4;
-  --shore-ink: #16171b;
-  color-scheme: dark;
-}
-
 /* headings: SealPad's bold, tight Inter instead of the old italic serif */
 .insp .crossing-head h2,
 .insp .observer-head h2 {

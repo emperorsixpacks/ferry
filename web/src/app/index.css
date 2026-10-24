@@ -12,39 +12,20 @@
    Inter for text with tabular figures for amounts; JetBrains Mono only
    for addresses and transaction ids.
 
-   Dark mode is the same design on a near-black canvas. The `dark` class
-   on <html> turns it on: /theme.js sets it before the first paint (from
-   the choice remembered in localStorage, else the system's preference)
-   and app/lib/theme.ts keeps it in step after that. `dark:` variants
-   follow that class, not the media query.
-
-   The colours are tokens, so most of the app needs no `dark:` at all:
-   - The neutral ramp is a scale of contrast against the paper, and it
-     flips in dark mode. `white` is the paper (cards, sheets, menus),
-     slate-50 to 200 soft panels, tracks and hairlines, slate-400 to 600
-     secondary text, slate-900 the ink. In dark mode white is the dark
-     card surface and slate-900 near-white, so `bg-slate-900 text-white`,
-     the primary button, becomes a near-white button with dark text.
-     `canvas` is the page behind the cards: white as well in light mode,
-     a step darker than the cards in dark mode.
-   - The status tints (emerald for done, rose for failed) keep their hue:
-     their 50 to 300 steps become dark tints and borders, their 500 to
-     900 steps light text that reads on those tints and on the cards.
-   - The accent lightens, so focus rings and links keep their contrast.
-   What doesn't flip: Zcash gold (#F4B728), the coin and chain colours
-   inside their logos, `black`, and shadows. `dark:` is for the few places
-   where the flip would change a meaning (a dimming scrim stays dark; a
-   raised pill on a grey track stays lighter than the track).
+   The colours are tokens (the @theme block below). `white` is the paper
+   (cards, sheets, menus), slate-50 to 200 soft panels, tracks and
+   hairlines, slate-400 to 600 secondary text, slate-900 the ink, so
+   `bg-slate-900 text-white` is the primary button. `canvas` is the page
+   behind the cards. Zcash gold (#F4B728) and the coin and chain colours
+   inside their logos are fixed.
    ====================================================================== */
-@custom-variant dark (&:where(.dark, .dark *));
-
 @theme inline {
   --font-sans: "Inter Variable", "Inter", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
   --font-heading: "Inter Variable", "Inter", system-ui, sans-serif;
 }
 
-/* the light theme; .dark below redefines every one of these */
+/* the colour tokens */
 @theme {
   /* the one accent: focus rings and links */
   --color-accent-50: #f4f5fa;
@@ -90,72 +71,6 @@
   --color-ring: #5f69a8;
 }
 
-/* Dark: a deep neutral canvas, cards a step lighter, the panels inside them a step lighter again,
-   hairline borders, greys for secondary text and near-white ink. Every text step from slate-400
-   up reads at AA (4.5:1) on the cards, on slate-50 panels and on slate-100 chips. */
-.dark {
-  color-scheme: dark;
-
-  --color-accent-50: #1d1f2b;
-  --color-accent-100: #252839;
-  --color-accent-200: #343957;
-  --color-accent-300: #4b5384;
-  --color-accent-400: #6c75b0;
-  --color-accent-500: #959dd6;
-  --color-accent-600: #aab1e0;
-  --color-accent-700: #bcc2ea;
-  --color-accent-800: #d3d7f3;
-
-  --color-white: #16171b;
-  --color-slate-50: #1c1d22;
-  --color-slate-100: #222429;
-  --color-slate-200: #2c2e34;
-  --color-slate-300: #3c3f46;
-  --color-slate-400: #8a8d96;
-  --color-slate-500: #9fa2aa;
-  --color-slate-600: #b6b8bf;
-  --color-slate-700: #cbcdd2;
-  --color-slate-800: #e0e1e4;
-  --color-slate-900: #f2f2f4;
-
-  --color-canvas: #0e0f12;
-  --color-cloud: #1c1d22;
-  --color-surface-soft: #1c1d22;
-  --color-obsidian: #f2f2f4;
-
-  --color-background: #0e0f12;
-  --color-foreground: #f2f2f4;
-  --color-card: #16171b;
-  --color-card-foreground: #f2f2f4;
-  --color-primary: #f2f2f4;
-  --color-primary-foreground: #16171b;
-  --color-secondary: #222429;
-  --color-secondary-foreground: #f2f2f4;
-  --color-muted: #1c1d22;
-  --color-muted-foreground: #9fa2aa;
-  --color-destructive: #f87171;
-  --color-border: #2c2e34;
-  --color-input: #2c2e34;
-  --color-ring: #959dd6;
-
-  /* done: a dark green tint, light green text */
-  --color-emerald-50: #11261e;
-  --color-emerald-100: #163327;
-  --color-emerald-300: #2c6b52;
-  --color-emerald-500: #3ccf95;
-  --color-emerald-600: #4fd6a1;
-  --color-emerald-700: #74e0b5;
-  /* failed: a dark red tint, light red text */
-  --color-rose-50: #2b1519;
-  --color-rose-100: #3e1d24;
-  --color-rose-300: #8c3445;
-  --color-rose-500: #fb7185;
-  --color-rose-600: #fd8b9b;
-  --color-rose-700: #fda4af;
-  --color-rose-800: #fec2ca;
-  --color-rose-900: #ffe0e4;
-}
-
 @layer base {
   button,
   [role="button"] {
@@ -168,9 +83,6 @@
     @apply bg-canvas font-sans;
     color-scheme: light;
   }
-  html.dark {
-    color-scheme: dark;
-  }
   body {
     @apply bg-canvas text-slate-900 font-sans antialiased;
     font-feature-settings:
@@ -182,14 +94,6 @@
     outline: 2px solid var(--color-accent-500);
     outline-offset: 2px;
   }
-}
-
-/* while the theme switches, nothing fades between the two on its own transition */
-.theme-switching,
-.theme-switching *,
-.theme-switching *::before,
-.theme-switching *::after {
-  transition: none !important;
 }
 
 /* the token picker and swap settings: a bottom sheet on phones, a panel above sm */
