@@ -308,12 +308,16 @@ function Online() {
 }
 
 function Watchtower() {
-  const cant = ["move your coins anywhere else: everything it holds pays only you", "act early: Bitcoin itself enforces the deadlines"];
+  const cant = ["move your coins anywhere else: whatever it sends pays only you", "act early: the chain itself enforces the deadlines"];
   return (
     <Box label="A watchtower">
       <p className="text-slate-700">
         Once the swap's way back is signed, Ferry can hand a watchtower your signed call-off and your refund (bitcoin side) or penalty (ZEC side). It holds no
-        keys. It watches the chain and sends each one on time, even with your machine off.
+        keys. It watches the chain and sends each one on time, even with your machine off. Litecoin works the same way.
+      </p>
+      <p className="mt-2 text-slate-700">
+        For USDC there is nothing to sign in advance: the tower calls the swap contract's refund or penalty itself and pays the fee from its own account. The
+        contract pays only the two of you, whoever calls.
       </p>
       <ul className="mt-3 space-y-2">
         {cant.map((c) => (
@@ -324,14 +328,15 @@ function Watchtower() {
         ))}
         <li className="flex gap-2 text-slate-700">
           <Warning size={16} className="mt-0.5 shrink-0 text-slate-400" />
-          At worst it fails to act, and you are back to staying online yourself
+          At worst it fails to act (for USDC, also if it runs out of fee money), and you are back to staying online yourself
         </li>
       </ul>
       <div className="mt-4 rounded border border-brand-300 bg-brand-50/40 p-3">
-        <Label>If you hold the bitcoin: only your own tower</Label>
+        <Label>If you hold the bitcoin, litecoin or USDC: only your own tower</Label>
         <p className="mt-1 text-slate-700">
-          Your refund reveals your half of the shared ZEC key. A tower that passed it to the other side early could let them take both coins. Ferry won't arm
-          a tower for the bitcoin side unless you mark it as your own. The ZEC side can use any tower: its penalty reveals nothing.
+          Your refund reveals your half of the shared ZEC key, and for USDC the tower holds that half itself, since the contract's refund needs it. A tower
+          that passed it to the other side early could let them take both coins. Ferry won't arm a tower for your side unless you mark it as your own. The ZEC
+          side can use any tower: its penalty reveals nothing.
         </p>
       </div>
     </Box>

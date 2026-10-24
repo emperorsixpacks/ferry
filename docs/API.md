@@ -163,8 +163,9 @@ Start a swap as taker against a maker.
 ```
 
 `watchtower` is our package at a [watchtower](WATCHTOWER.md) (`ferryd --watchtower URL`). It is
-`pending` until tx_cancel is co-signed and the upload succeeds (failed uploads retry every 10 s),
-then `armed`, with a `watchtower_armed` timeline entry. It is `refused` when the tower rejected the
+`pending` until tx_cancel is co-signed (with `--counter evm`: until the FerryLock lock is on
+chain) and the upload succeeds (failed uploads retry every 10 s), then `armed`, with a
+`watchtower_armed` timeline entry. It is `refused` when the tower rejected the
 package, or when B runs without `--watchtower-own`; `note` says why, and the timeline has a
 `watchtower_refused` entry.
 

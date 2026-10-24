@@ -98,6 +98,16 @@ other RPC call is identical on litecoind.
   litecoind regtest: container `ferry-litecoind`, RPC `127.0.0.1:19643`, MWEB activated first.
 - **UI.** `web/src/format.ts` `coin()` holds the daemon's coin (set from `/api/status`); every
   BTC/Bitcoin/sat label in the app and the inspector reads from it.
+- **Watchtower.** `ferry-watchtower --chain ltc` follows litecoind. Packages carry `"coin": "ltc"`
+  and their payout addresses in Litecoin's encoding, and a tower refuses a package for the other
+  coin. Since Litecoin Core 0.21 has no descriptor wallets, the tower watches the swap through a
+  blank legacy watch-only wallet (`importmulti`), which also works without `-txindex`.
+  `ferryd --chain ltc --watchtower …` arms it with the Bitcoin rules unchanged: B only with
+  `--watchtower-own`, and no redeem adaptor once the ZEC lock note is spent.
+  `CHAIN=ltc infra/demo-watchtower.sh run` plays the refund and the punish with the parties killed
+  (litecoind regtest with MWEB, no `-txindex`), and `FERRY_CHAIN=ltc cargo test -p
+  ferry-watchtower --test regtest -- --ignored --test-threads=1` runs the tower's regtest tests
+  against litecoind. Details in [WATCHTOWER.md](WATCHTOWER.md#litecoin).
 
 Wire note: the payout addresses inside `Setup` messages stay in rust-bitcoin's text form
 (`bcrt1…`) for either coin. They are typed scriptPubKeys between two Ferry daemons. Litecoin

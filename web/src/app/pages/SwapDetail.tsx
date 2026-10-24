@@ -64,7 +64,9 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
               : coin().kind === "evm"
                 ? phase === "unwinding"
                   ? `The swap didn't finish in time, so it was called off. From here the FerryLock contract on ${coin().name} only pays back.`
-                  : `The FerryLock contract on ${coin().name} enforces both ways back and their deadlines. Keep this daemon running until the swap is done.`
+                  : swap.watchtower?.status === "armed"
+                    ? `The FerryLock contract on ${coin().name} enforces both ways back and their deadlines. A watchtower will call them on time even if this daemon goes offline.`
+                    : `The FerryLock contract on ${coin().name} enforces both ways back and their deadlines. Keep this daemon running until the swap is done.`
                 : phase === "unwinding"
                   ? "The swap didn't finish in time, so it was called off. The ways back were signed before anything was locked."
                   : swap.watchtower?.status === "armed"

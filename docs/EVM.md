@@ -85,6 +85,33 @@ Abort paths: if B never signs Ready, or Z never claims, then from t1 B refunds a
 and Z reclaims its ZEC. If B stays silent until t2, anyone can call `punish` and the tokens go to
 Z. As with Bitcoin, Z's ZEC then stays locked, and going quiet costs B.
 
+## Watchtower
+
+A party that can't stay online until its deadline can arm a watchtower, as on Bitcoin
+([WATCHTOWER.md](WATCHTOWER.md#usdc-on-evm-ferrylock)): `ferry-watchtower --counter evm` on the
+tower's side, and the usual `--watchtower` flags on ferryd. Once the lock is on chain, ferryd
+uploads a package, and the tower calls the contract when the owner's deadline comes, paying the
+gas from its own account. FerryLock pays the swap's own `refunder` or `claimer`, whoever calls.
+
+- **Z's package is keyless.** Anyone may call `punish` from t2, so Z hands over only the swap id
+  and its terms, and can use any tower.
+- **B's package carries `b`.** `refund` needs it. That publishes `b`, which is exactly what lets Z
+  reclaim its ZEC, so a tower that passed `b` to Z early (or sent a refund that reverts before
+  t1) would let Z take its ZEC back while it can still claim the tokens. B therefore arms only a
+  tower marked as its own (`--watchtower-own`), the same rule as for B's completed Bitcoin refund,
+  and never signs Ready once the ZEC lock note is spent, so an early leak can't cost B the tokens
+  too.
+- **The tower keeps the daemon's timing rules**, judged by the latest block's timestamp: refund
+  only in [t1, t2 − Δ) and only from a node that is not lagging the clock, punish only from t2,
+  nothing once the swap is claimed, refunded or punished. It checks the package against the chain
+  (FerryLock's code, the exact terms, the payee is the owner) and simulates every call first.
+- **Limits.** The tower needs a little ETH; without it, it can't act. It sees the swap's terms
+  (public once locked) and B's `b` (public once refunded), nothing about the ZEC side. On Base, it
+  depends on the sequencer like any sender, which is what the Δ margins are for.
+
+`CHAIN=evm infra/demo-watchtower.sh run` plays it on anvil: B is killed after locking and its tower
+refunds at t1; then Z is killed after locking ZEC and its tower punishes at t2.
+
 ## Design review: what changed from the first proposal, and why
 
 The proposal was sound in outline. These are the points where it changed:
@@ -219,6 +246,8 @@ is the real USDC: a malicious token could block Z's claim alone.
     - `--evm-token-symbol`, `--evm-token-decimals`.
     - `--evm-t1-secs` (proposal to t1), `--evm-refund-secs` (t2 − t1), `--evm-delta-secs`.
     - `--evm-lock-confs`, `--evm-max-tip`, `--evm-log-chunk`.
+    - `--watchtower`, `--watchtower-token-file`, `--watchtower-own`, as on Bitcoin (see
+      [Watchtower](#watchtower)).
   - `--maker-offer RATE:MIN:MAX` gives the rate in token base units per ZEC. The price feed
     works with `--maker-price-pair ZEC/USDC`.
   - The views keep the Bitcoin shape: counter amounts sit in `btc_sat` as token base units, and
@@ -238,8 +267,6 @@ Gas (forge gas report): lock about 273k; claim about 75k, or up to 109k with a t
 
 ## Follow-ups
 
-- **Watchtower.** Anyone may call `punish`, so a keyless EVM tower for Z is simple. A tower for
-  B would need `b`.
 - **Base Sepolia.** No run there yet: the swap needs a funded deployer and test USDC. Deploy with
   `forge script script/Deploy.s.sol --rpc-url https://sepolia.base.org --broadcast`, then run
   both daemons with the deployed address and `--evm-token 0x036C…CF7e`.
