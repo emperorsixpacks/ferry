@@ -1769,8 +1769,14 @@ async fn bump_stuck_refund_is_packaged_inside_its_window() {
     let mut w = World::start_full(4, Role::B, &["--bump", "on"], &[]).await;
     w.rpc.generate_to_address(140, &w.miner).await.unwrap();
     let id = w.start_swap(50_000_000).await;
-    w.run_until(&id, 700, 20, |z, _| state(z) == "ZecLocked")
-        .await;
+    // Z is stalled only once its ZEC lock has really gone out: the state reads ZecLocked as soon
+    // as the lock is queued, and a Z stalled before it is sent has nothing to reclaim later (it
+    // would end Refunded, not ZecReclaimed). One run in about sixteen ended that way; the cause
+    // is likely this, but that run was not captured.
+    w.run_until(&id, 700, 20, |z, _| {
+        state(z) == "ZecLocked" && kinds(z).contains("zec_lock_broadcast")
+    })
+    .await;
     let (code, body) = w
         .post(
             &w.z.url,
@@ -1795,7 +1801,13 @@ async fn bump_stuck_refund_is_packaged_inside_its_window() {
             z["outcome"] == "refunded" && b["outcome"] == "refunded"
         })
         .await;
-    assert_eq!((state(&z), state(&b)), ("ZecReclaimed", "Refunded"));
+    assert_eq!(
+        (state(&z), state(&b)),
+        ("ZecReclaimed", "Refunded"),
+        "Z: {}\nB: {}",
+        kinds(&z),
+        kinds(&b)
+    );
     let all = bumps(&b);
     for e in &all {
         println!("bump: {}", e["label"]);
