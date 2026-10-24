@@ -59,10 +59,18 @@ pub fn sign_ready(
     contract: Address,
     id: B256,
 ) -> [u8; 65] {
+    sign_ready_digest(signer, &ready_digest(chain_id, contract, id))
+}
+
+/// Sign an already computed [`ready_digest`] (low-s, v = 27/28).
+#[cfg(feature = "client")]
+pub fn sign_ready_digest(
+    signer: &alloy::signers::local::PrivateKeySigner,
+    digest: &B256,
+) -> [u8; 65] {
     use alloy::signers::SignerSync;
-    let digest = ready_digest(chain_id, contract, id);
     let sig = signer
-        .sign_hash_sync(&digest)
+        .sign_hash_sync(digest)
         .expect("signing a 32-byte digest with a local key cannot fail");
     let sig = sig.normalize_s().unwrap_or(sig);
     sig.as_bytes()

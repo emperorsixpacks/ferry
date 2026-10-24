@@ -2076,6 +2076,7 @@ dependencies = [
  "blake2b_simd",
  "ferry-btc",
  "ferry-dleq",
+ "ferry-evm",
  "hex",
  "rand_core 0.6.4",
  "reddsa",

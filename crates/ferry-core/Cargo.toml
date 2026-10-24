@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 ferry-dleq.workspace = true
 ferry-btc.workspace = true
+# EVM counter-chain: addresses, swap ids, the EIP-712 ready digest (no RPC client).
+ferry-evm = { path = "../ferry-evm", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -19,6 +21,7 @@ rand_core.workspace = true
 blake2b_simd = "1"
 
 [dev-dependencies]
+ferry-evm = { path = "../ferry-evm" }
 ferry-btc = { path = "../ferry-btc", features = ["rpc"] }
 tokio.workspace = true
 reddsa = "=0.6.1"

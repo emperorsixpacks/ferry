@@ -27,11 +27,13 @@ pub use address::{point_address, point_address_sec1, scalar_address, verify_shar
 pub use ready::{ready_digest, ready_signer, swap_id};
 
 #[cfg(feature = "client")]
+pub use alloy::signers::local::PrivateKeySigner;
+#[cfg(feature = "client")]
 pub use client::{EvmClient, OnChainSwap, SwapState, TxInfo};
 #[cfg(feature = "client")]
 pub use events::{revealed_in_calldata, Revealed, SwapEvent, SwapEventKind, SwapWatcher};
 #[cfg(feature = "client")]
-pub use ready::sign_ready;
+pub use ready::{sign_ready, sign_ready_digest};
 
 pub use alloy::primitives::{Address, B256, U256};
 
