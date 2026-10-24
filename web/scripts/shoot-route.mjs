@@ -106,7 +106,8 @@ const noOverflow = async (p, what) => {
   const o = await p.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   check(o <= 0, `no horizontal scroll at 390: ${what} (${o}px)`);
 };
-const zecPill = (p) => p.getByRole("button", { name: /Swap another coin privately/ });
+// buying ZEC (?dir=buy), shielded ZEC is on the Buy pill
+const zecPill = (p) => p.getByRole("button", { name: /^You get shielded ZEC\. Choose another coin/ });
 const settle = () => sleep(500);
 
 // ------------------------------------------------------------------------------ the card
@@ -122,13 +123,14 @@ await listbox.waitFor();
 const options = await listbox.getByRole("option").evaluateAll((els) => els.map((e) => [e.textContent, e.getAttribute("aria-disabled")]));
 const enabled = options.filter(([, off]) => off === "false").map(([t]) => t);
 check(/^ZEC/.test(options[0][0]) && options[0][1] === "false", `ZEC is on top of the picker (${options[0][0]})`);
-check(enabled.length === 3 && enabled.some((t) => /USD Coin · Base · privately/.test(t)) && enabled.some((t) => /Litecoin · privately/.test(t)), `from BTC, USDC on Base and LTC can be reached privately (${enabled.length} enabled)`);
-check(options.some(([t, off]) => /BTC/.test(t) && /already what you sell/.test(t) && off === "true"), "BTC itself is listed, dimmed");
+check(enabled.length === 4 && enabled.some((t) => /USD Coin · Base · privately/.test(t)) && enabled.some((t) => /Litecoin · privately/.test(t)), `from BTC, USDC on Base and LTC can be reached privately (${enabled.length} enabled: ZEC, BTC and those two)`);
+check(options.some(([t, off]) => /^BTC/.test(t) && /switches the two sides/.test(t) && off === "false"), "BTC itself is listed: picking it swaps the two sides");
 await settle();
 await shot(desk, "01-picker-1440");
 await listbox.getByRole("option", { name: /USD Coin · Base · privately/ }).click();
 await desk.getByRole("button", { name: "Swap privately" }).waitFor();
-await text(desk, "via shielded ZEC · two swaps · about 35–75 min");
+// the path line: Ferry → shielded ZEC → Ferry, private, the default for two coins
+await text(desk, "· private · about 35–75 min");
 await desk.waitForFunction(() => /1 BTC ≈ [\d.]+ USDC · at least [\d.]+ USDC/.test(document.body.innerText), null, { timeout: 15_000 });
 const amount = await desk.locator("input[inputmode=decimal]").inputValue();
 check(amount === "0.0041", `the card starts at what about 1 ZEC costs, rounded down (${amount})`);
@@ -162,7 +164,7 @@ await text(desk, "1 BTC ≈ ");
 // ZEC takes the card back to a plain swap: on the Sell side it would sell ZEC for USDC, which this
 // server doesn't do; on the Buy side it buys ZEC with the BTC
 await desk.getByRole("button", { name: /You sell BTC/ }).click();
-check((await desk.getByRole("listbox", { name: "Tokens" }).getByRole("option", { name: /^ZEC/ }).getAttribute("aria-disabled")) === "true", "Sell ZEC for USDC isn't offered (no Ferry node sells ZEC for USDC here)");
+check(/not with USDC here/.test(await desk.getByRole("listbox", { name: "Tokens" }).getByRole("option", { name: /^ZEC/ }).textContent()), "Sell ZEC for USDC: the picker says it isn't available here (no Ferry node sells ZEC for USDC here)");
 await desk.keyboard.press("Escape");
 await desk.getByRole("button", { name: /You get USDC/ }).click();
 await desk.getByRole("listbox", { name: "Tokens" }).getByRole("option", { name: /^ZEC/ }).click();
@@ -220,7 +222,7 @@ await desk.getByRole("button", { name: /^Settings: privacy pause/ }).click();
 await desk.getByRole("radio", { name: /^Off/ }).click();
 await desk.keyboard.press("Escape");
 await desk.locator("input[inputmode=decimal]").fill("0.002");
-await text(desk, "via shielded ZEC · two swaps · about 30–45 min");
+await text(desk, "· private · about 30–45 min");
 await desk.getByRole("button", { name: "Swap privately" }).click();
 await text(desk, "You turned the pause off");
 await desk.getByRole("dialog", { name: "Swap privately" }).getByRole("button", { name: "Start private swap" }).click();
@@ -282,7 +284,11 @@ await plain.route("**/api/pairs", async (r) => {
 await plain.addInitScript(() => localStorage.setItem("ferry.route", "btc>usdc-base"));
 await plain.goto(DEV + "/app?dir=buy");
 await text(plain, "1 ZEC = ");
-check((await zecPill(plain).count()) === 0 && (await plain.getByRole("button", { name: "Swap privately" }).count()) === 0, "without a router: no ZEC picker and no private swap, even one remembered");
+check((await plain.getByRole("button", { name: "Swap privately" }).count()) === 0, "without a router: no private swap, even one remembered");
+await zecPill(plain).click();
+const noRouter = await plain.getByRole("listbox", { name: "Tokens" }).getByRole("option").evaluateAll((els) => els.filter((e) => e.getAttribute("aria-disabled") === "false").map((e) => e.textContent));
+check(noRouter.length === 2 && /^ZEC/.test(noRouter[0]) && /^BTC/.test(noRouter[1]), `without a router: the picker offers ZEC and BTC only (${noRouter.length})`);
+await plain.keyboard.press("Escape");
 await plain.goto(DEV + "/app/activity");
 await text(plain, "Activity");
 await sleep(800);

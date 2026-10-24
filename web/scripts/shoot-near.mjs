@@ -124,7 +124,8 @@ const noOverflow = async (p, what) => {
 const settle = () => sleep(500);
 const SOL = "7dKbmvKfvwZjJ1Y2NYCQKsEXATBMVvUSSbYmdbHxQk5i";
 const SOL_ID = "nep141:sol.omft.near";
-const coinPill = (p) => p.getByRole("button", { name: /Choose another coin/ });
+// the Buy pill of a card selling ZEC
+const coinPill = (p) => p.getByRole("button", { name: /^You get .*Choose another coin/ });
 const nearList = (p) => p.getByRole("listbox", { name: "More via NEAR Intents" });
 
 // ------------------------------------------------------------------------------ the picker
@@ -137,7 +138,7 @@ await coinPill(desk).click();
 await nearList(desk).waitFor();
 const own = await desk.getByRole("listbox", { name: "Tokens" }).getByRole("option").allTextContents();
 const dimmed = await desk.getByRole("listbox", { name: "Not available here" }).getByRole("option").count();
-check(own.length === 1 && /^BTC/.test(own[0]) && own.length + dimmed === 10, `Ferry's own coins stay first (BTC here), and the ones it can't swap here are listed after NEAR Intents' (${own.length} + ${dimmed})`);
+check(own.length === 2 && /^ZEC/.test(own[0]) && /^BTC/.test(own[1]) && own.length + dimmed === 11, `shielded ZEC and Ferry's own coins stay first (BTC here), and the ones it can't swap here are listed after NEAR Intents' (${own.length} + ${dimmed})`);
 const order = await desk.evaluate(() => [...document.querySelectorAll('[role="listbox"]')].map((l) => l.getAttribute("aria-label")));
 check(order.join("|") === "Tokens|More via NEAR Intents|Not available here", `the picker's order: Ferry's coins, NEAR Intents', then what isn't available here (${order.join(", ")})`);
 const nearRows = await nearList(desk).getByRole("option").count();
@@ -176,7 +177,7 @@ const q = await (await post(DEV, "/api/near/quote", { direction: "sell", zec_zat
 check(q.via === "btc" && q.maker === "Kestrel" && q.near.verified, `the quote goes through the best Ferry partner for BTC, then NEAR Intents, signature checked (${q.maker})`);
 const out = await desk.locator("output").textContent();
 check(Math.abs(Number(out.replace("≈", "")) / (Number(q.near.amount_out) / 1e9) - 1) < 1e-3, `the card shows what NEAR Intents' quote says (${out} SOL)`);
-check(await desk.getByText("Your ZEC stays shielded. The NEAR Intents part is public, and you trust NEAR Intents for it.").isVisible(), "one plain line says what's private and what isn't");
+check(await desk.getByText("Your ZEC stays shielded and never goes to NEAR Intents. The NEAR Intents part is public, and you trust NEAR Intents for it.").isVisible(), "one plain line says what's private and what isn't");
 await settle();
 await shot(desk, "02-sell-quote-1440");
 await desk.getByRole("button", { name: /^Settings: the route/ }).click();
