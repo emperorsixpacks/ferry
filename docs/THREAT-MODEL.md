@@ -98,8 +98,8 @@ Z has ZEC and wants bitcoin. B has bitcoin and wants ZEC. B always locks first.
 
 ## USDC on Base
 
-Ferry can also swap shielded ZEC for USDC on Base ([details](EVM.md)); it has run locally and is
-not yet on a public network. The same protections apply. It differs from the Bitcoin version in
+Ferry can also swap shielded ZEC for USDC on Base ([details](EVM.md)); it has run locally and on
+Base Sepolia with real Zcash testnet notes ([log](evidence/evm-base-sepolia-live-2026-10-20.txt)). The same protections apply. It differs from the Bitcoin version in
 four ways:
 
 - **Every step on Base is visible as a swap**, not only the abort paths. The lock and the claim

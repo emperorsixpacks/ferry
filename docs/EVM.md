@@ -481,5 +481,10 @@ commands at the fork with
 
 ## Follow-ups
 
-- **Base Sepolia.** The setup is scripted and rehearsed on a fork (above). A run on the real
-  network waits for the accounts to be funded.
+- **Base Sepolia.** Done: a live swap on 2026-10-20, 0.05 TAZ for 2 USDC with real Zcash
+  testnet notes and Circle's test USDC, settled in about 7 minutes
+  ([log](evidence/evm-base-sepolia-live-2026-10-20.txt); FerryLock
+  [0x74b7…65Ef](https://sepolia.basescan.org/address/0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef),
+  [lock](https://sepolia.basescan.org/tx/0xeac4a050a97702fbca0fb1cf8ad8d4f965549e0612c62e0d85d233182fa926bb),
+  [claim](https://sepolia.basescan.org/tx/0xde25c161c7e9b978de9aed580d12b0530813a460dd543124fbfc345978996aad)).
+  Refund and punish ran on the fork, not yet live.
