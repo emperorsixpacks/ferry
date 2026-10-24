@@ -15,8 +15,9 @@
 # compose 2.40.3, 8 GB and 10 CPUs for Docker; partly on battery, on a slow and dropping network.
 # Code: this branch (worktree-agent-a671a2a06215e8cec) with master merged. Swaps 1-2: master
 # c18e053 (several swaps at once). Swaps 3-4: master fa618c2 (its review fixes) plus this branch's
-# a0b5460 and 579a389. Swaps 5-7, the final code: master 2cd42a8 (finished swaps settle; reads don't
-# wait for a daemon's round) merged in.
+# a0b5460 and 579a389. Swaps 5-7: master 2cd42a8 (finished swaps settle; reads don't wait for a
+# daemon's round) merged in. Swap 8 and the final checks, the final code: master 6bab275 (reads give
+# up after 10 s, a taken firm quote leaves the cache, the availability line) merged in.
 # Settings (infra/deploy/.env, no secrets): COMPOSE_PROFILES=ltc,usdc-base,weth-base;
 # BUY_ZEC=btc,ltc,usdc-base,weth-base (visitors may also buy ZEC); MAX_SWAPS empty (ferryd's
 # default, 4); the defaults for rates and sizes (40 USDC and 0.012 WETH per ZEC, 0.01-0.25 ZEC)
@@ -535,14 +536,107 @@ ZEC/WETH  base-sepolia (chain 84532): block 48464909 via https://sepolia.base.or
 0xe99e8996f41abb8935ca52184225d35918424f33e82cab8c0f2999ea24df7d16  status 1  block 48463774  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
 0xf8ec08cf74020a33352125e5f826f77da600a22049f61367b45896f4339d5d6f  status 1  block 48465256  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
 0xfcb0d3e145c909af81cd082c15682b0a282d2f53c8671f7d62c2b696aa715070  status 1  block 48462752  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0x0a4b9a78f6ed2ee0bf6530ea578e6bde1be67df809100e8994a56687a5b585d7  status 1  block 48470394  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0xa16d3c69e47a3c1e85a8669a5f12c78e99f6be8247dc4b0a8eda46382f1eb318  status 1  block 48471323  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0xec70b25d9431c0eae1f5e532701e11c335e709c641db3e9573000464a793f1af  status 1  block 48469892  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0xfa82f88a068b78fb262cd39cb5a07fb56ffd9bd33de1ca0f08bd33fc32c031ea  status 1  block 48470066  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+
+
+## Final checks, after master 6bab275 (the web fixes: reads give up after 10 s, a taken firm quote
+## leaves the cache, the availability line) was merged and rebuilt; DEMO_RATE_PER_HOUR back to 3
+# Two starts on ZEC/WETH, 0.01 ZEC each, 14 s apart, each with one press:
+#   20:50:20 tab A presses Sell ZEC   -> POST /daemon/weth-base/api/swaps 201, swap 0ef45fe6 (8.4 s)
+#   20:50:34 tab B presses Sell ZEC   -> POST /daemon/weth-base/api/swaps 201, swap a24bd7b1 (52.3 s:
+#            A had used the cached quote, so the server got a fresh one; one request, no refusal)
+#   Both finished, both sides swapped (8a, 8b below); their 4 Base Sepolia transactions: status 1.
+# The availability line on the card (ZEC/WETH, 0.01 ZEC):
+#   before any swap:           Partner online · can take your swap now
+#   with A's swap running:     Partner online · can take your swap now
+#   with A's and B's running:  Partner online · can take your swap now
+#   (true each time: the maker had free slots and funds, and the taker a free note for 0.01 ZEC)
+# One pair that hangs: both ZEC/USDC daemons frozen with `docker pause` (they accept connections
+# and never answer), then a fresh /app:
+#   20:52:12 card rendered 1.2 s after opening /app; the token picker: "BTC 0.0041 BTC per ZEC |
+#            LTC 1 LTC per ZEC | USDC · Base · Partner offline | WETH 0.012 WETH per ZEC"; picking
+#            USDC: "Partner offline", "No partner is buying ZEC for USDC right now. Try again in a
+#            minute."
+#   20:52:29 after `docker unpause`: card rendered 0.4 s after opening /app; USDC "40 USDC per ZEC",
+#            "Demo maker (USDC) ... Partner online".
+# (Before 6bab275, with those daemons hanging, /app never showed the card at all.)
+
+
+## 8a. After 6bab275: A, one press
+# swap 0ef45fe68b225c5092b189c55775a7afed87d7b83b5748edf0cf3870bc35837b, sell through the swap card, 0.01 ZEC; started 20:50:20 UTC (the click)
+  20:50:27 B  Received Z's Propose: 0.01 ZEC for 0.00012 WETH
+  20:50:27 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log
+  20:50:27 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  20:50:27 B  Sent Accept with B's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  20:50:28 Z  Sent Propose to B: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  20:50:28 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log. Derived the joint Ironwood address
+  20:50:28 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  20:50:50 B  Locked 0.00012 WETH in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0xec70b25d9431c0eae1f5e532701e11c335e709c641db3e9573000464a793f1af
+  20:50:52 Z  FerryLock holds 0.00012 WETH for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  20:51:02 B  The lock is confirmed. Waiting for Z's ZEC
+  20:51:26 Z  Sent 0.01 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx 2498c59a125923cab32a53a0e3b28c788458670bce9b38a9a4b36fba52d74ee1
+  20:52:06 B  Found the lock note at the joint address with the shared viewing key
+  20:52:22 B  Lock note has 3 confirmations and holds 0.01 ZEC
+  20:52:22 B  Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+  20:52:22 Z  Received B's Ready(id) signature and checked it recovers to B's account
+  20:52:28 Z  Claimed 0.00012 WETH from FerryLock with B's Ready signature. The claim publishes z in its calldata
+               Base tx  https://sepolia.basescan.org/tx/0x0a4b9a78f6ed2ee0bf6530ea578e6bde1be67df809100e8994a56687a5b585d7
+  20:52:32 Z  Swap complete. 0.00012 WETH is at Z's address
+  20:52:36 B  Saw Z's claim on FerryLock: z is now public
+  20:52:36 B  Read z from Z's claim (calldata and event) and checked it against Z's points. B can now spend the joint Ironwood note
+  20:52:36 B  Waiting 6s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund
+  20:55:22 B  Swept the joint note to B's own shielded address, signing with ask = σ(z + b)
+               Zcash tx d466165b873ff78cb753b9c9f30c3dbe748e3ab7b72c12653bf62c77d49af704
+  20:57:42 B  Swap complete. B holds 0.01 ZEC in its own Ironwood notes
+# outcome: Z swapped, B swapped; amounts {"zec_zat": 1000000, "btc_sat": 120000000000000}
+# from the click: counter-coin lock seen by Z 0 min 32 s; ZEC lock sent 1 min 06 s; Z's claim 2 min 08 s; B's sweep 5 min 02 s; both done 7 min 25 s
+
+
+## 8b. After 6bab275: B, pressed 14 s after A, one press
+# swap a24bd7b1d476aa40fb65b9293903ac9e1fa1a3ad183f34a1d82d068b54622c56, sell through the swap card, 0.01 ZEC; started 20:50:34 UTC (the click)
+  20:50:59 Z  Sent Propose to B: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  20:50:59 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log. Derived the joint Ironwood address
+  20:50:59 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  20:50:59 B  Received Z's Propose: 0.01 ZEC for 0.00012 WETH
+  20:50:59 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log
+  20:50:59 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  20:50:59 B  Sent Accept with B's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  20:51:23 B  Locked 0.00012 WETH in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0xfa82f88a068b78fb262cd39cb5a07fb56ffd9bd33de1ca0f08bd33fc32c031ea
+  20:51:30 B  The lock is confirmed. Waiting for Z's ZEC
+  20:51:41 Z  FerryLock holds 0.00012 WETH for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  20:52:16 Z  Sent 0.01 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx c2ebbc3a49984f11779cc982a8dfeeada78bfc2cf49fde513555b0f919fc96d0
+  20:54:19 B  Found the lock note at the joint address with the shared viewing key
+  20:54:51 B  Lock note has 3 confirmations and holds 0.01 ZEC
+  20:54:52 B  Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+  20:55:25 Z  Received B's Ready(id) signature and checked it recovers to B's account
+  20:55:36 Z  Claimed 0.00012 WETH from FerryLock with B's Ready signature. The claim publishes z in its calldata
+               Base tx  https://sepolia.basescan.org/tx/0xa16d3c69e47a3c1e85a8669a5f12c78e99f6be8247dc4b0a8eda46382f1eb318
+  20:55:39 Z  Swap complete. 0.00012 WETH is at Z's address
+  20:55:40 B  Saw Z's claim on FerryLock: z is now public
+  20:55:40 B  Read z from Z's claim (calldata and event) and checked it against Z's points. B can now spend the joint Ironwood note
+  20:55:40 B  Waiting 8s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund
+  20:57:10 B  Swept the joint note to B's own shielded address, signing with ask = σ(z + b)
+               Zcash tx 9ab83e27140e5479574ef4a33e5e844a85644d7975c0b5431d97c2282c96385c
+  20:59:32 B  Swap complete. B holds 0.01 ZEC in its own Ironwood notes
+# outcome: Z swapped, B swapped; amounts {"zec_zat": 1000000, "btc_sat": 120000000000000}
+# from the click: counter-coin lock seen by Z 1 min 07 s; ZEC lock sent 1 min 42 s; Z's claim 5 min 02 s; B's sweep 6 min 36 s; both done 9 min 01 s
 
 
 ## Not run here
 # ZEC/BTC on signet: the stack's own pruned signet node started from nothing at 16:14 and was at
-# block 227,978 of 327,391 (70%) at 20:33, after pauses for battery; DEPLOY.md's "about 3 h" holds
-# on a good connection. B (bram) has no signet coins: its funding address, kept from .testnet by
-# migrate-wallets, is tb1pgyf4wvtyjeth44kqyw404w244a2j24zh9wpeaf2vx6vll7pgnmaqmxwapm. Z (zoe) holds
-# 0.67 TAZ.
+# block 229,908 (73% of the chain's work) at 20:55, after pauses for battery and the slow network;
+# DEPLOY.md's "about 3 h" holds on a good connection. B (bram) has no signet coins. Its funding
+# address, kept from .testnet by migrate-wallets, is
+# tb1pgyf4wvtyjeth44kqyw404w244a2j24zh9wpeaf2vx6vll7pgnmaqmxwapm; the smallest swap (0.1 ZEC at
+# 410,000 sat per ZEC) needs 41,000 sat plus B's lock fee and its 10,000 sat reserve, about 52,000
+# sat, and 120,000 sat covers a sell and a buy. Z (zoe) holds 0.67 TAZ.
 # ZEC/LTC: the ltc profile came up healthy (litecoind 0.21.5.6 and both daemons, arm64), but on
 # this connection the Litecoin testnet headers came at about 2,000 per 50 s (4.9 million to go),
 # so the node was paused; no tLTC either.
@@ -564,10 +658,12 @@ ZEC/WETH  base-sepolia (chain 84532): block 48464909 via https://sepolia.base.or
 # Found here and fixed on master by others: finished swaps never settled without a Zcash node RPC,
 # so every round re-polled them under the state lock and the USDC daemons stopped answering on the
 # slow network (2cd42a8; after it, status and swaps answered in about 1 ms).
-# Open, reported: one daemon that hangs keeps the swap card from rendering for every pair (no
-# upstream timeout on proxied GETs); a used firm quote stays cached, so the next start in its
-# bucket within its ~45 s life is refused once; with Docker Desktop, closed tabs hold their event
-# stream slot for 6+ minutes (local only: DEPLOY.md, "Rehearse locally").
+# Found here and fixed on master by others (6bab275): one daemon that hung kept the swap card from
+# rendering for every pair (no upstream timeout on proxied GETs); a used firm quote stayed cached, so
+# the next start in its bucket within its ~45 s life was refused once. Both checked after the fix
+# (final checks above).
+# Local only: with Docker Desktop, closed tabs hold their event-stream slot for 6+ minutes
+# (DEPLOY.md, "Rehearse locally").
 # The network: Docker Hub TLS handshake timeouts (a rebuild retried), a lookup failure while the
 # Mac slept or lost its network from about 18:23 to 19:22, and Base Sepolia RPC answers of 2-20 s
 # with timeouts from about 20:00; swaps 3, 4a and 4b ran on that network.
