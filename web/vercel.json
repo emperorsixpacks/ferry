@@ -2,7 +2,15 @@
   "rewrites": [
     {
       "source": "/daemon/:role",
-      "destination": "/api/daemon?role=:role"
+      "destination": "/api/_daemon?role=:role"
+    },
+    {
+      "source": "/api/:path*",
+      "destination": "http://vaqaxhvocuvf1rnukimkfvql.161.35.55.45.sslip.io/api/:path*"
+    },
+    {
+      "source": "/router/:path*",
+      "destination": "http://vaqaxhvocuvf1rnukimkfvql.161.35.55.45.sslip.io/router/:path*"
     },
     {
       "source": "/:path((?!api|daemon|assets|vite|index|favicon).*)",
@@ -10,7 +18,7 @@
     }
   ],
   "functions": {
-    "api/daemon.ts": {
+    "api/_daemon.ts": {
       "maxDuration": 300
     }
   },
