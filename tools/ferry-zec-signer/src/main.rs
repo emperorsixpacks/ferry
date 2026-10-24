@@ -7,6 +7,10 @@
 //!   ferry-zec-signer sign <in.pczt> <out.pczt>      (ask hex on stdin)
 //!       Signs every Ironwood/Orchard spend still awaiting a signature with
 //!       rsk = ask + alpha (RedPallas SpendAuth over the transaction's shielded sighash).
+//!   ferry-zec-signer pools <file>
+//!       What a PCZT or a raw transaction (binary or hex) touches, as one line of `key=count`:
+//!       transparent_inputs, transparent_outputs, sapling_spends, sapling_outputs,
+//!       orchard_actions, ironwood_actions. Used to keep every Ferry ZEC transaction Ironwood-only.
 
 use std::{env, fs, io::Read};
 
@@ -24,11 +28,11 @@ use pczt::{
 use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey};
 use zcash_primitives::transaction::{
-    TxVersion, sighash::SignableInput, sighash_v5::v5_signature_hash,
+    Transaction, TxVersion, sighash::SignableInput, sighash_v5::v5_signature_hash,
     sighash_v6::v6_signature_hash, txid::TxIdDigester,
 };
 use zcash_protocol::{
-    consensus::{BlockHeight, Network},
+    consensus::{BlockHeight, BranchId, Network},
     local_consensus::LocalNetwork,
 };
 
@@ -153,13 +157,50 @@ fn sign(input: &str, output: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn pools(path: &str) -> anyhow::Result<()> {
+    let bytes = fs::read(path)?;
+    let counts: [usize; 6] = if bytes.starts_with(b"PCZT") {
+        let p = Pczt::parse(&bytes).map_err(|e| anyhow!("parse PCZT: {e:?}"))?;
+        [
+            p.transparent().inputs().len(),
+            p.transparent().outputs().len(),
+            p.sapling().spends().len(),
+            p.sapling().outputs().len(),
+            p.orchard().actions().len(),
+            p.ironwood().actions().len(),
+        ]
+    } else {
+        let text = String::from_utf8_lossy(&bytes);
+        let raw = match hex::decode(text.trim()) {
+            Ok(raw) => raw,
+            Err(_) => bytes.clone(),
+        };
+        // The branch id only matters for pre-v5 transactions, which carry no Ironwood bundle.
+        let tx = Transaction::read(&raw[..], BranchId::Nu6_3).context("parse transaction")?;
+        [
+            tx.transparent_bundle().map_or(0, |b| b.vin.len()),
+            tx.transparent_bundle().map_or(0, |b| b.vout.len()),
+            tx.sapling_bundle().map_or(0, |b| b.shielded_spends().len()),
+            tx.sapling_bundle().map_or(0, |b| b.shielded_outputs().len()),
+            tx.orchard_bundle().map_or(0, |b| b.actions().len()),
+            tx.ironwood_bundle().map_or(0, |b| b.actions().len()),
+        ]
+    };
+    let [ti, to, ss, so, oa, ia] = counts;
+    println!(
+        "transparent_inputs={ti} transparent_outputs={to} sapling_spends={ss} sapling_outputs={so} orchard_actions={oa} ironwood_actions={ia}"
+    );
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         [_, "ufvk", network, fvk] => ufvk(network, fvk),
         [_, "sign", input, output] => sign(input, output),
+        [_, "pools", path] => pools(path),
         _ => bail!(
-            "usage: ferry-zec-signer ufvk <regtest|test|main> <fvk hex> | sign <in.pczt> <out.pczt> (ask hex on stdin)"
+            "usage: ferry-zec-signer ufvk <regtest|test|main> <fvk hex> | sign <in.pczt> <out.pczt> (ask hex on stdin) | pools <pczt or tx>"
         ),
     }
 }

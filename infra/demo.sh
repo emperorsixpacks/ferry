@@ -186,16 +186,27 @@ zrpc() { # zrpc <method> [json params]
     --data "{\"jsonrpc\":\"2.0\",\"id\":\"demo\",\"method\":\"$1\",\"params\":${2:-[]}}" "$ZEC_RPC"
 }
 
-zheight() { zrpc getblockcount | result; }
+# zheight: the tip, waiting (up to 2 min) for zebrad's RPC to answer with a number.
+zheight() {
+  local h
+  for _ in $(seq 1 120); do
+    h=$(zrpc getblockcount 2>/dev/null | result 2>/dev/null) && [[ "$h" =~ ^[0-9]+$ ]] && { echo "$h"; return 0; }
+    sleep 1
+  done
+  echo "[demo] error: zebrad RPC at $ZEC_RPC is not answering" >&2
+  return 1
+}
 
 # zmine <n>: `generate` can answer with a JSON error (HTTP 200) while zebrad warms up, so this
 # checks that the tip actually moved.
 zmine() {
-  local target=$(($(zheight) + $1)) n
-  while [ "$(zheight)" -lt "$target" ]; do
-    n=$((target - $(zheight)))
-    zrpc generate "[$((n < 10 ? n : 10))]" >/dev/null || sleep 1
+  local h target
+  h=$(zheight)
+  target=$((h + $1))
+  while h=$(zheight) && [ "$h" -lt "$target" ]; do
+    zrpc generate "[$((target - h < 10 ? target - h : 10))]" >/dev/null || sleep 1
   done
+  [ "$h" -ge "$target" ] || die "could not mine ZEC blocks"
 }
 
 zdt() { RUST_LOG=error NO_COLOR=1 "$ZEC_DEVTOOL" "$@"; }

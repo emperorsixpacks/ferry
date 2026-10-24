@@ -76,6 +76,24 @@ infra/demo.sh down
 - Ironwood joint key: a note sent to an `ak = ±(Z_p + B_p)` address swept on regtest with a
   RedPallas signature from the combined key.
 - Two daemons swap end to end over HTTP (happy, refund, punish) against regtest Bitcoin.
+- **Real shielded ZEC, end to end.** `infra/e2e-real.sh` starts a fresh regtest Bitcoin + Zebra +
+  Zaino stack and runs all three stories with real Ironwood notes. It also checks the balances, and
+  that the counterparty, who holds the joint viewing key, can't see where a sweep went. It exits 0 only if
+  every check passes. Every ZEC transaction it made, as mined
+  ([full log](docs/evidence/e2e-real-regtest-2026-10-17.txt)):
+
+  | swap | tx | txid | transparent in/out | Sapling | Orchard | Ironwood actions |
+  |---|---|---|---|---|---|---|
+  | happy | ZEC lock | `15a265b4…` | 0 / 0 | 0 | 0 | 5 |
+  | happy | B's sweep | `92a4ccee…` | 0 / 0 | 0 | 0 | 2 |
+  | refund | ZEC lock | `f7a69939…` | 0 / 0 | 0 | 0 | 2 |
+  | refund | Z's reclaim | `00022270…` | 0 / 0 | 0 | 0 | 2 |
+  | punish | ZEC lock | `acf3ad13…` | 0 / 0 | 0 | 0 | 2 |
+
+- **Nothing unshielded, enforced.** Before sending the lock, `ferry-zec` refuses unless the
+  Ironwood balance alone covers it and the wallet's proposal touches only Ironwood. It refuses to
+  sign a sweep or reclaim that has any transparent, Sapling or Orchard part. It re-checks the broadcast
+  lock and logs any violation loudly.
 
 ## Known gaps
 

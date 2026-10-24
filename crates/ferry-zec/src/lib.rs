@@ -7,6 +7,31 @@
 //! Sweeping builds a PCZT from the view-only joint account (`pczt create-max`), proves it with
 //! devtool and signs it with `ferry-zec-signer` (`rsk = ask + α`). Confirmations and the public
 //! view of a transaction come from the node's JSON-RPC.
+//!
+//! # What this relies on
+//!
+//! - **zcash-devtool** (`vendor/zcash-devtool`, librustzcash rev `eb38d7a3`), built with
+//!   `--features regtest_support` and patched with `infra/patches/zcash-devtool-discard-ovk.patch`.
+//!   We use its CLI (`wallet init|import-ufvk|sync|balance|list-addresses|send`, `pczt
+//!   create-max|prove|combine|send`) with `RUST_LOG=error`, reading only: the
+//!   `Default Address:` and `Ironwood Spendable:` lines, and a transaction id printed alone on
+//!   the last 64-hex line of `send`. Its wallet database is read directly (read-only) for
+//!   accounts, Ironwood notes and their spends: `accounts`, `ironwood_received_notes`,
+//!   `ironwood_received_note_spends`, `transactions`. Both are unstable interfaces, which is why
+//!   the devtool revision is pinned.
+//! - **The discard-OVK patch.** devtool builds outputs with the sending account's OVK. For the
+//!   joint account that OVK belongs to both parties, so the counterparty could decrypt the
+//!   sweep's outCiphertext and learn where the ZEC went, how much and the memo (audit H4,
+//!   shown by `spikes/zec/h4_ovk.sh`). The patch adds `pczt create-max --discard-ovk`
+//!   (`OvkPolicy::Discard`); [`DevtoolZecLeg::new`] refuses a devtool binary without it.
+//! - **`ferry-zec-signer`** (`tools/ferry-zec-signer`, outside the workspace with devtool's
+//!   `Cargo.lock`, so its PCZT types match devtool's and the workspace's pasta_curves 0.5 patch
+//!   stays out of that graph). `ufvk <net> <fvk hex>` turns the 96-byte joint FVK into a UFVK
+//!   and UA; `sign <in> <out>` reads `ask` from stdin (never argv) and signs every spend still
+//!   awaiting a signature, checked against each action's `rk`.
+//! - **Wallet policy.** Notes received from another wallet need 10 confirmations before devtool
+//!   will spend them, so a sweep of the joint note fails (and the daemon retries) until then.
+//!   Every devtool call that touches the wallet runs under one lock; the database reads do not.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -279,6 +304,26 @@ impl Inner {
         Ok(uuid)
     }
 
+    /// Pools touched by a transaction our wallet stored (it stores what it builds).
+    async fn stored_tx_pools(&self, txid: &str) -> Result<Pools, ZecError> {
+        let mut key = hex::decode(txid).map_err(|e| ZecError::Other(format!("txid: {e}")))?;
+        key.reverse();
+        let raw = query(&self.cfg.wallet_dir, move |c| {
+            c.query_row(
+                "SELECT raw FROM transactions WHERE txid = ?1 AND raw IS NOT NULL",
+                [key],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+        })
+        .await?;
+        let path = self.cfg.wallet_dir.join("pczt").join(format!("{txid}.tx"));
+        tokio::fs::create_dir_all(path.parent().expect("has a parent")).await?;
+        tokio::fs::write(&path, raw).await?;
+        let p = pools(&self.cfg.signer, &path).await;
+        let _ = tokio::fs::remove_file(&path).await;
+        p
+    }
+
     async fn rpc(&self, method: &str, params: Value) -> Result<Value, ZecError> {
         let url = self
             .cfg
@@ -394,24 +439,49 @@ impl ZecLeg for DevtoolZecLeg {
         let (_, ua) = self.0.joint_keys(fvk)?;
         let _w = self.0.wallet.lock().await;
         self.0.sync_locked().await?;
-        let out = run_devtool_wallet(
+
+        // Shielded only, checked before anything is broadcast: our Ironwood notes alone must
+        // cover the payment, and devtool's proposal for it must touch nothing but Ironwood.
+        let balance = self.0.cache.lock().unwrap().balance.unwrap_or(0);
+        if balance < amount + SEND_FEE_RESERVE {
+            return Err(ZecError::Other(format!(
+                "spendable Ironwood balance {balance} zat cannot cover {amount} zat plus fees; \
+                 refusing to send (Ferry never funds the lock from transparent or other pools)"
+            )));
+        }
+        let mut args = vec![
+            self.0.own_account.clone(),
+            "--address".into(),
+            ua,
+            "--value".into(),
+            amount.to_string(),
+        ];
+        let proposal = run_devtool_wallet(
             &self.0.cfg,
-            &[
-                "send".into(),
-                self.0.own_account.clone(),
-                "-i".into(),
-                path_str(&self.0.cfg.identity),
-                "--address".into(),
-                ua,
-                "--value".into(),
-                amount.to_string(),
-                "-s".into(),
-                self.0.cfg.server.clone(),
-            ],
+            &[vec!["propose".to_string()], args.clone()].concat(),
         )
         .await?;
-        last_txid(&out)
-            .ok_or_else(|| ZecError::Other(format!("wallet send printed no txid:\n{out}")))
+        proposal_ironwood_only(&proposal).map_err(|why| {
+            ZecError::Other(format!("refusing to send: the proposal {why}\n{proposal}"))
+        })?;
+
+        // `wallet send` re-proposes with the same inputs policy (transfers never spend
+        // transparent UTXOs), builds, stores and broadcasts in one step.
+        args.splice(1..1, ["-i".to_string(), path_str(&self.0.cfg.identity)]);
+        args.extend(["-s".to_string(), self.0.cfg.server.clone()]);
+        let out =
+            run_devtool_wallet(&self.0.cfg, &[vec!["send".to_string()], args].concat()).await?;
+        let txid = last_txid(&out)
+            .ok_or_else(|| ZecError::Other(format!("wallet send printed no txid:\n{out}")))?;
+
+        // And the transaction that actually went out. It is already broadcast, so a violation
+        // can only be reported, loudly; the swap still has to track the lock.
+        match self.0.stored_tx_pools(&txid).await {
+            Ok(p) if p.ironwood_only() => tracing::info!(%txid, "ZEC lock is Ironwood-only: {p}"),
+            Ok(p) => tracing::error!(%txid, "SHIELDED-ONLY VIOLATION in the ZEC lock: {p}"),
+            Err(e) => tracing::error!(%txid, "could not verify the ZEC lock is Ironwood-only: {e}"),
+        }
+        Ok(txid)
     }
 
     async fn watch(&self, fvk: &[u8; 96]) -> Result<Vec<ZecNote>, ZecError> {
@@ -503,6 +573,12 @@ impl ZecLeg for DevtoolZecLeg {
             ],
         )
         .await?;
+        let p = pools(&cfg.signer, &created).await?;
+        if !p.ironwood_only() {
+            return Err(ZecError::Other(format!(
+                "refusing to sign a sweep that is not Ironwood-only: {p}"
+            )));
+        }
         sign_pczt(&cfg.signer, ask, &created, &signed).await?;
         run_devtool(
             cfg,
@@ -588,6 +664,105 @@ impl ZecLeg for DevtoolZecLeg {
 }
 
 // ---------------------------------------------------------------------------- helpers
+
+/// Fee headroom required on top of a send (ZIP 317: 5000 zat per action, 2 actions minimum;
+/// ten actions' worth covers a lock spending several notes).
+const SEND_FEE_RESERVE: u64 = 50_000;
+
+/// What a transaction touches, from `ferry-zec-signer pools`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pools {
+    pub transparent_inputs: usize,
+    pub transparent_outputs: usize,
+    pub sapling_spends: usize,
+    pub sapling_outputs: usize,
+    pub orchard_actions: usize,
+    pub ironwood_actions: usize,
+}
+
+impl Pools {
+    /// Nothing transparent, Sapling or Orchard, and at least one Ironwood action.
+    pub fn ironwood_only(&self) -> bool {
+        self.ironwood_actions > 0
+            && self.transparent_inputs + self.transparent_outputs == 0
+            && self.sapling_spends + self.sapling_outputs + self.orchard_actions == 0
+    }
+
+    fn parse(line: &str) -> Option<Pools> {
+        let mut p = Pools::default();
+        for kv in line.split_whitespace() {
+            let (k, v) = kv.split_once('=')?;
+            let v: usize = v.parse().ok()?;
+            match k {
+                "transparent_inputs" => p.transparent_inputs = v,
+                "transparent_outputs" => p.transparent_outputs = v,
+                "sapling_spends" => p.sapling_spends = v,
+                "sapling_outputs" => p.sapling_outputs = v,
+                "orchard_actions" => p.orchard_actions = v,
+                "ironwood_actions" => p.ironwood_actions = v,
+                _ => return None,
+            }
+        }
+        Some(p)
+    }
+}
+
+impl std::fmt::Display for Pools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "transparent {}in/{}out, sapling {}/{}, orchard {}, ironwood {} actions",
+            self.transparent_inputs,
+            self.transparent_outputs,
+            self.sapling_spends,
+            self.sapling_outputs,
+            self.orchard_actions,
+            self.ironwood_actions
+        )
+    }
+}
+
+async fn pools(signer: &Path, file: &Path) -> Result<Pools, ZecError> {
+    let out = Command::new(signer)
+        .args(["pools", &path_str(file)])
+        .output()
+        .await
+        .map_err(|e| tool_err("ferry-zec-signer pools", e))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() {
+        return Err(ZecError::Tool {
+            cmd: "ferry-zec-signer pools".into(),
+            detail: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
+    }
+    Pools::parse(text.trim())
+        .ok_or_else(|| ZecError::Other(format!("ferry-zec-signer pools printed {text:?}")))
+}
+
+/// Checks devtool's printed proposal: one step, no transparent inputs, and every input,
+/// payment and change output in the Ironwood pool.
+fn proposal_ironwood_only(text: &str) -> Result<(), String> {
+    let mut steps = 0;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("Step ") {
+            steps += 1;
+        } else if line.starts_with("Transparent inputs") {
+            return Err("spends transparent inputs".into());
+        } else if let Some(pool) = line.strip_prefix("Pool:") {
+            if pool.trim() != "Ironwood" {
+                return Err(format!("pays into the {} pool", pool.trim()));
+            }
+        } else if let Some(item) = line.strip_prefix("- ") {
+            if !(item.starts_with("Ironwood ") || item.starts_with("Step ")) {
+                return Err(format!("has a non-Ironwood input or change output: {item}"));
+            }
+        }
+    }
+    match steps {
+        1 => Ok(()),
+        n => Err(format!("has {n} steps (expected one Ironwood transaction)")),
+    }
+}
 
 fn path_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
@@ -728,6 +903,38 @@ fn parse_zec(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shielded_only_checks() {
+        let p = Pools::parse("transparent_inputs=0 transparent_outputs=0 sapling_spends=0 sapling_outputs=0 orchard_actions=0 ironwood_actions=2").unwrap();
+        assert!(p.ironwood_only());
+        assert!(!Pools {
+            transparent_outputs: 1,
+            ..p
+        }
+        .ironwood_only());
+        assert!(!Pools {
+            orchard_actions: 2,
+            ..p
+        }
+        .ironwood_only());
+        assert!(!Pools {
+            ironwood_actions: 0,
+            ..p
+        }
+        .ironwood_only());
+
+        let ok = "Proposed transfer:\n  Steps (1):\n    Step 0:\n      Shielding: false\n      Payments (1):\n        [0] -> uregtest1x\n            Amount:   5.00000000 REG\n            Pool: Ironwood\n      Shielded inputs (1) at anchor height 111:\n        - Ironwood 3872:0    6.25000000 REG\n      Change outputs (1):\n        - Ironwood   1.24990000 REG\n      Fee:   0.00010000 REG\n";
+        assert_eq!(proposal_ironwood_only(ok), Ok(()));
+        assert!(proposal_ironwood_only(&ok.replace("- Ironwood 3872", "- Orchard 3872")).is_err());
+        assert!(
+            proposal_ironwood_only(&ok.replace("Pool: Ironwood", "Pool: Transparent")).is_err()
+        );
+        assert!(proposal_ironwood_only(
+            &ok.replace("Change outputs (1):", "Transparent inputs (1):")
+        )
+        .is_err());
+    }
 
     #[test]
     fn parsing() {
