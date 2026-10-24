@@ -9,6 +9,7 @@
 
 use ferry_btc::adaptor::{self, EncryptedSignature, Signature};
 use ferry_btc::bitcoin::{OutPoint, Transaction, TxOut};
+use ferry_btc::musig::{PartialSig, PubNonce};
 use ferry_btc::SwapTxs;
 use serde::{Deserialize, Serialize};
 
@@ -67,6 +68,17 @@ impl ZState {
     }
 }
 
+/// Key path: public MuSig2 nonces and our partial signature on tx_redeem.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Musig {
+    #[serde(with = "crate::hex_serde")]
+    b_nonce: PubNonce,
+    #[serde(with = "crate::hex_serde")]
+    z_nonce: PubNonce,
+    #[serde(with = "crate::hex_serde")]
+    z_partial: PartialSig,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ZSwap {
     pub session: Session,
@@ -80,6 +92,13 @@ pub struct ZSwap {
     refund_enc_sig: Option<EncryptedSignature>,
     /// B's adaptor signature on tx_redeem, under Z_s.
     redeem_enc_sig: Option<EncryptedSignature>,
+    /// Key path: public nonces `[B's, Z's]` and our partial signature on tx_redeem. Our secret
+    /// nonce is used once, when the nonces are fixed, and never stored.
+    #[serde(default)]
+    musig: Option<Musig>,
+    /// Key path: the combined adaptor signature on tx_redeem, under Z_s.
+    #[serde(default)]
+    keypath_enc_sig: Option<EncryptedSignature>,
     zec_locked: bool,
     lock_confs: u32,
     cancel_confs: Option<u32>,
@@ -95,6 +114,8 @@ impl ZSwap {
             cancel_tx: None,
             refund_enc_sig: None,
             redeem_enc_sig: None,
+            musig: None,
+            keypath_enc_sig: None,
             zec_locked: false,
             lock_confs: 0,
             cancel_confs: None,
@@ -152,7 +173,14 @@ impl ZSwap {
 
     fn on_message(&mut self, msg: &Message) -> Result<Vec<Action>, Error> {
         match (msg, &self.state) {
-            (Message::LockTemplate { outpoint, amount }, ZState::Negotiated) => {
+            (
+                Message::LockTemplate {
+                    outpoint,
+                    amount,
+                    redeem_nonce,
+                },
+                ZState::Negotiated,
+            ) => {
                 if *amount != self.session.params.btc_amount {
                     return Err(Error::LockMismatch);
                 }
@@ -163,6 +191,27 @@ impl ZSwap {
                     &self.session.b_encryption_key(),
                     &txs.sighash(Spend::Refund),
                 );
+                let (mut z_nonce, mut z_partial) = (None, None);
+                if let Some(ks) = self.session.key_spend() {
+                    let b_nonce = redeem_nonce.ok_or(Error::Musig("B sent no nonce"))?;
+                    let (secret, public) = ferry_btc::musig::new_nonce();
+                    let partial = ks
+                        .partial_sign(
+                            &key,
+                            Role::Z,
+                            &secret,
+                            [&b_nonce, &public],
+                            &self.session.z_encryption_key(),
+                            &txs.keypath_redeem_sighash(),
+                        )
+                        .ok_or(Error::Musig("B's nonce is invalid"))?;
+                    self.musig = Some(Musig {
+                        b_nonce,
+                        z_nonce: public,
+                        z_partial: partial,
+                    });
+                    (z_nonce, z_partial) = (Some(public), Some(partial));
+                }
                 self.lock_outpoint = Some(*outpoint);
                 self.cancel_sig = Some(cancel_sig);
                 self.refund_enc_sig = Some(refund_enc_sig.clone());
@@ -170,6 +219,8 @@ impl ZSwap {
                 let env = self.session.seal(Message::CancelSigs {
                     cancel_sig,
                     refund_enc_sig,
+                    redeem_nonce: z_nonce,
+                    redeem_partial: z_partial,
                 });
                 Ok(vec![Action::SendMessage(env)])
             }
@@ -187,7 +238,13 @@ impl ZSwap {
                 self.state = ZState::CancelSigned;
                 Ok(vec![])
             }
-            (Message::RedeemAdaptor { redeem_enc_sig }, ZState::ZecLocked) => {
+            (
+                Message::RedeemAdaptor {
+                    redeem_enc_sig,
+                    redeem_partial,
+                },
+                ZState::ZecLocked,
+            ) => {
                 let txs = self.txs()?;
                 let ok = adaptor::verify_encrypted(
                     &self.session.peer.btc_key,
@@ -197,6 +254,24 @@ impl ZSwap {
                 );
                 if !ok {
                     return Err(Error::BadSignature("B's tx_redeem adaptor signature"));
+                }
+                if let Some(ks) = self.session.key_spend() {
+                    let m = self.musig.as_ref().expect("signed with CancelSigs");
+                    let b_partial =
+                        redeem_partial.ok_or(Error::Musig("B sent no partial signature"))?;
+                    let t = self.session.z_encryption_key();
+                    let hash = txs.keypath_redeem_sighash();
+                    let nonces = [&m.b_nonce, &m.z_nonce];
+                    if !ks.verify_partial(Role::B, &b_partial, nonces, &t, &hash) {
+                        return Err(Error::BadSignature(
+                            "B's MuSig2 partial signature on tx_redeem",
+                        ));
+                    }
+                    let enc = ks
+                        .combine([&b_partial, &m.z_partial], nonces, &t, &hash)
+                        .filter(|e| adaptor::verify_encrypted(&ks.output_key(), &t, &hash, e))
+                        .ok_or(Error::Musig("combined adaptor signature invalid"))?;
+                    self.keypath_enc_sig = Some(enc);
                 }
                 self.redeem_enc_sig = Some(redeem_enc_sig.clone());
                 self.state = ZState::RedeemSigReceived;
@@ -299,6 +374,16 @@ impl ZSwap {
         }
         if self.state == ZState::RedeemSigReceived && params.can_redeem(self.lock_confs) {
             let txs = self.txs()?;
+            if let (Some(enc), Some(ks)) = (&self.keypath_enc_sig, self.session.key_spend()) {
+                // Key path: one aggregate signature, completed with z.
+                let hash = txs.keypath_redeem_sighash();
+                let sig = adaptor::decrypt(&self.session.me.share_secp_bytes(), enc)
+                    .filter(|s| adaptor::verify_libsecp(&ks.output_key(), &hash, s))
+                    .ok_or(Error::BadSignature("decrypted key-path redeem signature"))?;
+                self.state = ZState::Redeeming;
+                actions.push(Action::BroadcastBtc(txs.complete_keypath_redeem(&sig)));
+                return Ok(actions);
+            }
             let hash = txs.sighash(Spend::Redeem);
             let enc = self.redeem_enc_sig.as_ref().expect("verified adaptor");
             let sig_b = adaptor::decrypt(&self.session.me.share_secp_bytes(), enc)

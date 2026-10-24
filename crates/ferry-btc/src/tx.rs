@@ -176,6 +176,36 @@ impl SwapTxs {
             .to_byte_array()
     }
 
+    /// BIP341 key-path sighash (SIGHASH_DEFAULT) of tx_redeem, for the MuSig2 key path.
+    pub fn keypath_redeem_sighash(&self) -> [u8; 32] {
+        SighashCache::new(&self.redeem)
+            .taproot_key_spend_signature_hash(
+                0,
+                &Prevouts::All(&[&self.lock_txout]),
+                TapSighashType::Default,
+            )
+            .expect("single input, matching prevout")
+            .to_byte_array()
+    }
+
+    /// tx_redeem spent through the key path: the witness is one 64-byte signature.
+    pub fn complete_keypath_redeem(&self, sig: &Signature) -> Transaction {
+        let mut tx = self.redeem.clone();
+        let mut w = Witness::new();
+        w.push(sig.to_bytes());
+        tx.input[0].witness = w;
+        tx
+    }
+
+    /// The key-path signature of a published spend, if it was a key-path spend.
+    pub fn keypath_sig(tx: &Transaction) -> Option<Signature> {
+        let w = &tx.input.first()?.witness;
+        if w.len() != 1 {
+            return None;
+        }
+        Signature::from_bytes(w.nth(0)?.try_into().ok()?)
+    }
+
     /// Witness index of `role`'s signature. The script's first key is checked first and so
     /// pops the top-most signature: `<K1> CHECKSIGVERIFY <K2> CHECKSIG` takes `[sig_K2, sig_K1]`.
     pub fn sig_index(spend: Spend, role: Role) -> Result<usize, TxError> {
@@ -266,7 +296,7 @@ mod tests {
 
     fn fixture() -> (BtcKey, BtcKey, SwapTxs) {
         let (b, z) = (BtcKey::random(), BtcKey::random());
-        let scripts = SwapScripts::new(b.xonly(), z.xonly(), 10, 20);
+        let scripts = SwapScripts::new(b.xonly(), z.xonly(), 10, 20, false);
         let lock = OutPoint {
             txid: Txid::all_zeros(),
             vout: 0,
@@ -308,7 +338,7 @@ mod tests {
     #[test]
     fn dust_rejected() {
         let (b, z) = (BtcKey::random(), BtcKey::random());
-        let scripts = SwapScripts::new(b.xonly(), z.xonly(), 10, 20);
+        let scripts = SwapScripts::new(b.xonly(), z.xonly(), 10, 20, false);
         let lock = OutPoint {
             txid: Txid::all_zeros(),
             vout: 0,

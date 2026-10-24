@@ -60,6 +60,10 @@ pub struct Cli {
     /// line up in time with the BTC transaction that revealed the key.
     #[arg(long, default_value = "5:20")]
     pub sweep_delay_secs: DelayArg,
+    /// Redeem BTC through the MuSig2 key path, so tx_lock and tx_redeem look like an ordinary
+    /// single-key Taproot payment (`--btc-keypath false`: 2-of-2 script-path redeem).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub btc_keypath: bool,
     /// URL the counterparty uses to reach our peer listener (default http://<listen>).
     #[arg(long)]
     pub public_url: Option<String>,
@@ -89,6 +93,36 @@ pub struct Cli {
     /// Our mock shielded balance the first time the mock chain sees us (zatoshi).
     #[arg(long, default_value_t = 0)]
     pub zec_mock_balance: u64,
+
+    /// zcash-devtool binary (built with `--features regtest_support` for regtest).
+    #[arg(long, default_value = "zcash-devtool")]
+    pub zec_devtool: PathBuf,
+    /// ferry-zec-signer binary (tools/ferry-zec-signer).
+    #[arg(long, default_value = "ferry-zec-signer")]
+    pub zec_signer: PathBuf,
+    /// Our zcash-devtool wallet directory (initialized if empty). Default: <data-dir>/zec-wallet.
+    #[arg(long)]
+    pub zec_wallet_dir: Option<PathBuf>,
+    /// age identity for the wallet's mnemonic. Default: <data-dir>/zec-identity.age.
+    #[arg(long)]
+    pub zec_identity: Option<PathBuf>,
+    /// Zaino/lightwalletd gRPC endpoint (host:port; plaintext for localhost).
+    #[arg(long, default_value = "localhost:8137")]
+    pub zec_server: String,
+    /// Zcash network: regtest, test or main.
+    #[arg(long, default_value = "regtest")]
+    pub zec_network: String,
+    /// Activation heights file, needed to initialize a regtest wallet.
+    #[arg(long)]
+    pub zec_activation_heights: Option<PathBuf>,
+    /// The Zcash node's JSON-RPC endpoint (Zebra).
+    #[arg(long, default_value = "http://127.0.0.1:18232")]
+    pub zec_node_rpc: String,
+    /// USER:PASS for the node's JSON-RPC, if it needs any.
+    #[arg(long)]
+    pub zec_node_rpc_auth: Option<String>,
+    #[arg(long, default_value_t = 2.0)]
+    pub zec_sync_secs: f64,
 
     /// Accept proposals as maker: RATE_SAT_PER_ZEC[:MIN_ZAT:MAX_ZAT].
     #[arg(long)]
@@ -184,6 +218,7 @@ impl Cli {
             cancel_confirmations: self.cancel_confs,
             redeem_margin: self.delta,
             refund_margin: self.delta,
+            keypath: self.btc_keypath,
         }
     }
 
@@ -216,6 +251,8 @@ pub struct Terms {
     pub cancel_confirmations: u32,
     pub redeem_margin: u16,
     pub refund_margin: u16,
+    #[serde(default)]
+    pub keypath: bool,
 }
 
 impl Terms {
@@ -232,6 +269,7 @@ impl Terms {
             cancel_confirmations: self.cancel_confirmations,
             redeem_margin: self.redeem_margin,
             refund_margin: self.refund_margin,
+            keypath: self.keypath,
         }
     }
 
@@ -245,6 +283,7 @@ impl Terms {
             cancel_confirmations: p.cancel_confirmations,
             redeem_margin: p.redeem_margin,
             refund_margin: p.refund_margin,
+            keypath: p.keypath,
         }
     }
 }

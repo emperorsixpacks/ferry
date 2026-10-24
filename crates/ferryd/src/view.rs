@@ -238,6 +238,22 @@ pub fn describe_spend(spend: Spend, tx: &Transaction, prev_value: Amount) -> Str
         Spend::Punish => "tx_punish",
     };
     let witness: Vec<&[u8]> = tx.input[0].witness.iter().collect();
+    let out = &tx.output[0];
+    let fee = prev_value
+        .checked_sub(tx.output.iter().map(|o| o.value).sum())
+        .unwrap_or(Amount::ZERO);
+    if let [sig] = witness.as_slice() {
+        return format!(
+            "{name}: key-path spend: one {}-byte Schnorr signature, no script and no second key revealed, \
+             paying {} to a {} output, fee {} sat (txid {}…). Indistinguishable from an ordinary \
+             single-key Taproot payment.",
+            sig.len(),
+            btc(out.value),
+            if out.script_pubkey.is_p2tr() { "P2TR" } else { "non-Taproot" },
+            fee.to_sat(),
+            short(tx),
+        );
+    }
     let (control, script) = match witness.as_slice() {
         [.., script, control] => (*control, *script),
         _ => return format!("{name}: spends the swap output (txid {}…)", short(tx)),
@@ -246,17 +262,17 @@ pub fn describe_spend(spend: Spend, tx: &Transaction, prev_value: Amount) -> Str
     let leaves = 1usize << (control.len().saturating_sub(33) / 32);
     let nums = control.get(1..33) == Some(&NUMS[..]);
     let csv = leaf_csv(ferry_btc::bitcoin::Script::from_bytes(script));
-    let out = &tx.output[0];
-    let fee = prev_value
-        .checked_sub(tx.output.iter().map(|o| o.value).sum())
-        .unwrap_or(Amount::ZERO);
     format!(
         "{name}: script-path spend revealing one of {leaves} leaves ({}{} Schnorr signature{}; internal key {}), \
          paying {} to a {} output, fee {} sat (txid {}…).",
         csv.map(|n| format!("{n}-block CSV, ")).unwrap_or_default(),
         sigs,
         if sigs == 1 { "" } else { "s" },
-        if nums { "is the BIP341 NUMS point, so there is no key path" } else { "unknown" },
+        if nums {
+            "is the BIP341 NUMS point, so there is no key path"
+        } else {
+            "is an ordinary-looking key"
+        },
         btc(out.value),
         if out.script_pubkey.is_p2tr() { "P2TR" } else { "non-Taproot" },
         fee.to_sat(),

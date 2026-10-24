@@ -16,20 +16,20 @@ pub fn nums_key() -> XOnlyPublicKey {
     XOnlyPublicKey::from_slice(&NUMS).expect("NUMS is a valid x-only key")
 }
 
-/// A two-leaf Taproot output with the NUMS internal key.
+/// A two-leaf Taproot output.
 #[derive(Clone, Debug)]
 pub struct TapOut {
     pub spend_info: TaprootSpendInfo,
 }
 
 impl TapOut {
-    pub fn new(left: &ScriptBuf, right: &ScriptBuf) -> Self {
+    pub fn new(internal: XOnlyPublicKey, left: &ScriptBuf, right: &ScriptBuf) -> Self {
         let secp = Secp256k1::verification_only();
         let spend_info = TaprootBuilder::new()
             .add_leaf(1, left.clone())
             .and_then(|b| b.add_leaf(1, right.clone()))
             .expect("two leaves at depth 1 form a complete tree")
-            .finalize(&secp, nums_key())
+            .finalize(&secp, internal)
             .expect("complete tree");
         TapOut { spend_info }
     }
@@ -59,6 +59,9 @@ pub struct SwapScripts {
     pub t1: u16,
     /// Relative timelock (blocks) of the punish leaf on the cancel output.
     pub t2: u16,
+    /// The lock output's internal key is the MuSig2 aggregate of kb and kz (key-path redeem)
+    /// rather than the NUMS point.
+    pub keypath: bool,
     pub redeem: ScriptBuf,
     pub cancel: ScriptBuf,
     pub refund: ScriptBuf,
@@ -68,7 +71,7 @@ pub struct SwapScripts {
 }
 
 impl SwapScripts {
-    pub fn new(kb: XOnlyPublicKey, kz: XOnlyPublicKey, t1: u16, t2: u16) -> Self {
+    pub fn new(kb: XOnlyPublicKey, kz: XOnlyPublicKey, t1: u16, t2: u16, keypath: bool) -> Self {
         let redeem = two_of_two(None, &kb, &kz);
         let cancel = two_of_two(Some(t1), &kb, &kz);
         let refund = two_of_two(None, &kz, &kb);
@@ -79,13 +82,19 @@ impl SwapScripts {
             .push_x_only_key(&kz)
             .push_opcode(OP_CHECKSIG)
             .into_script();
-        let lock = TapOut::new(&redeem, &cancel);
-        let cancel_out = TapOut::new(&refund, &punish);
+        let lock_internal = if keypath {
+            crate::musig::internal_key(&kb, &kz)
+        } else {
+            nums_key()
+        };
+        let lock = TapOut::new(lock_internal, &redeem, &cancel);
+        let cancel_out = TapOut::new(nums_key(), &refund, &punish);
         SwapScripts {
             kb,
             kz,
             t1,
             t2,
+            keypath,
             redeem,
             cancel,
             refund,

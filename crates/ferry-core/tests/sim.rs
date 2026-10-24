@@ -26,6 +26,7 @@ fn params() -> SwapParams {
         cancel_confirmations: 1,
         redeem_margin: 3,
         refund_margin: 3,
+        keypath: true,
     }
 }
 
@@ -38,6 +39,8 @@ fn address(seed: u8) -> Address {
 
 #[derive(Default)]
 struct Faults {
+    /// Redeem through the 2-of-2 script leaf instead of the MuSig2 key path.
+    script_path: bool,
     drop_redeem_adaptor: bool,
     /// B stops processing anything once the lock is broadcast.
     b_offline_after_lock: bool,
@@ -69,8 +72,11 @@ impl Sim {
     fn new(faults: Faults) -> Sim {
         // B is the taker here, Z the maker.
         let sid = [42u8; 32];
-        let (proposal, propose) =
-            Proposal::new(&mut OsRng, sid, Role::B, params(), address(1)).unwrap();
+        let p = SwapParams {
+            keypath: !faults.script_path,
+            ..params()
+        };
+        let (proposal, propose) = Proposal::new(&mut OsRng, sid, Role::B, p, address(1)).unwrap();
         let (z, z_actions) = accept(&mut OsRng, &propose, address(2)).unwrap();
         let Action::SendMessage(accept_env) = &z_actions[0] else {
             panic!("expected Accept")
@@ -362,10 +368,34 @@ fn happy_path() {
     sim.mine_until(10, |s| {
         s.b_state() == BState::ZecSwept && s.z_state() == ZState::BtcRedeemed
     });
-    assert!(sim.mined(&sim.txid(ferry_core::Spend::Redeem)));
+    let redeem = sim.txid(ferry_core::Spend::Redeem);
+    assert!(sim.mined(&redeem));
+    assert_eq!(
+        sim.chain[&redeem].0.input[0].witness.len(),
+        1,
+        "MuSig2 key-path spend"
+    );
     assert!(!sim.chain.contains_key(&sim.txid(ferry_core::Spend::Cancel)));
     sim.assert_sweep_valid(Role::B);
     assert!(sim.rejected.is_empty(), "{:?}", sim.rejected);
+}
+
+#[test]
+fn happy_path_script_path() {
+    let mut sim = Sim::new(Faults {
+        script_path: true,
+        ..Default::default()
+    });
+    sim.mine_until(10, |s| {
+        s.b_state() == BState::ZecSwept && s.z_state() == ZState::BtcRedeemed
+    });
+    let redeem = sim.txid(ferry_core::Spend::Redeem);
+    assert_eq!(
+        sim.chain[&redeem].0.input[0].witness.len(),
+        4,
+        "sig, sig, script, control block"
+    );
+    sim.assert_sweep_valid(Role::B);
 }
 
 #[test]

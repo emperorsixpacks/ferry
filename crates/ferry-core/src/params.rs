@@ -33,6 +33,9 @@ pub struct SwapParams {
     pub redeem_margin: u16,
     /// Δ for refund: B never broadcasts tx_refund once `cancel_confs >= t2 - refund_margin`.
     pub refund_margin: u16,
+    /// Redeem through the MuSig2 key path (the lock's internal key is `KeyAgg(kb, kz)`).
+    #[serde(default)]
+    pub keypath: bool,
 }
 
 impl SwapParams {
@@ -115,6 +118,7 @@ pub(crate) fn test_params() -> SwapParams {
         cancel_confirmations: 1,
         redeem_margin: 3,
         refund_margin: 3,
+        keypath: true,
     }
 }
 

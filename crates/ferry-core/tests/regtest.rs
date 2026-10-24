@@ -27,6 +27,7 @@ fn params() -> SwapParams {
         cancel_confirmations: 1,
         redeem_margin: 3,
         refund_margin: 3,
+        keypath: true,
     }
 }
 
@@ -128,6 +129,7 @@ impl ZecLeg for MockZec {
 
 #[derive(Default)]
 struct Faults {
+    script_path: bool,
     drop_redeem_adaptor: bool,
     b_offline_after_lock: bool,
 }
@@ -170,8 +172,11 @@ impl World {
         // Z is the taker, B the maker.
         let z_payout = rpc.new_address(Network::Regtest).await.unwrap();
         let b_refund = rpc.new_address(Network::Regtest).await.unwrap();
-        let (proposal, propose) =
-            Proposal::new(&mut OsRng, sid, Role::Z, params(), z_payout).unwrap();
+        let p = SwapParams {
+            keypath: !faults.script_path,
+            ..params()
+        };
+        let (proposal, propose) = Proposal::new(&mut OsRng, sid, Role::Z, p, z_payout).unwrap();
         let (b, b_actions) = accept(&mut OsRng, &propose, b_refund).unwrap();
         let Action::SendMessage(acc) = &b_actions[0] else {
             panic!("expected Accept")
@@ -373,7 +378,26 @@ impl World {
 #[tokio::test]
 #[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
 async fn regtest_happy_path() {
-    let mut w = World::new(Faults::default()).await;
+    happy(Faults::default(), 1).await;
+}
+
+#[tokio::test]
+#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+async fn regtest_happy_path_script_path() {
+    happy(
+        Faults {
+            script_path: true,
+            ..Default::default()
+        },
+        4,
+    )
+    .await;
+}
+
+/// `witness_items`: 1 for the MuSig2 key path, 4 (two signatures, leaf, control block) for the
+/// script path.
+async fn happy(faults: Faults, witness_items: usize) {
+    let mut w = World::new(faults).await;
     assert_eq!(w.b_state(), BState::CancelSigned);
     w.mine_until(10, |w| {
         w.b_state() == BState::ZecSwept && w.z_state() == ZState::BtcRedeemed
@@ -388,6 +412,7 @@ async fn regtest_happy_path() {
         .expect("redeem on chain");
     assert!(w.confs(Spend::Redeem).await.unwrap() >= 1);
     assert_eq!(redeem.input[0].previous_output, w.lock());
+    assert_eq!(redeem.input[0].witness.len(), witness_items);
     assert_eq!(
         redeem.output[0].value,
         Amount::from_sat(params().btc_amount - params().btc_fee)

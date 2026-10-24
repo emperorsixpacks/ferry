@@ -14,6 +14,7 @@
 //! corresponding Zcash key share.
 
 pub mod adaptor;
+pub mod musig;
 pub mod scripts;
 pub mod tx;
 

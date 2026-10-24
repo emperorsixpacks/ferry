@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE="${FERRY_DEMO_DIR:-$ROOT/.demo}"
 
-CONTAINER=ferry-bitcoind
+CONTAINER="${BITCOIND_CONTAINER:-ferry-bitcoind}"
 IMAGE="${BITCOIND_IMAGE:-bitcoin/bitcoin:28.1}"
 BTC_RPC_PORT="${BTC_RPC_PORT:-18643}"
 BTC_RPC="http://127.0.0.1:$BTC_RPC_PORT"
@@ -25,6 +25,17 @@ B_FUND_BTC="${B_FUND_BTC:-1}"
 ZEC_BACKEND="${ZEC_BACKEND:-mock}"
 ZEC_BALANCE_ZAT="${ZEC_BALANCE_ZAT:-500000000}"
 ZEC_BLOCK_SECS="${ZEC_BLOCK_SECS:-3}"
+# ZEC_BACKEND=devtool: Zebra + Zaino regtest in Docker (amd64 images; emulated on arm64).
+ZEBRA_IMAGE="${ZEBRA_IMAGE:-zfnd/zebra:7.0.0-rc.0}"
+ZAINO_IMAGE="${ZAINO_IMAGE:-zingodevops/zaino:0.10.2-no-tls}"
+ZEBRA_CONTAINER=ferry-demo-zebra
+ZAINO_CONTAINER=ferry-demo-zaino
+ZEC_NET=ferry-demo-zec
+ZEC_RPC_PORT="${ZEC_RPC_PORT:-18232}"
+ZAINO_PORT="${ZAINO_PORT:-8137}"
+ZEC_RPC="http://127.0.0.1:$ZEC_RPC_PORT"
+ZEC_DEVTOOL="${ZEC_DEVTOOL:-$ROOT/vendor/zcash-devtool/target/release/zcash-devtool}"
+ZEC_SIGNER="${ZEC_SIGNER:-$ROOT/tools/ferry-zec-signer/target/release/ferry-zec-signer}"
 T1="${T1:-12}"
 T2="${T2:-24}"
 DELTA="${DELTA:-3}"
@@ -42,7 +53,7 @@ Ferry local demo: shielded ZEC <-> BTC atomic swap between two daemons on one ma
                          fund B's BTC wallet and start the block producer. Starts from a fresh chain.
   infra/demo.sh down     stop the daemons, the block producer and bitcoind (logs stay in $STATE/logs)
   infra/demo.sh status   chain height, daemon status and swaps at a glance
-  infra/demo.sh logs [z|b|miner|bitcoind]   follow a log
+  infra/demo.sh logs [z|b|miner|bitcoind|zec-miner|zebra|zaino]   follow a log
   infra/demo.sh mine [n] mine n blocks now (default 1)
   infra/demo.sh help     this text
 
@@ -76,7 +87,12 @@ Environment (defaults in brackets):
   T1 [$T1]  T2 [$T2]  DELTA [$DELTA]  BTC_LOCK_CONFS [$BTC_LOCK_CONFS]  ZEC_CONFS [$ZEC_CONFS]  POLL_MS [$POLL_MS]
   ZEC_BACKEND [mock|devtool, $ZEC_BACKEND]   mock: a stand-in Zcash chain in $STATE/zec-mock.json
     ZEC_BALANCE_ZAT [$ZEC_BALANCE_ZAT] (Z's starting shielded balance)  ZEC_BLOCK_SECS [$ZEC_BLOCK_SECS]
-    devtool: real Ironwood via ferry-zec; pass its flags with ZEC_ARGS_Z / ZEC_ARGS_B
+    devtool: real Ironwood via ferry-zec on Zebra ($ZEBRA_CONTAINER, RPC :$ZEC_RPC_PORT) + Zaino
+      ($ZAINO_CONTAINER, :$ZAINO_PORT). A miner wallet takes the (Ironwood) coinbase and pays Z
+      ZEC_BALANCE_ZAT; a ZEC block every ~ZEC_BLOCK_SECS+2s (blocks take ~2s under amd64 emulation).
+      Setup mines ~125 blocks first (coinbase maturity), a few minutes. Needs ZEC_DEVTOOL
+      [vendor/zcash-devtool, built with --features regtest_support]; builds ZEC_SIGNER
+      [tools/ferry-zec-signer] if missing. Extra ferryd flags: ZEC_ARGS_Z / ZEC_ARGS_B
   FERRYD_ARGS (extra flags for both daemons)   FERRY_DEMO_DIR [$STATE]
 EOF
 }
@@ -138,7 +154,10 @@ start_ferryd() { # start_ferryd <key> <role> <name> <api port> <peer port> [extr
     devtool)
       local extra_var="ZEC_ARGS_$(echo "$key" | tr a-z A-Z)"
       # shellcheck disable=SC2206
-      zec_args=(--zec devtool ${!extra_var:-}) ;;
+      zec_args=(--zec devtool --zec-devtool "$ZEC_DEVTOOL" --zec-signer "$ZEC_SIGNER"
+        --zec-wallet-dir "$STATE/zec/$key" --zec-identity "$STATE/zec/$key.age"
+        --zec-server "localhost:$ZAINO_PORT" --zec-node-rpc "$ZEC_RPC"
+        --zec-activation-heights "$STATE/zec/activation_heights.toml" ${!extra_var:-}) ;;
     *) die "ZEC_BACKEND must be mock or devtool" ;;
   esac
   # shellcheck disable=SC2206
@@ -158,6 +177,153 @@ start_ferryd() { # start_ferryd <key> <role> <name> <api port> <peer port> [extr
   done
   tail -n 20 "$STATE/logs/$key.log" >&2
   die "ferryd $key did not come up (log: $STATE/logs/$key.log)"
+}
+
+# ---------------------------------------------------------------- Zcash regtest (ZEC_BACKEND=devtool)
+
+zrpc() { # zrpc <method> [json params]
+  curl -sf -H 'content-type: application/json' \
+    --data "{\"jsonrpc\":\"2.0\",\"id\":\"demo\",\"method\":\"$1\",\"params\":${2:-[]}}" "$ZEC_RPC"
+}
+
+zheight() { zrpc getblockcount | result; }
+
+# zmine <n>: `generate` can answer with a JSON error (HTTP 200) while zebrad warms up, so this
+# checks that the tip actually moved.
+zmine() {
+  local target=$(($(zheight) + $1)) n
+  while [ "$(zheight)" -lt "$target" ]; do
+    n=$((target - $(zheight)))
+    zrpc generate "[$((n < 10 ? n : 10))]" >/dev/null || sleep 1
+  done
+}
+
+zdt() { RUST_LOG=error NO_COLOR=1 "$ZEC_DEVTOOL" "$@"; }
+
+zwallet_init() { # zwallet_init <key>
+  zdt wallet -w "$STATE/zec/$1" init --name "$1" -i "$STATE/zec/$1.age" -n regtest \
+    --activation-heights "$STATE/zec/activation_heights.toml" -s "localhost:$ZAINO_PORT" >/dev/null
+}
+
+zwallet_ua() { zdt wallet -w "$STATE/zec/$1" list-addresses | awk '/Default Address/{print $3; exit}'; }
+
+start_zebra() { # start_zebra <miner address>
+  cat >"$STATE/zec/zebrad.toml" <<TOML
+[network]
+network = "Regtest"
+listen_addr = "0.0.0.0:18233"
+
+[network.testnet_parameters.activation_heights]
+Canopy = 1
+NU5 = 1
+NU6 = 1
+"NU6.1" = 1
+"NU6.2" = 1
+"NU6.3" = 1
+
+[mining]
+miner_address = "$1"
+
+[rpc]
+listen_addr = "0.0.0.0:18232"
+enable_cookie_auth = false
+
+[state]
+cache_dir = "/home/zebra/.cache/zebra"
+TOML
+  docker rm -f "$ZEBRA_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d --name "$ZEBRA_CONTAINER" --platform linux/amd64 --network "$ZEC_NET" \
+    -p "127.0.0.1:$ZEC_RPC_PORT:18232" -v "$ZEBRA_CONTAINER-state:/home/zebra/.cache/zebra" \
+    -v "$STATE/zec/zebrad.toml:/etc/zebrad/zebrad.toml:ro" \
+    "$ZEBRA_IMAGE" zebrad -c /etc/zebrad/zebrad.toml start >/dev/null
+  for _ in $(seq 1 120); do
+    zrpc getblockcount >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  docker logs --tail 30 "$ZEBRA_CONTAINER" >&2
+  die "zebrad did not come up"
+}
+
+# Zebra + Zaino on a fresh chain; a miner wallet takes the coinbase (which lands in Ironwood),
+# then pays Z its starting balance. Z's and B's wallets are created here too.
+start_zec() {
+  [ -x "$ZEC_DEVTOOL" ] || die "ZEC_DEVTOOL not found: $ZEC_DEVTOOL
+  build it: (cd vendor/zcash-devtool && cargo build --release --features regtest_support)"
+  if [ ! -x "$ZEC_SIGNER" ]; then
+    log "building ferry-zec-signer"
+    (cd "$ROOT/tools/ferry-zec-signer" && cargo build -q --release) || die "building ferry-zec-signer failed"
+  fi
+  docker rm -f "$ZAINO_CONTAINER" "$ZEBRA_CONTAINER" >/dev/null 2>&1 || true
+  docker volume rm "$ZEBRA_CONTAINER-state" >/dev/null 2>&1 || true
+  docker network create "$ZEC_NET" >/dev/null 2>&1 || true
+  rm -rf "$STATE/zec" && mkdir -p "$STATE/zec"
+  cat >"$STATE/zec/activation_heights.toml" <<TOML
+overwinter = 1
+sapling = 1
+blossom = 1
+heartwood = 1
+canopy = 1
+nu5 = 1
+nu6 = 1
+nu6_1 = 1
+nu6_2 = 1
+nu6_3 = 1
+nu7 = "never"
+TOML
+  cat >"$STATE/zec/zainod.toml" <<TOML
+backend = "fetch"
+network = "Regtest"
+
+[grpc_settings]
+listen_address = "0.0.0.0:8137"
+
+[validator_settings]
+validator_jsonrpc_listen_address = "$ZEBRA_CONTAINER:18232"
+validator_user = "regtest"
+validator_password = "regtest"
+
+[storage.database]
+path = "/app/data"
+TOML
+
+  # zebrad wants a miner address before any wallet can exist (wallet init needs Zaino up):
+  # start with a throwaway testnet t-address, then restart with the miner wallet's UA.
+  log "starting zebrad ($ZEBRA_IMAGE) on 127.0.0.1:$ZEC_RPC_PORT and zainod on :$ZAINO_PORT"
+  start_zebra tmWxWwf15vYpBNP82EJ2vNWSS5CaikXYbjb
+  zmine 1
+  docker run -d --name "$ZAINO_CONTAINER" --platform linux/amd64 --network "$ZEC_NET" \
+    -p "127.0.0.1:$ZAINO_PORT:8137" -v "$STATE/zec/zainod.toml:/app/config/zainod.toml:ro" \
+    "$ZAINO_IMAGE" start -c /app/config/zainod.toml >/dev/null
+  local ok=
+  for _ in $(seq 1 60); do
+    if zwallet_init miner 2>/dev/null; then ok=1; break; fi
+    rm -rf "$STATE/zec/miner"
+    sleep 2
+  done
+  [ -n "$ok" ] || { docker logs --tail 30 "$ZAINO_CONTAINER" >&2; die "zainod did not come up"; }
+  start_zebra "$(zwallet_ua miner)"
+  log "mining 105 ZEC blocks (coinbase maturity is 100; ~2s a block under emulation)"
+  zmine 105
+  zwallet_init z
+  zwallet_init b
+  zdt wallet -w "$STATE/zec/miner" sync -s "localhost:$ZAINO_PORT" >/dev/null
+  zdt wallet -w "$STATE/zec/miner" send -i "$STATE/zec/miner.age" --address "$(zwallet_ua z)" \
+    --value "$ZEC_BALANCE_ZAT" -s "localhost:$ZAINO_PORT" >/dev/null
+  # A note from another wallet is spendable after 10 confirmations under devtool's default policy.
+  zmine 11
+  log "funded Z with $ZEC_BALANCE_ZAT zat of shielded (Ironwood) ZEC"
+}
+
+# One ZEC block every ZEC_BLOCK_SECS (plus the time zebrad takes to make it).
+zec_producer() {
+  while true; do
+    sleep "$ZEC_BLOCK_SECS"
+    if zrpc generate '[1]' >/dev/null; then
+      echo "$(date '+%H:%M:%S') zec block $(zheight)"
+    else
+      echo "$(date '+%H:%M:%S') zec mining failed"
+    fi
+  done
 }
 
 # Mines a block every BLOCK_SECS, or every FAST_BLOCK_SECS while either party has an active stall
@@ -189,7 +355,7 @@ for s in json.load(sys.stdin):
 }
 
 cmd_up() {
-  if alive z || alive b || alive miner; then
+  if alive z || alive b || alive miner || alive zec-miner; then
     die "the demo is already running (infra/demo.sh status). Run infra/demo.sh down first"
   fi
   command -v docker >/dev/null || die "docker is required"
@@ -202,6 +368,7 @@ cmd_up() {
     (cd "$ROOT" && cargo build -q -p ferryd) || die "cargo build failed"
   fi
   start_bitcoind
+  [ "$ZEC_BACKEND" = devtool ] && start_zec
 
   rpc "" createwallet '["miner"]' >/dev/null
   local miner
@@ -234,6 +401,10 @@ ENV
 
   producer "$miner" >>"$STATE/logs/miner.log" 2>&1 &
   echo $! >"$STATE/miner.pid"
+  if [ "$ZEC_BACKEND" = devtool ]; then
+    zec_producer >>"$STATE/logs/zec-miner.log" 2>&1 &
+    echo $! >"$STATE/zec-miner.pid"
+  fi
 
   log "ready: Z http://127.0.0.1:$Z_PORT  B http://127.0.0.1:$B_PORT (maker $MAKER_URL)  bitcoind $BTC_RPC  (ZEC: $ZEC_BACKEND, a block every ${BLOCK_SECS}s)"
   log "API tokens and UI settings: $STATE/env"
@@ -242,9 +413,13 @@ ENV
 
 cmd_down() {
   stop_pid miner
+  stop_pid zec-miner
   stop_pid z
   stop_pid b
   docker rm -f "$CONTAINER" >/dev/null 2>&1 && log "removed $CONTAINER" || true
+  for c in "$ZAINO_CONTAINER" "$ZEBRA_CONTAINER"; do
+    docker rm -f "$c" >/dev/null 2>&1 && log "removed $c" || true
+  done
   log "stopped (logs in $STATE/logs)"
 }
 
@@ -255,6 +430,10 @@ cmd_status() {
     echo "bitcoind  down"
   fi
   if alive miner; then echo "producer  up (pid $(cat "$STATE/miner.pid"))"; else echo "producer  down"; fi
+  if docker ps --format '{{.Names}}' | grep -qx "$ZEBRA_CONTAINER"; then
+    echo "zebrad    up, height $(zheight 2>/dev/null || echo '?')  ($ZEC_RPC, zaino :$ZAINO_PORT)"
+    if alive zec-miner; then echo "zec producer up (pid $(cat "$STATE/zec-miner.pid"))"; else echo "zec producer down"; fi
+  fi
   for key in z b; do
     local port=$Z_PORT
     [ "$key" = b ] && port=$B_PORT
@@ -280,6 +459,10 @@ cmd_logs() {
   local which=${1:-z}
   if [ "$which" = bitcoind ]; then
     docker logs -f --tail 50 "$CONTAINER"
+  elif [ "$which" = zebra ]; then
+    docker logs -f --tail 50 "$ZEBRA_CONTAINER"
+  elif [ "$which" = zaino ]; then
+    docker logs -f --tail 50 "$ZAINO_CONTAINER"
   else
     tail -n 50 -f "$STATE/logs/$which.log"
   fi

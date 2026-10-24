@@ -20,13 +20,40 @@ pub use error::Error;
 pub use keys::{LocalKeys, Peer, Setup};
 pub use messages::{Envelope, Message, Transcript, PROTOCOL_VERSION};
 pub use params::SwapParams;
-pub use secret::Secret32;
+pub use secret::{Secret, Secret32, Secret64};
 pub use session::Session;
 pub use swap::{accept, Action, ChainEvent, Event, Proposal, Swap};
 pub use z::{ZState, ZSwap};
 pub use zec::{ZecLeg, ZecNote, ZecStatus};
 
 pub use ferry_btc::{Role, Spend};
+
+/// `Option<[u8; N]>` as an optional hex string.
+pub(crate) mod hex_opt {
+    use serde::{de::Error, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer, T: AsRef<[u8]>>(
+        v: &Option<T>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(v) => s.serialize_some(&hex::encode(v)),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, T: TryFrom<Vec<u8>>>(
+        d: D,
+    ) -> Result<Option<T>, D::Error> {
+        let Some(s) = Option::<String>::deserialize(d)? else {
+            return Ok(None);
+        };
+        let v = hex::decode(s).map_err(D::Error::custom)?;
+        T::try_from(v)
+            .map(Some)
+            .map_err(|_| D::Error::custom("wrong byte length"))
+    }
+}
 
 pub(crate) mod hex_serde {
     use serde::{de::Error, Deserialize, Deserializer, Serializer};

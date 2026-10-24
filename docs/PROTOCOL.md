@@ -51,8 +51,15 @@ tx_refund : cancel output → B                      (Z's sig is an adaptor sig 
 tx_punish : cancel output → Z                      (Z alone, after T2)
 ```
 
-Taproot internal key: an unspendable NUMS point (a MuSig2 key-path spend for the cooperative case is a
-stretch goal: it would make the happy path look like any single-sig Taproot spend).
+Lock output internal key: the MuSig2 aggregate `KeyAgg(kb, kz)` (BIP327), so the happy path redeems
+through the **key path** and tx_lock + tx_redeem look like any single-key Taproot payment and spend:
+one 64-byte signature, no script revealed. tx_redeem is a MuSig2 *adaptor* signature under `Z_s`:
+B sends a nonce with the lock template, Z answers with its nonce and partial signature (with the
+cancel signatures), and B's partial signature (step 5) combines with Z's into an encrypted
+signature that only `z` completes. The completed signature on chain gives B `z = s − ŝ` exactly as
+in the script path. Each party uses one fresh nonce for this one message. The script leaves stay as
+fallbacks (`--btc-keypath false` uses the 2-of-2 redeem leaf); the cancel output keeps a NUMS
+internal key, so cancel/refund/punish are script-path spends.
 
 ## Flow
 
@@ -98,8 +105,9 @@ stretch goal: it would make the happy path look like any single-sig Taproot spen
   leave the two parties. Each spend publishes only `rk = ak + α·G` with fresh `α`.
 - **What the counterparty learns:** it holds the viewing key for the single-use joint address, so it
   sees the lock note and the sweep's nullifier. It never sees either party's own wallet.
-- **Bitcoin side:** public, as Bitcoin is. Script-path spends reveal the swap shape (MuSig2 key path
-  removes this for the happy path).
+- **Bitcoin side:** public, as Bitcoin is. On the happy path tx_lock and tx_redeem are a key-path
+  payment and spend, indistinguishable from a single-key wallet's. The abort paths (cancel, refund,
+  punish) are script-path spends and do reveal the swap shape.
 - **Timing:** sweeps use a random delay to avoid lining up with the BTC redeem.
 
 ## Known gaps (disclosed)

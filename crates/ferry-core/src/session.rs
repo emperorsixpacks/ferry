@@ -1,4 +1,5 @@
 use ferry_btc::bitcoin::{Address, OutPoint};
+use ferry_btc::musig::KeySpend;
 use ferry_btc::{EncryptionKey, SwapScripts, SwapTxs};
 use ferry_dleq::k256::elliptic_curve::PrimeField;
 use ferry_dleq::{PallasPoint, PallasScalar};
@@ -136,7 +137,13 @@ impl Session {
             self.by_role(me, peer, Role::Z),
             self.params.t1,
             self.params.t2,
+            self.params.keypath,
         )
+    }
+
+    /// MuSig2 key-path context for the lock output, when the swap uses the key path.
+    pub fn key_spend(&self) -> Option<KeySpend> {
+        KeySpend::new(&self.scripts())
     }
 
     pub fn lock_address(&self) -> Address {

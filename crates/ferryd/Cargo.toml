@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 ferry-core.workspace = true
 ferry-dleq.workspace = true
+ferry-zec = { path = "../ferry-zec" }
 ferry-btc = { path = "../ferry-btc", features = ["rpc"] }
 anyhow = "1"
 axum = "0.8"

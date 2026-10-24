@@ -9,10 +9,11 @@
 
 use ferry_btc::adaptor::{self, EncryptedSignature};
 use ferry_btc::bitcoin::{OutPoint, Transaction, TxOut};
+use ferry_btc::musig::{KeySpend, PartialSig, PubNonce};
 use ferry_btc::SwapTxs;
 use serde::{Deserialize, Serialize};
 
-use crate::{Action, ChainEvent, Error, Event, Message, Role, Secret32, Session, Spend};
+use crate::{Action, ChainEvent, Error, Event, Message, Role, Secret32, Secret64, Session, Spend};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BState {
@@ -60,6 +61,17 @@ impl BState {
     }
 }
 
+/// Key path: public MuSig2 nonces and Z's partial signature on tx_redeem.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Musig {
+    #[serde(with = "crate::hex_serde")]
+    b_nonce: PubNonce,
+    #[serde(default, with = "crate::hex_opt")]
+    z_nonce: Option<PubNonce>,
+    #[serde(default, with = "crate::hex_opt")]
+    z_partial: Option<PartialSig>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BSwap {
     pub session: Session,
@@ -72,6 +84,15 @@ pub struct BSwap {
     refund_enc_sig: Option<EncryptedSignature>,
     /// Our adaptor signature on tx_redeem, under Z_s.
     redeem_enc_sig: Option<EncryptedSignature>,
+    /// Key path: our secret MuSig2 nonce, until it signs once.
+    #[serde(default)]
+    musig_secret: Option<Secret64>,
+    /// Key path: public nonces `[B's, Z's]` and Z's partial signature.
+    #[serde(default)]
+    musig: Option<Musig>,
+    /// Key path: the combined adaptor signature on tx_redeem, under Z_s.
+    #[serde(default)]
+    keypath_enc_sig: Option<EncryptedSignature>,
     lock_confs: u32,
     cancel_confs: Option<u32>,
 }
@@ -89,6 +110,9 @@ impl BSwap {
             cancel_tx: None,
             refund_enc_sig: None,
             redeem_enc_sig: None,
+            musig_secret: None,
+            musig: None,
+            keypath_enc_sig: None,
             lock_confs: 0,
             cancel_confs: None,
         };
@@ -166,9 +190,20 @@ impl BSwap {
         }
         self.lock = Some((tx, vout));
         self.state = BState::LockBuilt;
+        let redeem_nonce = self.session.params.keypath.then(|| {
+            let (secret, public) = ferry_btc::musig::new_nonce();
+            self.musig_secret = Some(Secret64::new(*secret));
+            self.musig = Some(Musig {
+                b_nonce: public,
+                z_nonce: None,
+                z_partial: None,
+            });
+            public
+        });
         let msg = Message::LockTemplate {
             outpoint,
             amount: self.session.params.btc_amount,
+            redeem_nonce,
         };
         Ok(vec![Action::SendMessage(self.session.seal(msg))])
     }
@@ -179,10 +214,32 @@ impl BSwap {
                 Message::CancelSigs {
                     cancel_sig,
                     refund_enc_sig,
+                    redeem_nonce,
+                    redeem_partial,
                 },
                 BState::LockBuilt,
             ) => {
                 let txs = self.txs()?;
+                if let Some(ks) = self.session.key_spend() {
+                    let (Some(z_nonce), Some(z_partial)) = (redeem_nonce, redeem_partial) else {
+                        return Err(Error::Musig("Z sent no nonce/partial signature"));
+                    };
+                    let m = self.musig.as_mut().expect("nonce sent with LockTemplate");
+                    let ok = ks.verify_partial(
+                        Role::Z,
+                        z_partial,
+                        [&m.b_nonce, z_nonce],
+                        &self.session.z_encryption_key(),
+                        &txs.keypath_redeem_sighash(),
+                    );
+                    if !ok {
+                        return Err(Error::BadSignature(
+                            "Z's MuSig2 partial signature on tx_redeem",
+                        ));
+                    }
+                    m.z_nonce = Some(*z_nonce);
+                    m.z_partial = Some(*z_partial);
+                }
                 let kz = self.session.peer.btc_key;
                 let cancel_hash = txs.sighash(Spend::Cancel);
                 if !adaptor::verify(&kz, &cancel_hash, cancel_sig) {
@@ -257,9 +314,14 @@ impl BSwap {
             &txs.sighash(Spend::Redeem),
         );
         self.redeem_enc_sig = Some(enc.clone());
+        let redeem_partial = match self.session.key_spend() {
+            Some(ks) => Some(self.keypath_partial(&ks, &txs)?),
+            None => None,
+        };
         self.state = BState::RedeemSigSent;
         let env = self.session.seal(Message::RedeemAdaptor {
             redeem_enc_sig: enc,
+            redeem_partial,
         });
         Ok(vec![Action::SendMessage(env)])
     }
@@ -277,13 +339,17 @@ impl BSwap {
             Some(Spend::Redeem)
                 if !matches!(self.state, BState::BtcRedeemed | BState::ZecSwept) =>
             {
-                // B's completed signature is on chain: s − ŝ reveals z.
-                let enc = self
-                    .redeem_enc_sig
-                    .as_ref()
-                    .ok_or(Error::Recovery("redeem without our adaptor"))?;
-                let sig_b = SwapTxs::witness_sig(tx, Spend::Redeem, Role::B)?;
-                let y = adaptor::recover(&self.session.z_encryption_key(), enc, &sig_b).ok_or(
+                // The completed signature is on chain: s − ŝ reveals z. Key path: the
+                // aggregate signature completes the combined MuSig2 adaptor signature.
+                let (enc, sig) = match SwapTxs::keypath_sig(tx) {
+                    Some(sig) => (self.keypath_enc_sig.as_ref(), sig),
+                    None => (
+                        self.redeem_enc_sig.as_ref(),
+                        SwapTxs::witness_sig(tx, Spend::Redeem, Role::B)?,
+                    ),
+                };
+                let enc = enc.ok_or(Error::Recovery("redeem without our adaptor"))?;
+                let y = adaptor::recover(&self.session.z_encryption_key(), enc, &sig).ok_or(
                     Error::Recovery("redeem signature does not complete our adaptor"),
                 )?;
                 let z = self.session.peer_share_from_secp(&y)?;
@@ -308,6 +374,32 @@ impl BSwap {
             }
             _ => Ok(vec![]),
         }
+    }
+
+    /// Our MuSig2 partial signature on tx_redeem (once: the secret nonce is then erased), and
+    /// the combined key-path adaptor signature we will need to extract z.
+    fn keypath_partial(&mut self, ks: &KeySpend, txs: &SwapTxs) -> Result<PartialSig, Error> {
+        let m = self.musig.clone().ok_or(Error::Musig("no nonces"))?;
+        let (Some(z_nonce), Some(z_partial)) = (m.z_nonce, m.z_partial) else {
+            return Err(Error::Musig("no partial signature from Z"));
+        };
+        let secret = self
+            .musig_secret
+            .take()
+            .ok_or(Error::Musig("nonce already used"))?;
+        let t = self.session.z_encryption_key();
+        let hash = txs.keypath_redeem_sighash();
+        let nonces = [&m.b_nonce, &z_nonce];
+        let key = self.session.me.btc_key();
+        let ours = ks
+            .partial_sign(&key, Role::B, secret.expose(), nonces, &t, &hash)
+            .ok_or(Error::Musig("signing failed"))?;
+        let enc = ks
+            .combine([&ours, &z_partial], nonces, &t, &hash)
+            .filter(|e| adaptor::verify_encrypted(&ks.output_key(), &t, &hash, e))
+            .ok_or(Error::Musig("combined adaptor signature invalid"))?;
+        self.keypath_enc_sig = Some(enc);
+        Ok(ours)
     }
 
     /// Timelock-driven transitions.

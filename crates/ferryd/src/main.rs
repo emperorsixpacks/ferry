@@ -38,7 +38,36 @@ async fn main() -> anyhow::Result<()> {
             run(cli, leg).await
         }
         ZecBackend::Devtool => {
-            bail!("--zec devtool needs the ferry-zec crate, which is not part of this build yet")
+            let cfg = ferry_zec::DevtoolConfig {
+                devtool: cli.zec_devtool.clone(),
+                signer: cli.zec_signer.clone(),
+                wallet_dir: cli
+                    .zec_wallet_dir
+                    .clone()
+                    .unwrap_or_else(|| cli.data_dir.join("zec-wallet")),
+                identity: cli
+                    .zec_identity
+                    .clone()
+                    .unwrap_or_else(|| cli.data_dir.join("zec-identity.age")),
+                server: cli.zec_server.clone(),
+                network: cli.zec_network.clone(),
+                activation_heights: cli.zec_activation_heights.clone(),
+                node_rpc: cli.zec_node_rpc.clone(),
+                node_rpc_auth: cli
+                    .zec_node_rpc_auth
+                    .as_deref()
+                    .map(|a| {
+                        a.split_once(':')
+                            .map(|(u, p)| (u.to_string(), p.to_string()))
+                            .context("--zec-node-rpc-auth must be USER:PASS")
+                    })
+                    .transpose()?,
+                sync_interval: std::time::Duration::from_secs_f64(cli.zec_sync_secs.max(0.2)),
+            };
+            let leg = ferry_zec::DevtoolZecLeg::new(cfg)
+                .await
+                .context("starting the zcash-devtool wallet")?;
+            run(cli, leg).await
         }
     }
 }

@@ -449,7 +449,22 @@ async fn happy_swap_over_http_with_restart() {
     assert!(z["observer"]["btc"][1]
         .as_str()
         .unwrap()
-        .starts_with("tx_redeem: script-path spend"));
+        .starts_with("tx_redeem: key-path spend"));
+    let redeem_txid = entry(&z, "btc_redeem_broadcast")["txid"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let redeem = w.rpc.raw_transaction(&redeem_txid).await.unwrap().unwrap();
+    assert_eq!(
+        redeem.input[0].witness.len(),
+        1,
+        "MuSig2 key-path redeem: a single signature"
+    );
+    assert!(z["observer"]["btc"][0]
+        .as_str()
+        .unwrap()
+        .starts_with("tx_lock: "));
 
     let zs = w.get(&w.z.url, "/api/status").await;
     assert_eq!(zs["balances"]["btc_sat"], 410_000 - 2_000);

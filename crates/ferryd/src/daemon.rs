@@ -789,10 +789,17 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             ),
             Some(Spend::Redeem) => {
                 rec.mine_revealed = true;
-                (
-                    "btc_redeem_broadcast",
-                    "Decrypted the adaptor with z, added Z's signature and broadcast tx_redeem",
-                )
+                if tx.input[0].witness.len() == 1 {
+                    (
+                        "btc_redeem_broadcast",
+                        "Completed the MuSig2 adaptor signature with z and broadcast tx_redeem as a key-path spend",
+                    )
+                } else {
+                    (
+                        "btc_redeem_broadcast",
+                        "Decrypted the adaptor with z, added Z's signature and broadcast tx_redeem",
+                    )
+                }
             }
             Some(Spend::Refund) => {
                 rec.mine_revealed = true;

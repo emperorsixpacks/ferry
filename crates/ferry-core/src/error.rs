@@ -19,6 +19,8 @@ pub enum Error {
     InvalidSetup { role: Role, reason: &'static str },
     #[error("DLEQ proof from {0:?} rejected: {1:?}")]
     Dleq(Role, ferry_dleq::VerifyError),
+    #[error("MuSig2 key path: {0}")]
+    Musig(&'static str),
     #[error("invalid signature: {0}")]
     BadSignature(&'static str),
     #[error("lock output does not match the agreed script/amount")]

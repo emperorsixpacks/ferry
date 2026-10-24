@@ -46,6 +46,10 @@ impl BtcKey {
         Zeroizing::new(self.0.secret_key().to_bytes())
     }
 
+    pub(crate) fn secret_scalar(&self) -> Scalar {
+        *self.0.secret_key()
+    }
+
     pub fn xonly(&self) -> XOnlyPublicKey {
         XOnlyPublicKey::from_slice(&self.0.public_key().to_xonly_bytes())
             .expect("schnorr_fun keys are valid x-only keys")
@@ -68,6 +72,10 @@ pub struct EncryptionKey(Point<Normal, Public, NonZero>);
 impl EncryptionKey {
     pub fn from_sec1(bytes: &[u8; 33]) -> Option<Self> {
         Point::from_bytes(*bytes).map(EncryptionKey)
+    }
+
+    pub(crate) fn point(&self) -> Point<Normal, Public, NonZero> {
+        self.0
     }
 
     pub fn to_sec1(&self) -> [u8; 33] {
