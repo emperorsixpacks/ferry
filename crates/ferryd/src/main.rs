@@ -28,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let mut cli = Cli::parse();
     resolve_secret_files(&mut cli)?;
+    tower::check_url(&cli)?;
     match cli.zec {
         ZecBackend::Mock => {
             let path = cli

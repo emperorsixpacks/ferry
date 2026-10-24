@@ -29,7 +29,7 @@ pub use ready::{ready_digest, ready_signer, swap_id};
 #[cfg(feature = "client")]
 pub use alloy::signers::local::PrivateKeySigner;
 #[cfg(feature = "client")]
-pub use client::{EvmClient, OnChainSwap, SwapState, TokenInfo, TxInfo};
+pub use client::{EvmClient, OnChainSwap, SwapState, TokenInfo, TxInfo, TxStatus};
 #[cfg(feature = "client")]
 pub use events::{revealed_in_calldata, Revealed, SwapEvent, SwapEventKind, SwapWatcher};
 #[cfg(feature = "client")]

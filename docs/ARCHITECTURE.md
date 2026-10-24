@@ -15,8 +15,9 @@ ferry/
     ferry-core/              swap session: params, messages, state machine, timelock policy (no I/O)
     ferryd/                  daemon + CLI: runs one party (role Z or B), HTTP API for peer + UI,
                              chain watchers, persistence (one JSON file per swap)
-    ferry-watchtower/        keyless tower: broadcasts an offline party's presigned cancel/refund/punish
-                             on time (HTTP upload, bitcoind polling; docs/WATCHTOWER.md)
+    ferry-watchtower/        watchtower: broadcasts an offline party's presigned cancel/refund/punish
+                             on time (bitcoind or litecoind polling), or calls FerryLock's
+                             refund/punish for it (--counter evm); HTTP upload; docs/WATCHTOWER.md
   contracts/                 Foundry: FerryLock (EVM counter-chain lock), MockUSDC, tests (docs/EVM.md)
   web/                       demo UI (two parties side by side + "what each chain sees")
   infra/                     docker: bitcoind regtest, litecoind regtest (infra/ltc), Zebra regtest (NU6.3 at 1), Zaino

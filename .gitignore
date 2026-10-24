@@ -17,3 +17,5 @@ infra/deploy/secrets/
 .claude/worktrees/
 .demo-evm/
 HANDOFF.md
+.evm-testnet/
+.evm-testnet-fork/

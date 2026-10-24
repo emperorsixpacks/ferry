@@ -14,6 +14,8 @@ client = [
     "alloy/contract",
     "alloy/provider-http",
     "alloy/reqwest",
+    # Public RPCs (https://sepolia.base.org) need TLS; rustls verifies against the system roots.
+    "alloy/reqwest-rustls-tls",
     "alloy/rpc-types",
     "alloy/signer-local",
     "alloy/network",

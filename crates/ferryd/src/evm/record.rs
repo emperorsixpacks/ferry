@@ -162,6 +162,9 @@ pub struct EvmRecord {
     pub zec_joint: String,
     pub observer_evm: Vec<(String, String)>,
     pub observer_zec: Vec<(String, String)>,
+    /// Our package at the watchtower (--watchtower), if one is configured.
+    #[serde(default)]
+    pub watchtower: Option<crate::tower::TowerState>,
 }
 
 impl EvmRecord {
@@ -204,6 +207,7 @@ impl EvmRecord {
             zec_joint,
             observer_evm: vec![],
             observer_zec: vec![],
+            watchtower: None,
         }
     }
 

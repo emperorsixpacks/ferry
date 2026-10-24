@@ -9,8 +9,8 @@ Taproot output. Nobody holds both sides, and either party can walk away with its
 The same construction also swaps shielded ZEC for **Litecoin** (same Taproot scripts, see
 [docs/LITECOIN.md](docs/LITECOIN.md)) and for **USDC or WETH on an EVM chain** through a small
 `FerryLock` contract ([docs/EVM.md](docs/EVM.md); WETH is wrapped ETH, at most about 18.4 WETH per
-swap). A keyless **watchtower** can act at the deadlines for a party that goes offline, and the app
-lists several **makers** with live market rates.
+swap). A keyless **watchtower** can act at the deadlines for a party that goes offline, on all
+three, and the app lists several **makers** with live market rates.
 
 Built for the [Zecathon](https://thezecathon.com) **Cross-chain** track: *swaps, bridges and intents
 that reach other chains without unshielding on the way through.*
@@ -64,8 +64,11 @@ cd web && pnpm install && source ../.demo/env && pnpm dev:ui   # the crossing, l
 infra/demo.sh help              # the three demo stories (swap, refund, punish) and curl examples
 infra/demo.sh down
 infra/demo-watchtower.sh run    # a party is killed mid-swap; its watchtower refunds or punishes
+CHAIN=ltc infra/demo-watchtower.sh run   # the same on Litecoin (CHAIN=evm: USDC in FerryLock on anvil)
 infra/demo-ltc.sh up            # the same demo against litecoind regtest (ZEC/LTC)
 infra/evm-demo.sh test          # ZEC/USDC on anvil: happy, refund and punish
+infra/evm-testnet.sh fork test  # ZEC/USDC rehearsal on a Base Sepolia fork; without `fork`, the
+                                # real Base Sepolia + Zcash testnet run (docs/EVM.md)
 ```
 
 ## Deploying
@@ -84,7 +87,7 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
 | `crates/ferryd` | the party daemon: peer protocol, chain watchers, persistence, HTTP/SSE API |
 | `crates/ferry-evm` | FerryLock client (lock, claim, refund, punish), event watching, share extraction |
 | `contracts/` | `FerryLock.sol` (Foundry): the EVM lock, claim with `z`, refund with `b`, punish |
-| `crates/ferry-watchtower` | keyless watchtower: broadcasts an offline party's presigned cancel/refund/punish on time ([docs](docs/WATCHTOWER.md)) |
+| `crates/ferry-watchtower` | watchtower: broadcasts an offline party's presigned cancel/refund/punish on time (Bitcoin, Litecoin), or calls FerryLock's refund/punish for it (EVM) ([docs](docs/WATCHTOWER.md)) |
 | `web/` | the demo UI |
 | `infra/` | one-command local environment |
 | `spikes/` | day-0 go/no-go experiments, kept as evidence |
@@ -102,7 +105,10 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
   punish against anvil. B's go-ahead is an off-chain EIP-712 signature, so nothing on chain dates
   the ZEC lock.
 - Watchtower: with the owner offline, it broadcasts cancel then refund (B) or cancel then punish (Z)
-  on regtest; it holds no keys, and every package is validated against the swap's own templates.
+  on Bitcoin and Litecoin regtest; it holds no keys, and every package is validated against the
+  swap's own templates. On EVM it calls FerryLock's refund (B) or punish (Z) on anvil, inside the
+  same windows, from its own gas account; Z's package is keyless and B's holds B's key share, so
+  B arms only its own tower.
 - Makers: ferryd can quote the median of Kraken/CoinGecko plus a spread and pauses when the feed is
   stale; the app lists the operator's allowlisted makers with rate, age, range and liquidity.
 - **Real shielded ZEC, end to end.** `infra/e2e-real.sh` starts a fresh regtest Bitcoin + Zebra +
@@ -136,7 +142,8 @@ Plain-language versions of these, with what happens in every abort case, are in
 - The cross-group DLEQ is unaudited (Serai's `dleq`, experimental feature).
 - Presigned Bitcoin transactions use fixed fees; mainnet needs an anchor/CPFP plan.
 - Liveness: each party must be online until its deadline, as in every adaptor-signature swap, or
-  delegate its signed deadline transactions to a keyless [watchtower](docs/WATCHTOWER.md).
+  delegate its deadline actions to a [watchtower](docs/WATCHTOWER.md). The tower must stay up
+  (and, on EVM, funded for gas); B's must be its own.
 
 ## Credits
 

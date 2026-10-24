@@ -120,8 +120,9 @@ internal key, so cancel/refund/punish are script-path spends.
 - The cross-group DLEQ proof is unaudited.
 - Liveness: each party must be online between its deadlines (as in every adaptor-signature swap),
   or delegate its fully signed tx_cancel + tx_refund (B) or tx_cancel + tx_punish (Z) to a
-  keyless watchtower ([WATCHTOWER.md](WATCHTOWER.md)). B's completed tx_refund reveals `b` to Z,
-  so B's tower must not collude with Z.
+  keyless watchtower ([WATCHTOWER.md](WATCHTOWER.md)), on Bitcoin or Litecoin. B's completed
+  tx_refund reveals `b` to Z, so B's tower must not collude with Z. On EVM the tower calls
+  FerryLock's `punish` (Z, keyless) or `refund` (B, with `b` itself), under the same rule.
 
 ## Other counter-chains
 

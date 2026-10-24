@@ -12,7 +12,8 @@ testnet is Base Sepolia, and local runs use anvil.
 
 To run it: `ferryd --counter evm` with the `--evm-*` flags (below). `infra/evm-demo.sh test`
 runs a happy swap, a refund and a punish against anvil with the mock ZEC leg (`TOKEN=weth` for
-WETH).
+WETH). `infra/evm-testnet.sh` sets up the public run on Base Sepolia and Zcash testnet
+([Running on Base Sepolia](#running-on-base-sepolia)).
 
 ## Contract
 
@@ -86,6 +87,33 @@ Abort paths: if B never signs Ready, or Z never claims, then from t1 B refunds a
 and Z reclaims its ZEC. If B stays silent until t2, anyone can call `punish` and the tokens go to
 Z. As with Bitcoin, Z's ZEC then stays locked, and going quiet costs B.
 
+## Watchtower
+
+A party that can't stay online until its deadline can arm a watchtower, as on Bitcoin
+([WATCHTOWER.md](WATCHTOWER.md#usdc-on-evm-ferrylock)): `ferry-watchtower --counter evm` on the
+tower's side, and the usual `--watchtower` flags on ferryd. Once the lock is on chain, ferryd
+uploads a package, and the tower calls the contract when the owner's deadline comes, paying the
+gas from its own account. FerryLock pays the swap's own `refunder` or `claimer`, whoever calls.
+
+- **Z's package is keyless.** Anyone may call `punish` from t2, so Z hands over only the swap id
+  and its terms, and can use any tower.
+- **B's package carries `b`.** `refund` needs it. That publishes `b`, which is exactly what lets Z
+  reclaim its ZEC, so a tower that passed `b` to Z early (or sent a refund that reverts before
+  t1) would let Z take its ZEC back while it can still claim the tokens. B therefore arms only a
+  tower marked as its own (`--watchtower-own`), the same rule as for B's completed Bitcoin refund,
+  and never signs Ready once the ZEC lock note is spent, so an early leak can't cost B the tokens
+  too.
+- **The tower keeps the daemon's timing rules**, judged by the latest block's timestamp: refund
+  only in [t1, t2 − Δ) and only from a node that is not lagging the clock, punish only from t2,
+  nothing once the swap is claimed, refunded or punished. It checks the package against the chain
+  (FerryLock's code, the exact terms, the payee is the owner) and simulates every call first.
+- **Limits.** The tower needs a little ETH; without it, it can't act. It sees the swap's terms
+  (public once locked) and B's `b` (public once refunded), nothing about the ZEC side. On Base, it
+  depends on the sequencer like any sender, which is what the Δ margins are for.
+
+`CHAIN=evm infra/demo-watchtower.sh run` plays it on anvil: B is killed after locking and its tower
+refunds at t1; then Z is killed after locking ZEC and its tower punishes at t2.
+
 ## Design review: what changed from the first proposal, and why
 
 The proposal was sound in outline. These are the points where it changed:
@@ -134,6 +162,51 @@ New rules for EVM, because **a transaction that reverts still publishes its call
   L1-inclusion path takes up to the 12 h sequencing window. The Base mainnet policy therefore
   asks for 1 h margins and at least 4 h from the proposal to t1 − Δ; Base Sepolia asks for 2 min
   margins (`EvmPolicy::for_chain`).
+
+**Per-chain minimums** (`EvmPolicy::for_chain`). Each party refuses terms below these. Δ is both
+margins; the claim window is the time from the proposal to t1 − Δ.
+
+| Chain (id) | Δ | lock confirmations | ZEC confirmations | claim window |
+|---|---|---|---|---|
+| Ethereum (1) | 15 min | 64 (~13 min) | 10 | 2 h |
+| Base (8453), Optimism (10) | 1 h | 30 (~1 min) | 10 | 4 h |
+| Arbitrum One (42161) | 1 h | 240 (~1 min) | 10 | 4 h |
+| Sepolia, Base Sepolia, OP Sepolia, Arbitrum Sepolia | 2 min | 2 | 3 | 20 min |
+| anvil (31337) | only with `--dev-policy`: 2 s | 1 | 1 | 10 s |
+| anything else | refused, unless `--evm-testnet-policy` | | | |
+
+- **Ethereum** has no sequencer: many builders compete to include a transaction, so one with a
+  fair fee lands within a few 12 s blocks. 15 min (75 blocks) leaves room for congestion and fee
+  spikes. 64 lock confirmations are about two epochs, when a block is normally finalized, so Z
+  locks ZEC only behind a lock that can't be reorganized without a third of the stake being
+  slashed. 2 h covers B's lock and its confirmations (~13 min), Z's ZEC lock and 10 Zcash
+  confirmations (~12.5 min), and the claim with its 15 min margin, with room to spare.
+- **Base and Optimism** are both OP Stack chains with 2 s blocks, a single sequencer and a 12 h
+  forced-inclusion window, so they share one policy: the 1 h margins and 4 h window above. 30
+  lock confirmations are a minute of blocks. They guard against the sequencer replacing recent
+  blocks, not against L1 reorgs: full finality waits for the batch to be posted and finalized on
+  Ethereum.
+- **Arbitrum One** has a single sequencer and a 24 h delay before a transaction can be forced in
+  through L1, so its margins and claim window are at least Base's. It makes a block about every
+  0.25 s, so 240 lock confirmations cover the same minute as Base's 30 (blocks come only with
+  transactions, so a quiet chain takes longer, never less).
+- **ZEC confirmations** are the Zcash side's and don't depend on the EVM chain: 10 (about
+  12.5 min) on every mainnet.
+- **Test networks** get short margins so a swap fits in minutes. That is fine without value at
+  stake, and nothing more: `infra/evm-testnet.sh` already runs Base Sepolia with a 5 min Δ.
+- **Unknown chains are refused.** A chain id Ferry has no row for gets no silent default. An
+  operator who runs some other test network can pass `--evm-testnet-policy` to give it the
+  test-network minimums; ferryd refuses that flag for a listed chain, so it can't loosen a
+  mainnet.
+
+**The honest limit.** A 1 h margin protects against a sequencer that is slow or down for a
+while. It does not cover one that withholds a transaction for its whole forced-inclusion window
+(12 h on Base and Optimism, 24 h on Arbitrum). Such a sequencer can make Z's claim or B's refund
+miss its window. If the withheld transaction is then included after the deadline, it reverts but
+still publishes its share (z or b), and the other side can take both coins. Covering that would
+need margins longer than the window, so swaps lasting days. Ferry doesn't do that: on these
+chains you also trust the sequencer to include transactions within the margin. On Ethereum no
+single party can withhold a transaction for long.
 
 Compared with Bitcoin, one race is gone. A valid claim and a valid refund can never compete in
 the mempool, because the windows don't overlap. The only risk left is a late transaction
@@ -240,13 +313,17 @@ Only the token changes.
   - With the default `client` feature: `EvmClient` (`lock`, `claim`, `refund`, `punish`,
     `swap`, `check_lock`, `check_deployment`, `token_info`, `events`, `latest_block`),
     `SwapWatcher`, `SwapEvent::revealed_share`, `revealed_in_calldata`, `sign_ready`.
-  - Tests: unit tests, `tests/anvil.rs` (spawns anvil on a port the OS picks: deployment check,
-    a relayed happy claim with an EIP-712 signature checked against the contract's digest, a
-    refund and a punish, all with DLEQ-proven shares; and `token_info` plus a 50 WETH lock and
-    claim, above 2^64 wei), and `tests/artifacts.rs` (the committed ABI and bytecode match a
-    fresh `forge build`).
-- **`ferry_core::evm`.** `EvmParams` with block-time windows, and `EvmPolicy` per chain (anvil
-  needs `--dev-policy`). `EvmKeys`/`EvmSetup`, `EvmSession` (joint key, the shares from revealed
+    `connect_http` speaks https (rustls), gives each request 30 s, retries rate-limited
+    requests (HTTP 429 or 503) with a backoff, takes each nonce from the node (so a failed
+    send leaves no nonce gap), and waits at most 3 minutes for a receipt.
+  - Tests: unit tests, `tests/anvil.rs` (spawns anvil on a port the OS picks unless
+    `FERRY_EVM_TEST_PORT` pins it: deployment check, a relayed happy claim with an EIP-712
+    signature checked against the contract's digest, a refund and a punish, all with
+    DLEQ-proven shares; and `token_info` plus a 50 WETH lock and claim, above 2^64 wei), and
+    `tests/artifacts.rs` (the committed ABI and bytecode match a fresh `forge build`).
+- **`ferry_core::evm`.** `EvmParams` with block-time windows, and `EvmPolicy` per chain (the
+  table above; anvil needs `--dev-policy`, an unlisted chain `--evm-testnet-policy`).
+  `EvmKeys`/`EvmSetup`, `EvmSession` (joint key, the shares from revealed
   scalars, swap id, ready digest, the exact lock terms), versioned `EvmEnvelope`/`EvmMessage`,
   and the two state machines.
   - **Shared with the Bitcoin machines:** the joint-key and DLEQ code, the `ZecLeg` actions,
@@ -266,8 +343,13 @@ Only the token changes.
       `symbol()` and `decimals()` at startup.
     - `--evm-t1-secs` (proposal to t1), `--evm-refund-secs` (t2 − t1), `--evm-delta-secs`.
     - `--evm-lock-confs`, `--evm-max-tip`, `--evm-log-chunk`.
+    - `--evm-testnet-policy`: accept a chain id with no policy as a test network (above).
+    - `--watchtower`, `--watchtower-token-file`, `--watchtower-own`, as on Bitcoin (see
+      [Watchtower](#watchtower)).
   - `--maker-offer RATE:MIN:MAX` gives the rate in token base units per ZEC. The price feed
     works with `--maker-price-pair ZEC/USDC` (or `ZEC/ETH` for WETH).
+  - Each poll re-reads only the last 120 blocks of a swap's FerryLock events and keeps the
+    older ones from earlier polls, so the scan stays one `eth_getLogs` request on public RPCs.
   - The views keep the Bitcoin shape: counter amounts sit in `btc_sat` as token base units
     (`balances.token_units` is the exact balance as a string), and `chains.btc` carries `coin`
     (the lowercased symbol), `ticker` and `decimals`. A `counter` block adds the contract,
@@ -277,18 +359,127 @@ Only the token changes.
 - **`infra/evm-demo.sh`.** anvil on 18545, ferryd on 7901/7902 (peers on 7911/7912), and
   `happy`, `refund`, `punish`, `test`. `TOKEN=weth` deploys MockWETH, has B wrap 100 ETH and
   quotes 0.012 WETH per ZEC; `test` also checks that ferryd refuses a mislabeled token.
+- **`infra/evm-testnet.sh`.** Base Sepolia and Zcash testnet: `keys`, `status`, `deploy`, `up`,
+  `swap`, `down`, and `fork` for a rehearsal on a local fork (below).
 - **Web.** The coin table has a `usdc` entry (6 decimals, `kind: "evm"`, the chain named from
   the network). Deadlines are drawn in block time, the crossing has no cancel output, and the
   maker list labels EVM makers `ZEC/<token>`. `pnpm shoot:evm` takes the screenshots against a
   running EVM demo.
 
 Gas (forge gas report): lock about 273k; claim about 75k, or up to 109k with a tip; refund about
-57k; punish about 68k. Ready costs nothing.
+57k; punish about 68k. Ready costs nothing. Deploying FerryLock costs about 1.79M.
+
+## Running on Base Sepolia
+
+`infra/evm-testnet.sh` runs the swap on public test networks: Circle's test USDC
+(`0x036CbD53842c5426634e7929541eC2318f3dCF7e`) in a FerryLock you deploy on Base Sepolia, and
+real TAZ on Zcash testnet through zcash-devtool wallets, the way `infra/testnet.sh` runs the
+signet pair. It needs Foundry (`cast`, `forge`), python3, openssl, and zcash-devtool built with
+Ferry's patch (`vendor/zcash-devtool`, or set `ZEC_DEVTOOL`).
+
+### 1. Create the accounts
+
+```sh
+infra/evm-testnet.sh keys
+```
+
+This creates, once, three Base Sepolia accounts (the deployer, B and Z) and a Zcash testnet
+wallet for each side. Everything goes in `.evm-testnet/` (git ignores it; the directory is
+private to you, mode 0700, and each file 0600). The script prints addresses, never a key, and
+running it again changes nothing. **Back up `.evm-testnet/`**: it holds the only copy of the
+keys.
+
+### 2. Fund them
+
+`keys` prints the addresses, and `infra/evm-testnet.sh status` shows them again with their
+balances and lists exactly what is still missing.
+
+| account | what it does | send it | from |
+|---|---|---|---|
+| deployer | deploys FerryLock, once | about 0.005 ETH | Coinbase CDP faucet or Alchemy faucet (Base Sepolia) |
+| B, the maker | approves and locks the USDC; refunds | about 0.002 ETH and 10 USDC | ETH: as above; USDC: https://faucet.circle.com, network Base Sepolia |
+| Z, the taker | receives the USDC and sends the claim | about 0.001 ETH | as above |
+| Z's Zcash wallet (`utest1…`) | holds the ZEC Z swaps | at least 0.0505 TAZ; 1 TAZ is plenty | https://fauzec.com |
+| B's Zcash wallet | receives the swapped ZEC | nothing | |
+
+The ETH only pays gas, and Base Sepolia gas is cheap: at its usual base fee the deployment costs
+about 0.00001 ETH and a swap less than that. The amounts above leave room for gas spikes and many
+swaps. The default swap is 0.05 ZEC for 2 USDC (40 USDC per ZEC), so 10 USDC covers five.
+zcash-devtool spends TAZ from another wallet only after 10 confirmations (about 13 minutes), so
+fund Z's Zcash wallet first.
+
+### 3. Deploy, start, swap
+
+```sh
+infra/evm-testnet.sh deploy   # FerryLock from the deployer; checks the code on chain is this build's
+infra/evm-testnet.sh up       # B (maker, API :7952, peer :7962) and Z (API :7951, peer :7961)
+infra/evm-testnet.sh swap     # 0.05 ZEC for 2 USDC, followed to the end with sepolia.basescan.org links
+infra/evm-testnet.sh down     # stops the two daemons it started
+```
+
+Before doing anything, `deploy`, `up` and `swap` ask the RPC for the chain id (84532) and ask the
+USDC contract for its `symbol()` ("USDC") and `decimals()` (6), and stop if any answer is
+different. `deploy` rebuilds the contracts and stops if they no longer match the artifact that
+ferryd compiles in. ferryd itself also refuses to start unless the code at the FerryLock address
+is that FerryLock.
+
+A swap takes about 5 to 10 minutes: B's lock and 10 confirmations (about 30 seconds), Z's ZEC
+lock and its 3 Zcash confirmations (about 4 minutes on average), the claim, then B's sweep after
+its random delay. To see the abort paths in real time, start the daemons with `FAULTS=1`:
+`swap --refund` (Z stops after locking its ZEC; B refunds at t1, 45 minutes in, and Z takes its
+ZEC back) and `swap --punish` (B stops after locking; Z punishes at t2, 75 minutes in).
+
+The UI: `cd web && source ../.evm-testnet/env && PORT=7995 pnpm dev:ui`.
+
+### Timing on a public chain
+
+All deadlines are in Base block time (FerryLock compares `block.timestamp`), and every value is
+an environment variable (`infra/evm-testnet.sh help`).
+
+| | default | why |
+|---|---|---|
+| t1 | 45 min after the proposal | B's lock takes about 30 s. The rest is for Z's ZEC lock to get 3 Zcash confirmations: testnet blocks come every 75 s on average, but the testnet sometimes stalls for 10 to 20 minutes. If the window runs out, nothing is lost: B refunds at t1 and Z takes its ZEC back. |
+| Δ | 5 min | No claim after t1 − Δ, no refund after t2 − Δ, no Ready after t1 − Δ. A late claim reverts but still shows `z`, so Δ must cover the slowest inclusion on a chain with one sequencer, plus RPC retries. ferryd's Base Sepolia policy asks for at least 2 min. |
+| t2 − t1 | 30 min | B refunds as soon as a block at or after t1 exists. Punish opens at t2. |
+| EVM lock confirmations | 10 (about 20 s) | Z sends ZEC only once B's lock is 10 blocks deep. Base reorgs are rare and shallow, so this costs little; the policy minimum is 2. |
+| ZEC confirmations | 3 | The Base Sepolia policy minimum. |
+| poll | every 4 s | Each daemon reads the chain this often, to stay under the public RPC's rate limit. |
+
+### Rehearsal on a fork
+
+```sh
+infra/evm-testnet.sh fork test
+```
+
+This starts anvil on 127.0.0.1:18547 as a fork of Base Sepolia (the chain id stays 84532, so
+ferryd applies the Base Sepolia policy, not the anvil one). It creates separate keys in
+`.evm-testnet-fork/` and gives them the amounts above: the ETH with `anvil_setBalance`, and 10 of
+Circle's real test USDC, moved from a real holder by impersonation. Then it deploys FerryLock,
+starts both daemons with the mock ZEC leg, and runs a swap, a refund and a punish, jumping the
+fork's clock to t1 and t2. Nothing is sent to the real network. The last run is in
+`docs/evidence/evm-base-sepolia-fork-2026-10-20.txt`, together with a start against the real
+Zcash testnet. `fork up`, `fork fund` and `fork down` do the steps one at a time; point the other
+commands at the fork with
+`FERRY_EVM_TESTNET_DIR=.evm-testnet-fork EVM_RPC=http://127.0.0.1:18547 ZEC_BACKEND=mock FAULTS=1`.
+
+### Limits
+
+- **Test networks only.** Test ETH, test USDC and TAZ have no value. Base mainnet has a much
+  stricter policy (1 h margins, 30 confirmations), and nothing here has been run there.
+- **RPC rate limits.** https://sepolia.base.org is shared and throttled, and it answers
+  `eth_getLogs` for at most 200 blocks at a time. The script and ferryd retry throttled requests
+  with a backoff and time requests out, ferryd scans logs in 200-block chunks and re-reads only
+  recent blocks, and the daemons poll every 4 s. For long or frequent runs, set `EVM_RPC` to your
+  own endpoint (Alchemy, QuickNode, a Coinbase CDP node).
+- **The USDC issuer can freeze.** Test USDC is Circle's contract. If Circle pauses it or
+  blacklists FerryLock or a party's address, claim, refund and punish revert. ferryd simulates
+  them first, so no share leaks, but the tokens stay in FerryLock until Circle lifts it (see
+  [Trust in the token](#trust-in-the-token)).
+- **Hot keys.** The three Base Sepolia keys sit unencrypted in `.evm-testnet/` (the deployer's
+  in a keystore whose password is in the file next to it). That is fine for test funds only.
+- **Faucets** limit how often you can ask (fauzec.com gives 1 TAZ a day).
 
 ## Follow-ups
 
-- **Watchtower.** Anyone may call `punish`, so a keyless EVM tower for Z is simple. A tower for
-  B would need `b`.
-- **Base Sepolia.** No run there yet: the swap needs a funded deployer and test USDC. Deploy with
-  `forge script script/Deploy.s.sol --rpc-url https://sepolia.base.org --broadcast`, then run
-  both daemons with the deployed address and `--evm-token 0x036C…CF7e`.
+- **Base Sepolia.** The setup is scripted and rehearsed on a fork (above). A run on the real
+  network waits for the accounts to be funded.

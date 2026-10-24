@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use ferry_btc::bitcoin::{Network, OutPoint, Txid};
-use ferry_btc::{Role, Spend};
+use ferry_btc::{Coin, Role, Spend};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{Outcome, Status};
@@ -98,11 +99,15 @@ impl Record {
         PackageView {
             id: self.id.clone(),
             role,
+            coin: self.package.coin,
             network: self.package.network,
             label: self.package.label.clone(),
             status: self.status,
             outcome: self.outcome,
-            advice: self.outcome.map(|o| o.advice(role).to_string()),
+            // The advice is worded for Bitcoin; a Litecoin package gets its own ticker.
+            advice: self
+                .outcome
+                .map(|o| o.advice(role).replace("BTC", self.package.coin.ticker())),
             note: self.note.clone(),
             lock_outpoint: armed.lock_outpoint,
             cancel_txid: armed.cancel_txid(),
@@ -125,6 +130,9 @@ impl Record {
 pub struct PackageView {
     pub id: String,
     pub role: Role,
+    /// `btc` or `ltc`.
+    #[serde(default)]
+    pub coin: Coin,
     pub network: Network,
     pub label: Option<String>,
     pub status: Status,
@@ -144,6 +152,17 @@ pub struct PackageView {
     pub events: Vec<LogLine>,
 }
 
+/// A record kept as `<data-dir>/packages/<id>.json`.
+pub trait Stored: Serialize + DeserializeOwned {
+    fn id(&self) -> &str;
+}
+
+impl Stored for Record {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
 pub struct Store {
     dir: PathBuf,
 }
@@ -161,20 +180,20 @@ impl Store {
         Ok(Store { dir })
     }
 
-    pub fn save(&self, rec: &Record) -> std::io::Result<()> {
-        let tmp = self.dir.join(format!(".{}.json.tmp", rec.id));
+    pub fn save<R: Stored>(&self, rec: &R) -> std::io::Result<()> {
+        let tmp = self.dir.join(format!(".{}.json.tmp", rec.id()));
         write_private(&tmp, &serde_json::to_vec_pretty(rec)?)?;
-        std::fs::rename(tmp, self.dir.join(format!("{}.json", rec.id)))?;
+        std::fs::rename(tmp, self.dir.join(format!("{}.json", rec.id())))?;
         std::fs::File::open(&self.dir)?.sync_all()
     }
 
-    pub fn load_all(&self) -> std::io::Result<Vec<Record>> {
+    pub fn load_all<R: Stored>(&self) -> std::io::Result<Vec<R>> {
         let mut out = vec![];
         for entry in std::fs::read_dir(&self.dir)? {
             let path = entry?.path();
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             if path.extension().is_some_and(|e| e == "json") && !name.starts_with('.') {
-                let rec: Record = serde_json::from_slice(&std::fs::read(&path)?)
+                let rec: R = serde_json::from_slice(&std::fs::read(&path)?)
                     .map_err(|e| std::io::Error::other(format!("{}: {e}", path.display())))?;
                 out.push(rec);
             }
@@ -227,7 +246,7 @@ mod tests {
         store.save(&rec).unwrap();
         rec.status = Status::CancelBroadcast;
         store.save(&rec).unwrap();
-        let back = store.load_all().unwrap();
+        let back: Vec<Record> = store.load_all().unwrap();
         assert_eq!(back, vec![rec.clone()]);
         #[cfg(unix)]
         {
@@ -238,9 +257,13 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        let armed = rec.package.validate(Network::Regtest).unwrap();
+        let armed = rec
+            .package
+            .validate(ferry_btc::Chain::bitcoin(Network::Regtest))
+            .unwrap();
         let view = serde_json::to_value(rec.view(&armed)).unwrap();
         assert_eq!(view["status"], "cancel_broadcast");
+        assert_eq!(view["coin"], "btc");
         assert!(view["refund_txid"].is_string() && view["punish_txid"].is_null());
         let text = view.to_string();
         assert!(

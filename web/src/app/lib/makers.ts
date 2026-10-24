@@ -59,12 +59,13 @@ export const quoteOf = (m: Maker): Quote | null =>
     ? { rate: m.rate_sat_per_zec, min: m.min_zat, max: m.max_zat, fee: m.fee_sat, liquidity: m.liquidity_zat }
     : null;
 
-// The pair this app can swap: the one its daemon runs (ZEC/BTC, or ZEC/LTC with --chain ltc).
-export const swappable = (pair: string) => pair === `ZEC/${coin().ticker}`;
+// A maker for the pair on screen: the same coin, and for a token the same chain (a USDC maker on
+// Base can't fill a swap whose daemon is on Arbitrum).
+export const swappable = (m: Maker) => m.pair === `ZEC/${coin().ticker}` && (coin().kind !== "evm" || (m.chain ?? null) === coin().chain);
 
 // A maker this party can start a swap with: it takes swaps now, trades a pair the form supports,
 // and holds the other side.
-export const selectable = (m: Maker, role: "Z" | "B") => m.available && swappable(m.pair) && (m.role == null || m.role !== role);
+export const selectable = (m: Maker, role: "Z" | "B") => m.available && swappable(m) && (m.role == null || m.role !== role);
 
 // "20s ago", "4m ago", "2h ago"
 export function ago(seconds: number): string {

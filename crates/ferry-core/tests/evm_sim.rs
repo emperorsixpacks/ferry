@@ -52,6 +52,9 @@ struct Faults {
     b_locks_wrong_b_addr: bool,
     /// The ready signature reaches Z only at this block time.
     delay_ready_until: Option<u64>,
+    /// Someone else spends the ZEC lock note as soon as it is mined (e.g. Z, after learning b
+    /// from a leaky watchtower).
+    zec_note_spent_early: bool,
 }
 
 #[derive(Default)]
@@ -320,9 +323,14 @@ impl Sim {
             if let Some((value, at)) = self.zec_note {
                 if self.zec_block >= at {
                     let confs = (self.zec_block - at + 1) as u32;
+                    let spent = self.faults.zec_note_spent_early || !self.sweeps.is_empty();
                     self.deliver(
                         role,
-                        EvmEvent::Chain(EvmChainEvent::ZecNoteSeen { value, confs }),
+                        EvmEvent::Chain(EvmChainEvent::ZecNoteSeen {
+                            value,
+                            confs,
+                            spent,
+                        }),
                     );
                 }
             }
@@ -458,6 +466,31 @@ fn late_ready_signature_is_not_used_near_t1() {
         s.b_state() == EvmBState::Refunded && s.z_state() == EvmZState::ZecReclaimed
     });
     assert!(sim.contract.claimed.is_none());
+    sim.assert_clean();
+}
+
+#[test]
+fn no_ready_once_the_lock_note_is_spent() {
+    // The joint note is spent before B has signed Ready: someone else holds the joint key
+    // (a watchtower leaked b to Z, say). Ready would give Z the tokens as well, so B never
+    // signs it and refunds at t1.
+    let mut sim = Sim::new(Faults {
+        zec_note_spent_early: true,
+        ..Faults::default()
+    });
+    while sim.b_state() != EvmBState::Refunded {
+        assert!(sim.now < T2, "B never refunded");
+        assert!(
+            !matches!(
+                sim.b_state(),
+                EvmBState::ReadySigning | EvmBState::ReadySent
+            ),
+            "B signed Ready for a spent note"
+        );
+        sim.step();
+    }
+    assert!(sim.contract.claimed.is_none());
+    assert!(sim.zec_note.is_some(), "Z did lock the ZEC");
     sim.assert_clean();
 }
 

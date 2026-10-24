@@ -10,7 +10,7 @@ export interface Status {
   chains: {
     // the coin swapped against ZEC ("btc" | "ltc"); older daemons leave it out (btc)
     // coin "usdc": an EVM daemon (--counter evm); `time` is the latest block's unix time
-    btc: { network: string; height: number; coin?: "btc" | "ltc" | "usdc"; ticker?: string; decimals?: number; time?: number };
+    btc: { network: string; height: number; coin?: string; ticker?: string; decimals?: number; time?: number };
     zec: { network: string; height: number; pool: string };
   };
   offer: {
@@ -44,7 +44,7 @@ export interface TimelineEntry {
 
 export interface SwapView {
   id: string;
-  coin?: "btc" | "ltc" | "usdc";
+  coin?: string;
   role: Role;
   counterparty: string;
   state: string;
@@ -78,11 +78,18 @@ export interface SwapView {
 }
 
 export const DAEMONS: Record<Role, string> = { Z: "/daemon/z", B: "/daemon/b" };
-// The coins ZEC swaps against. One ferryd runs one of them; the UI server may front a daemon per
-// pair (server/pairs.mjs), at /daemon/<pair>.
-export type PairId = "btc" | "ltc" | "usdc";
-export const PAIR_IDS: PairId[] = ["btc", "ltc", "usdc"];
+// What ZEC swaps against: a UTXO coin, or an ERC-20 on an EVM chain. One ferryd runs one pair;
+// the UI server may front a daemon per pair (server/pairs.mjs), at /daemon/<pair>.
+export type CoinId = "btc" | "ltc" | "usdc" | "weth";
+export type ChainId = "base" | "ethereum" | "arbitrum" | "optimism";
+export const EVM_TOKENS = ["usdc", "weth"] as const;
+export const EVM_CHAINS: ChainId[] = ["base", "ethereum", "arbitrum", "optimism"];
+export type PairId = "btc" | "ltc" | `${(typeof EVM_TOKENS)[number]}-${ChainId}`;
+export const PAIR_IDS: PairId[] = ["btc", "ltc", ...EVM_TOKENS.flatMap((t) => EVM_CHAINS.map((c): PairId => `${t}-${c}`))];
 export const pairDaemon = (id: PairId) => `/daemon/${id}`;
+export const pairCoin = (id: PairId) => id.split("-")[0] as CoinId;
+export const pairChain = (id: PairId) => (id.split("-")[1] as ChainId | undefined) ?? null;
+export const pairId = (coin: CoinId, chain: ChainId | null): PairId => (coin === "btc" || coin === "ltc" ? coin : `${coin}-${chain ?? "base"}`);
 // Which party this browser is: the swap app shows only that side. `?as=b` overrides it.
 export const LOCAL_ROLE: Role = (() => {
   const q = new URLSearchParams(window.location.search).get("as");
@@ -142,6 +149,8 @@ export interface Maker {
   rate_updated_at: number | null;
   // seconds, as of the server's answer
   rate_age_s: number | null;
+  // an EVM maker's chain (from its offer's network, or the operator's FERRY_MAKERS entry)
+  chain?: ChainId | null;
 }
 
 // null: this server has no maker directory (an older server); the form then uses the daemon's offer

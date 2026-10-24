@@ -4,7 +4,7 @@
 pub mod config;
 mod daemon;
 mod http;
-mod record;
+pub(crate) mod record;
 mod view;
 
 pub use config::{Counter, EvmArgs};
@@ -21,9 +21,6 @@ pub async fn run<L: ZecLeg + 'static>(cli: Cli, leg: L) -> anyhow::Result<()> {
             "--api-listen must be a loopback address (the control API moves funds); \
              use --api-allow-remote only on a private network"
         );
-    }
-    if cli.watchtower.is_some() {
-        bail!("--watchtower is for the Bitcoin counter-chain only");
     }
     let token_file = cli.data_dir.join("api-token");
     let daemon = daemon::EvmDaemon::new(cli, leg).await?;

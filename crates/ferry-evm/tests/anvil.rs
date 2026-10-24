@@ -107,13 +107,20 @@ const B: usize = 1;
 const Z: usize = 2;
 const RELAYER: usize = 3;
 
-async fn start() -> Option<Net> {
+async fn start(port_offset: u16) -> Option<Net> {
     let Some(bin) = anvil_binary() else {
         eprintln!("SKIP: no anvil binary (install with foundryup)");
         return None;
     };
-    // No port: anvil binds port 0 and alloy reads back the one the OS chose.
-    let anvil = Anvil::at(bin).spawn();
+    // No port: anvil binds port 0 and alloy reads back the one the OS chose, so parallel tests
+    // never collide. FERRY_EVM_TEST_PORT pins it instead: P for USDC, P+1 for WETH.
+    let anvil = match std::env::var("FERRY_EVM_TEST_PORT") {
+        Ok(p) => {
+            let p: u16 = p.parse().expect("FERRY_EVM_TEST_PORT is a port");
+            Anvil::at(bin).port(p + port_offset).spawn()
+        }
+        Err(_) => Anvil::at(bin).spawn(),
+    };
     let keys: Vec<PrivateKeySigner> = anvil.keys().iter().map(|k| k.clone().into()).collect();
     let url = anvil.endpoint();
     let deployer = ProviderBuilder::new()
@@ -160,7 +167,7 @@ async fn terms(net: &Net, c: &EvmClient, z: &Share, b: &Share) -> Terms {
 
 #[tokio::test]
 async fn ferry_lock_on_anvil() {
-    let Some(net) = start().await else { return };
+    let Some(net) = start(0).await else { return };
     let (b, z, relayer) = (net.client(B), net.client(Z), net.client(RELAYER));
 
     // Z checks the code at the agreed address is this build's FerryLock.
@@ -193,7 +200,7 @@ async fn ferry_lock_on_anvil() {
 /// about itself, which ferryd checks against its flags at startup.
 #[tokio::test]
 async fn weth_above_u64_on_anvil() {
-    let Some(net) = start().await else { return };
+    let Some(net) = start(1).await else { return };
     let (b, z, relayer) = (net.client(B), net.client(Z), net.client(RELAYER));
     let weth = MockWETH::deploy(b.provider().clone()).await.unwrap();
     let weth_addr = *weth.address();

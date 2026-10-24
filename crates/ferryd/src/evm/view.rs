@@ -124,7 +124,8 @@ pub struct EvmSwapView {
     pub secrets: Secrets,
     pub timeline: Vec<TimelineEntry>,
     pub observer: Observer,
-    pub watchtower: Option<()>,
+    /// Our package at the watchtower; absent without --watchtower.
+    pub watchtower: Option<crate::tower::TowerState>,
     pub counter: SwapCounter,
 }
 
@@ -232,7 +233,7 @@ pub fn swap_view(rec: &EvmRecord) -> EvmSwapView {
             btc: ordered(&rec.observer_evm, &["lock", "claim", "refund", "punish"]),
             zec: ordered(&rec.observer_zec, &["lock", "sweep"]),
         },
-        watchtower: None,
+        watchtower: rec.watchtower.clone(),
         counter: SwapCounter {
             kind: "evm",
             chain_id: p.chain_id,
