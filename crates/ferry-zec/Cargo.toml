@@ -1,0 +1,23 @@
+[package]
+name = "ferry-zec"
+description = "Ferry's real Zcash (Ironwood) leg: drives a zcash-devtool wallet and the ferry-zec-signer helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# No Zcash crates here on purpose: the wallet is the zcash-devtool binary and joint-key signing
+# is tools/ferry-zec-signer, both pinned to devtool's librustzcash revision, which keeps the
+# workspace's pasta_curves 0.5 patch and the bitcoin crates out of that dependency graph.
+[dependencies]
+ferry-core.workspace = true
+hex.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["process", "sync", "time", "io-util", "fs", "rt"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

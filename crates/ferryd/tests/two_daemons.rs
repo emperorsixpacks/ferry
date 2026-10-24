@@ -537,9 +537,9 @@ async fn refund_swap_when_z_stalls() {
 #[tokio::test]
 #[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
 async fn punish_swap_when_b_stalls() {
-    let w = World::start(2).await;
+    // Slow ZEC confirmations keep B in BtcLocked/ZecSeen long enough to stall it there.
+    let w = World::start(6).await;
     let id = w.start_swap(50_000_000).await;
-    // B's lock is broadcast but unmined while we stall B: B will never refund.
     let deadline = Instant::now() + Duration::from_secs(20);
     while state(&w.swap(&w.b.url, &id).await) != "CancelSigned" {
         assert!(
@@ -548,6 +548,25 @@ async fn punish_swap_when_b_stalls() {
             w.b.logs()
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Too early: tx_lock is not confirmed yet.
+    let (code, _) = w
+        .post(
+            &w.b.url,
+            &format!("/api/swaps/{id}/fault"),
+            json!({"fault": "stall"}),
+        )
+        .await;
+    assert_eq!(code, 409);
+    w.mine().await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !matches!(state(&w.swap(&w.b.url, &id).await), "BtcLocked" | "ZecSeen") {
+        assert!(
+            Instant::now() < deadline,
+            "B never reached BtcLocked/ZecSeen\n{}",
+            w.b.logs()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let (code, body) = w
         .post(

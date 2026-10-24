@@ -506,7 +506,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 state.as_str(),
                 "CancelSigned" | "BtcLockSeen" | "ZecLocked" | "RedeemSigReceived"
             ),
-            Role::B => matches!(state.as_str(), "CancelSigned" | "BtcLocked" | "ZecSeen"),
+            Role::B => matches!(state.as_str(), "BtcLocked" | "ZecSeen"),
         };
         if !allowed {
             return Err(ApiError::conflict(match rec.role() {

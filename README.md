@@ -52,7 +52,7 @@ every Ironwood spend shows only `rk = ak + α·G` with a fresh `α`.
 
 ```bash
 infra/demo.sh up                # bitcoind regtest + two ferryd daemons + block producer
-cd web && pnpm install && pnpm dev:ui   # the crossing, live, at http://localhost:5180
+cd web && pnpm install && source ../.demo/env && pnpm dev:ui   # the crossing, live, at http://localhost:5180
 infra/demo.sh help              # the three demo stories (swap, refund, punish) and curl examples
 infra/demo.sh down
 ```
