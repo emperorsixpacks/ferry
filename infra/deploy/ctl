@@ -19,6 +19,9 @@
 #
 # Pairs (compose profiles): ltc (ZEC/LTC, Litecoin testnet), usdc-base (ZEC/USDC, Base Sepolia),
 # weth-base (ZEC/WETH, Base Sepolia). ZEC/BTC always runs.
+#
+# FERRY_COMPOSE_PROJECT [ferry] names the compose project; FERRY_COMPOSE_OVERRIDE adds a compose
+# file (a local rehearsal: infra/deploy/compose.local.yml, docs/DEPLOY.md "Rehearse locally").
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

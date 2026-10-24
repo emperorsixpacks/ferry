@@ -1,7 +1,8 @@
 # Deploying the Ferry testnet demo
 
 To run Ferry for yourself on your own computer instead, see [RUN-A-NODE.md](RUN-A-NODE.md)
-(`./infra/node/ferry up`).
+(`./infra/node/ferry up`). To try this whole deploy on your own machine before the server, see
+[Rehearse locally](#rehearse-locally) (`infra/deploy/deploy.sh local`).
 
 This guide takes you from a fresh clone of the repository to the public demo running on one Linux
 server. The demo uses test coins only. It always runs ZEC/BTC:
@@ -451,6 +452,45 @@ The funded addresses then keep working. Run it right after the first deploy, whi
 node is still syncing, because a pruned node can only rescan blocks it still has. The backups in
 `~/ferry-backups/` on the server hold wallet keys: keep a copy if you need one, then delete them.
 It covers ZEC/BTC only. Anyone else can ignore this section.
+
+## Rehearse locally
+
+`local` in place of the SSH host runs this same deploy on your own machine, so you can watch it
+build, sync and swap before the server does. You need Docker with compose 2.24 or newer (Docker
+Desktop on a Mac is fine), `python3`, and about 8 GB of memory for Docker with every pair on.
+
+```sh
+infra/deploy/deploy.sh local enable usdc-base     # the pairs you want, as on the server
+infra/deploy/deploy.sh local                      # .env, secrets, build, start
+infra/deploy/deploy.sh local status
+infra/deploy/deploy.sh local addresses
+infra/deploy/deploy.sh local down                 # stop; volumes (wallets, chains) are kept
+```
+
+It is the server's deploy, with these differences only:
+- **Caddy listens on `https://localhost:7950` only**, with a certificate from its own local CA,
+  instead of serving ports 80/443 to the internet with Let's Encrypt
+  (`infra/deploy/compose.local.yml`). Nothing else is published, and `deploy.sh local` sets
+  `DOMAIN=localhost:7950`, so the web server's `PUBLIC_ORIGIN` is that page. Your browser warns
+  about the certificate once. For curl, take Caddy's root certificate:
+
+  ```sh
+  export FERRY_COMPOSE_PROJECT=ferry-local FERRY_COMPOSE_OVERRIDE=infra/deploy/compose.local.yml
+  infra/deploy/compose cp caddy:/data/caddy/pki/authorities/local/root.crt /tmp/ferry-local-ca.crt
+  curl --cacert /tmp/ferry-local-ca.crt https://localhost:7950/healthz
+  ```
+- **The compose project is `ferry-local`** (containers `ferry-local-*`, volumes `ferry-local_*`),
+  so it can't touch anything else on the machine. On the machine itself, `infra/deploy/compose`
+  and `infra/deploy/ctl` take the same two settings as above (`FERRY_COMPOSE_PROJECT`,
+  `FERRY_COMPOSE_OVERRIDE`).
+- **Nothing is copied**: it uses this checkout's `infra/deploy/.env` and `infra/deploy/secrets/`,
+  which git ignores and `deploy.sh` never copies to a server. Your local keys and the server's are
+  different wallets. Set `FERRYD_IMAGE` and `WEB_IMAGE` in that `.env` to name the images apart
+  from others on the machine (e.g. `ferry-local-ferryd:local`).
+- `migrate-wallets` works with `local` too; it keeps the replaced volumes in `~/ferry-local-backups`.
+
+The coins are real test coins on the public test networks, from the same faucets. A wallet
+belongs in one place: don't run the same keys or Zcash wallet here and on the server at once.
 
 ## What runs
 

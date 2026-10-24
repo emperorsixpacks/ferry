@@ -5,18 +5,20 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REMOTE_DIR="${FERRY_REMOTE_DIR:-ferry}"
-PROJECT="${FERRY_COMPOSE_PROJECT:-ferry}"
-# docker compose through infra/deploy/compose, which passes the enabled pairs (COMPOSE_PROFILES in
-# the host's .env) on to the web server; infra/deploy/ctl does the per-pair work on the host.
-COMPOSE="FERRY_COMPOSE_PROJECT=$PROJECT infra/deploy/compose"
-CTL="FERRY_COMPOSE_PROJECT=$PROJECT infra/deploy/ctl"
 ALL_PROFILES="--profile ltc --profile usdc-base --profile weth-base"
+# Caddy's port for `local` (infra/deploy/compose.local.yml publishes it; DOMAIN must name it)
+LOCAL_DOMAIN=localhost:7950
 LOCAL_TESTNET="${FERRY_TESTNET_DIR:-$ROOT/.testnet}"
 LOCAL_SIGNET_RPC="${LOCAL_SIGNET_RPC:-http://127.0.0.1:38332}"
 
 usage() {
   cat <<EOF
 Usage: infra/deploy/deploy.sh <ssh-host> [command]
+       infra/deploy/deploy.sh local [command]
+
+\`local\` instead of an SSH host rehearses the deploy on this machine: the same commands, run in
+this checkout as the compose project "ferry-local", with Caddy on https://$LOCAL_DOMAIN only (its
+own local CA) instead of public ports 80/443 (infra/deploy/compose.local.yml). Nothing is copied.
 
   up (default)     copy the repository (tracked and untracked files git doesn't ignore) to
                    <ssh-host>:~/$REMOTE_DIR, create what is missing there (infra/deploy/.env, the
@@ -39,7 +41,9 @@ Usage: infra/deploy/deploy.sh <ssh-host> [command]
                    bitcoind wallet descriptors), so already-funded addresses keep working
 
 Set DOMAIN in ~/$REMOTE_DIR/infra/deploy/.env on the host before the first real start: Caddy
-requests a TLS certificate for it. Environment: FERRY_REMOTE_DIR [$REMOTE_DIR].
+requests a TLS certificate for it (\`local\` sets DOMAIN=$LOCAL_DOMAIN itself). Environment:
+FERRY_REMOTE_DIR [$REMOTE_DIR], FERRY_COMPOSE_PROJECT [ferry; ferry-local for \`local\`],
+FERRY_TESTNET_DIR [the checkout's .testnet] for migrate-wallets.
 EOF
 }
 
@@ -51,7 +55,29 @@ case "$1" in help | -h | --help) usage; exit 0 ;; esac
 HOST=$1
 CMD=${2:-up}
 
-remote() { ssh "$HOST" "cd $REMOTE_DIR && $*"; }
+LOCAL=
+OVERRIDE=
+if [ "$HOST" = local ]; then
+  LOCAL=1
+  OVERRIDE="FERRY_COMPOSE_OVERRIDE=infra/deploy/compose.local.yml "
+fi
+PROJECT="${FERRY_COMPOSE_PROJECT:-$([ -n "$LOCAL" ] && echo ferry-local || echo ferry)}"
+# Where migrate-wallets keeps the host's previous ferryd volumes (shell text, expanded on the host).
+BACKUPS="${LOCAL:+$HOME/$PROJECT-backups}"
+BACKUPS="${BACKUPS:-\$HOME/$REMOTE_DIR-backups}"
+# docker compose through infra/deploy/compose, which passes the enabled pairs (COMPOSE_PROFILES in
+# the host's .env) on to the web server; infra/deploy/ctl does the per-pair work on the host.
+COMPOSE="FERRY_COMPOSE_PROJECT=$PROJECT ${OVERRIDE}infra/deploy/compose"
+CTL="FERRY_COMPOSE_PROJECT=$PROJECT ${OVERRIDE}infra/deploy/ctl"
+
+# on_host <shell text>: run it on the host, or here for `local`.
+on_host() {
+  if [ -n "$LOCAL" ]; then bash -c "$1"; else ssh "$HOST" "$1"; fi
+}
+# remote <shell text>: the same, from the host's copy of the repository (this checkout for `local`).
+remote() {
+  if [ -n "$LOCAL" ]; then (cd "$ROOT" && bash -c "$*"); else ssh "$HOST" "cd $REMOTE_DIR && $*"; fi
+}
 rcompose() { remote "$COMPOSE $*"; }
 rctl() { remote "$CTL $*"; }
 
@@ -86,14 +112,28 @@ ensure_env() {
   # RPC passwords, later only what is missing (a newly enabled pair's keys). Nothing existing is
   # overwritten (infra/deploy/ctl secrets).
   rctl secrets
+  if [ -n "$LOCAL" ]; then
+    # Caddy serves the port compose.local.yml publishes, and PUBLIC_ORIGIN is https://$DOMAIN.
+    local env=$ROOT/infra/deploy/.env
+    if grep -q '^DOMAIN=ferry.example.com$' "$env"; then
+      sed "s/^DOMAIN=ferry.example.com\$/DOMAIN=$LOCAL_DOMAIN/" "$env" >"$env.tmp"
+      chmod 600 "$env.tmp" && mv "$env.tmp" "$env"
+      log "DOMAIN=$LOCAL_DOMAIN in infra/deploy/.env (a local rehearsal)"
+    fi
+    grep -q "^DOMAIN=$LOCAL_DOMAIN\$" "$env" ||
+      die "a local rehearsal needs DOMAIN=$LOCAL_DOMAIN in infra/deploy/.env (the port compose.local.yml publishes)"
+    return 0
+  fi
   if remote 'grep -q "^DOMAIN=ferry.example.com$" infra/deploy/.env'; then
     die "set DOMAIN in $HOST:~/$REMOTE_DIR/infra/deploy/.env (DNS must point at the host), then run again"
   fi
 }
 
 cmd_up() {
-  command -v rsync >/dev/null || die "rsync is required"
-  sync_repo
+  if [ -z "$LOCAL" ]; then
+    command -v rsync >/dev/null || die "rsync is required"
+    sync_repo
+  fi
   ensure_env
   log "building and starting (the first build compiles zcash-devtool: allow 20-40 minutes)"
   rcompose up -d --build
@@ -181,15 +221,15 @@ cmd_migrate_wallets() {
   rcompose up -d bitcoind
 
   # 1. Data dirs: the zcash-devtool wallet, its age identity and any swap records. What the host
-  #    had is kept in ~/$REMOTE_DIR-backups first.
+  #    had is kept in $BACKUPS first.
   for key in z b; do
     local vol=${PROJECT}_ferryd-$key
     log "copying $LOCAL_TESTNET/$key into volume $vol"
-    COPYFILE_DISABLE=1 tar -C "$LOCAL_TESTNET/$key" --exclude api-token --exclude ._\* -czf - . | ssh "$HOST" "
+    COPYFILE_DISABLE=1 tar -C "$LOCAL_TESTNET/$key" --exclude api-token --exclude ._\* -czf - . | on_host "
       set -e
-      mkdir -p ~/$REMOTE_DIR-backups && chmod 700 ~/$REMOTE_DIR-backups
+      mkdir -p $BACKUPS && chmod 700 $BACKUPS
       docker volume create $vol >/dev/null
-      docker run --rm -v $vol:/data -v \$HOME/$REMOTE_DIR-backups:/backup debian:bookworm-slim \
+      docker run --rm -v $vol:/data -v $BACKUPS:/backup debian:bookworm-slim \
         tar -C /data -czf /backup/$vol-\$(date +%Y%m%d-%H%M%S).tgz .
       docker run --rm -i -v $vol:/data debian:bookworm-slim sh -c \
         'find /data -mindepth 1 -delete && tar -xz -C /data && chown -R 10001:10001 /data && chmod 700 /data'"
@@ -238,8 +278,8 @@ print("  %d imported, %d failed%s" % (len(res) - len(bad), len(bad), (": " + jso
   log "starting the daemons"
   rcompose up -d
   log "done. Check with: infra/deploy/deploy.sh $HOST addresses"
-  log "The host's previous ferryd volumes are backed up in $HOST:~/$REMOTE_DIR-backups/. They hold"
-  log "wallet keys: copy them somewhere safe if you need them, then delete them there (rm -r ~/$REMOTE_DIR-backups)."
+  log "The host's previous ferryd volumes are backed up in $HOST:$BACKUPS/. They hold"
+  log "wallet keys: copy them somewhere safe if you need them, then delete them there (rm -r $BACKUPS)."
 }
 
 case "$CMD" in
