@@ -10,9 +10,6 @@
 //! A taker fetches the offer, then proposes at that rate. A refresh may land in between, so the
 //! maker also accepts the previous rate for `grace` after it was replaced.
 
-// TEMPORARY: the daemon.rs hook that uses this module lands after the base update; remove then.
-#![allow(dead_code)]
-
 use std::fmt;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
@@ -114,6 +111,7 @@ pub struct Pair {
 }
 
 impl Pair {
+    #[cfg(test)]
     pub const ZEC_BTC: Pair = Pair {
         base: Asset::Zec,
         quote: Asset::Btc,
@@ -549,8 +547,15 @@ impl LiveRate {
             }
         }
         self.apply(&results, Instant::now(), unix_now());
-        if let Some(q) = self.quote() {
-            tracing::debug!(rate = q.rate, source = %q.source, paused = q.paused, "maker rate");
+        match self.quote() {
+            Some(q) if !q.paused => {
+                tracing::debug!(rate = q.rate, source = %q.source, "maker rate")
+            }
+            _ => tracing::warn!(
+                pair = %self.cfg.pair,
+                "maker offer paused: no fresh price ({})",
+                self.last_error().unwrap_or_default()
+            ),
         }
     }
 
@@ -638,6 +643,39 @@ pub fn live_offer(
         });
     }
     offer
+}
+
+// The daemon's view of its own offer. Kept here so daemon.rs only calls these.
+impl<L: ferry_core::ZecLeg + 'static> crate::daemon::Daemon<L> {
+    /// Our offer right now, with liquidity from `balances` when given.
+    pub fn offer_with(&self, balances: Option<&crate::view::Balances>) -> Offer {
+        let funds = balances.map(|b| Funds {
+            zec_shielded_zat: b.zec_shielded_zat,
+            btc_sat: b.btc_sat,
+        });
+        live_offer(&self.offer, self.price.as_deref(), funds, Instant::now())
+    }
+
+    /// `GET /peer/offer`: liquidity from the last status refresh's balances.
+    pub async fn offer_now(&self) -> Offer {
+        let balances = self
+            .state
+            .lock()
+            .await
+            .status
+            .as_ref()
+            .map(|s| s.balances.clone());
+        self.offer_with(balances.as_ref())
+    }
+
+    /// A proposal's BTC amount matches our rate: the fixed one, or the live one (or the one it
+    /// replaced, within the grace period; never while paused).
+    pub fn rate_matches(&self, zec_amount: u64, btc_amount: u64) -> bool {
+        match &self.price {
+            Some(live) => live.amount_matches(zec_amount, btc_amount),
+            None => self.offer.btc_for(zec_amount) == btc_amount,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -166,6 +166,15 @@ pub struct Cli {
     /// The pair the price feed quotes (BASE/QUOTE: ZEC/BTC, ZEC/LTC, ZEC/USD, ZEC/USDC).
     #[arg(long, default_value = "ZEC/BTC")]
     pub maker_price_pair: crate::pricefeed::Pair,
+    /// Testing and mirrors: SOURCE=BASE_URL to reach a feed somewhere else (repeatable).
+    #[arg(long, hide = true)]
+    pub maker_price_feed_url: Vec<String>,
+    /// Testing: seconds between feed refreshes (default 60).
+    #[arg(long, hide = true, default_value_t = crate::pricefeed::REFRESH.as_secs())]
+    pub maker_price_refresh_secs: u64,
+    /// Testing: pause the offer after this many seconds without a fresh price (default 300).
+    #[arg(long, hide = true, default_value_t = crate::pricefeed::STALE_AFTER.as_secs())]
+    pub maker_price_stale_secs: u64,
 
     #[arg(long, default_value_t = 12)]
     pub t1: u16,
@@ -283,17 +292,28 @@ impl Cli {
     }
 
     /// The live rate behind the offer, when --maker-price-feed is given.
-    // TEMPORARY until the daemon.rs hook (after the base update) calls it.
-    #[allow(dead_code)]
     pub fn live_rate(&self) -> Option<crate::pricefeed::LiveRate> {
-        use crate::pricefeed::{FeedConfig, LiveRate, Source, GRACE, REFRESH, STALE_AFTER};
+        use crate::pricefeed::{FeedConfig, LiveRate, Source, GRACE};
+        use std::time::Duration;
         let feed = self.maker_price_feed.as_ref()?;
+        let sources = feed
+            .0
+            .iter()
+            .map(|k| {
+                let prefix = format!("{}=", k.name());
+                let url = self
+                    .maker_price_feed_url
+                    .iter()
+                    .find_map(|o| o.strip_prefix(&prefix).map(str::to_string));
+                url.map_or_else(|| Source::public(*k), |base_url| Source { kind: *k, base_url })
+            })
+            .collect();
         Some(LiveRate::new(FeedConfig {
             pair: self.maker_price_pair,
-            sources: feed.0.iter().map(|k| Source::public(*k)).collect(),
+            sources,
             spread_bps: self.maker_spread_bps,
-            refresh: REFRESH,
-            stale_after: STALE_AFTER,
+            refresh: Duration::from_secs(self.maker_price_refresh_secs.max(1)),
+            stale_after: Duration::from_secs(self.maker_price_stale_secs.max(1)),
             grace: GRACE,
         }))
     }

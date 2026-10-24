@@ -55,6 +55,36 @@ pub struct OfferView {
     pub t2_blocks: u16,
     pub btc_lock_confs: u32,
     pub zec_confs: u32,
+    /// `fixed`, or the feeds behind a live rate.
+    pub rate_source: Option<String>,
+    /// Unix seconds of the live rate's price.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_updated_at: Option<u64>,
+    /// As maker: the largest ZEC amount our balance covers now (capped at `max_zat`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liquidity_zat: Option<u64>,
+    /// As maker: the live rate went stale and we take no proposals.
+    pub paused: bool,
+}
+
+impl OfferView {
+    pub fn of(o: &crate::config::Offer) -> OfferView {
+        OfferView {
+            pair: "ZEC/BTC".into(),
+            rate_sat_per_zec: o.rate_sat_per_zec,
+            min_zat: o.min_zat,
+            max_zat: o.max_zat,
+            fee_sat: o.terms.btc_fee,
+            t1_blocks: o.terms.t1,
+            t2_blocks: o.terms.t2,
+            btc_lock_confs: o.terms.btc_lock_confirmations,
+            zec_confs: o.terms.zec_confirmations,
+            rate_source: o.rate_source.clone(),
+            rate_updated_at: o.rate_updated_at,
+            liquidity_zat: o.liquidity.map(|l| l.zec_zat),
+            paused: o.paused,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]

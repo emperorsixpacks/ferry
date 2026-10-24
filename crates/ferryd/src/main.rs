@@ -122,6 +122,15 @@ async fn run<L: ZecLeg + 'static>(cli: Cli, leg: L) -> anyhow::Result<()> {
         token_file.display()
     );
     tokio::spawn(daemon.clone().run());
+    if let Some(price) = daemon.price.clone() {
+        tracing::info!(
+            pair = %price.cfg.pair,
+            spread_bps = price.cfg.spread_bps,
+            sources = ?price.cfg.sources.iter().map(|s| s.kind.name()).collect::<Vec<_>>(),
+            "maker rate follows the price feed (paused until the first price)"
+        );
+        tokio::spawn(price.run());
+    }
     let api = tokio::net::TcpListener::bind(api_addr).await?;
     let peer = tokio::net::TcpListener::bind(peer_addr).await?;
     let shutdown = || async {
