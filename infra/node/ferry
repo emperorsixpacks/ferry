@@ -1,0 +1,1133 @@
+#!/usr/bin/env bash
+# Your own Ferry node: the web app and your own ferryd daemons, on this computer, in Docker.
+# docs/RUN-A-NODE.md explains what it is and walks through funding, swapping and backups.
+#
+#   ./infra/node/ferry up          start (the first time: asks which pairs, creates your wallets,
+#                                  builds Ferry; then opens the app at http://127.0.0.1:7865)
+#   ./infra/node/ferry status      what runs, chain sync, balances, swaps in progress
+#   ./infra/node/ferry addresses   where to fund each wallet: network, address, faucet
+#   ./infra/node/ferry logs [pair|service]   follow the logs (Ctrl-C stops following)
+#   ./infra/node/ferry down        stop everything (your wallets and chain data stay)
+#   ./infra/node/ferry update      get the latest Ferry (git pull), rebuild, restart
+#   ./infra/node/ferry backup [FILE]   an encrypted archive of your keys and wallets
+#   ./infra/node/ferry restore FILE    put a backup back (only into an empty node)
+#   ./infra/node/ferry setup       answer the questions again (pairs, Base RPC URL)
+#   ./infra/node/ferry makers      which makers the app lists, and whether they answer
+#
+# Options (any command):
+#   --yes, -y         no questions: the defaults, or your saved answers
+#   --pairs LIST      the pairs to run, e.g. usdc-base,btc (usdc-base weth-base btc ltc)
+#   --rpc URL         your own Base JSON-RPC URL (kept in a 0600 file, never printed in full)
+#   --port N          the web app's port on 127.0.0.1 (default 7865; 7866 with --mainnet)
+#   --no-open         don't open the browser after `up`
+#   --mainnet         REAL money: Zcash mainnet and Base mainnet, small caps, a typed
+#                     confirmation, and its own data directory and containers
+#   --near, --no-near with --mainnet: turn NEAR Intents swaps on or off (off by default;
+#                     never run with real funds yet), remembered
+#
+# Environment: FERRY_NODE_DIR (data directory), FERRY_NODE_PROJECT (Docker project name),
+# FERRYD_IMAGE / WEB_IMAGE (use prebuilt images instead of building).
+set -euo pipefail
+umask 077
+if [ -n "${FERRY_DEBUG:-}" ]; then set -x; fi
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+NODE="$ROOT/infra/node"
+ALL_PAIRS="usdc-base weth-base btc ltc"
+DEFAULT_PAIRS="usdc-base"
+MAINNET_PAIRS="usdc-base weth-base"
+
+# ------------------------------------------------------------------ output
+
+if [ -t 1 ]; then
+  B=$'\033[1m' DIM=$'\033[2m' RED=$'\033[31m' GRN=$'\033[32m' YEL=$'\033[33m' OFF=$'\033[0m'
+else
+  B='' DIM='' RED='' GRN='' YEL='' OFF=''
+fi
+say() { printf '%s\n' "$*"; }
+step() { printf '%s==>%s %s\n' "$B" "$OFF" "$*"; }
+ok() { printf '  %sok%s  %s\n' "$GRN" "$OFF" "$*"; }
+warn() { printf '%swarning:%s %s\n' "$YEL" "$OFF" "$*" >&2; }
+die() {
+  printf '\n%sferry: %s%s\n' "$RED" "$1" "$OFF" >&2
+  shift
+  local l
+  for l in "$@"; do printf '  %s\n' "$l" >&2; done
+  exit 1
+}
+
+# ------------------------------------------------------------------ arguments
+
+CMD=
+YES=
+NO_OPEN=
+MAINNET=
+OPT_PAIRS=
+OPT_RPC=
+OPT_PORT=
+OPT_NEAR=
+ARGS=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    -y | --yes) YES=1 ;;
+    --no-open) NO_OPEN=1 ;;
+    --mainnet) MAINNET=1 ;;
+    --near) OPT_NEAR=1 ;;
+    --no-near) OPT_NEAR=0 ;;
+    --pairs) OPT_PAIRS=${2:?--pairs needs a list, e.g. usdc-base,btc}; shift ;;
+    --pairs=*) OPT_PAIRS=${1#*=} ;;
+    --rpc) OPT_RPC=${2:?--rpc needs a URL}; shift ;;
+    --rpc=*) OPT_RPC=${1#*=} ;;
+    --port) OPT_PORT=${2:?--port needs a number}; shift ;;
+    --port=*) OPT_PORT=${1#*=} ;;
+    -h | --help | help) CMD=help ;;
+    -*) die "unknown option $1" "See: ./infra/node/ferry help" ;;
+    *)
+      if [ -z "$CMD" ]; then CMD=$1; else ARGS+=("$1"); fi
+      ;;
+  esac
+  shift
+done
+CMD=${CMD:-help}
+[ -n "${FERRY_NO_OPEN:-}" ] && NO_OPEN=1
+
+if [ -n "$MAINNET" ]; then
+  NET=mainnet
+  DATA="${FERRY_NODE_DIR:-$ROOT/.ferry-node-mainnet}"
+  PROJECT="${FERRY_NODE_PROJECT:-ferry-node-mainnet}"
+  DEFAULT_PORT=7866
+else
+  NET=testnet
+  DATA="${FERRY_NODE_DIR:-$ROOT/.ferry-node}"
+  PROJECT="${FERRY_NODE_PROJECT:-ferry-node}"
+  DEFAULT_PORT=7865
+fi
+CONFIG="$DATA/config"
+# how to run this script again, for the hints it prints
+ME="./infra/node/ferry"
+if [ "$NET" = mainnet ]; then ME="$ME --mainnet"; fi
+FERRYD_IMAGE="${FERRYD_IMAGE:-ferry-node-ferryd:local}"
+WEB_IMAGE="${WEB_IMAGE:-ferry-node-web:local}"
+FERRYD_PREBUILT=${FERRYD_IMAGE#ferry-node-ferryd:local}
+WEB_PREBUILT=${WEB_IMAGE#ferry-node-web:local}
+
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}"; }
+
+# ------------------------------------------------------------------ the networks
+
+# Test networks (the default): Zcash testnet through a public lightwalletd, Base Sepolia with
+# the shared FerryLock and Circle's test USDC, Bitcoin signet, Litecoin testnet.
+if [ "$NET" = testnet ]; then
+  ZEC_NETWORK="test"
+  ZEC_SERVER="${ZEC_SERVER:-testnet.zec.rocks:443}"
+  EVM_CHAIN_ID=84532
+  EVM_NAME="Base Sepolia"
+  DEFAULT_RPC="https://sepolia.base.org"
+  FERRYLOCK=0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef
+  USDC=0x036CbD53842c5426634e7929541eC2318f3dCF7e
+  WETH=0x4200000000000000000000000000000000000006
+  # The largest swap the app starts (zatoshi): 1 test ZEC.
+  MAX_ZAT=100000000
+else
+  # Mainnet: Zcash mainnet and Base mainnet (chain 8453) only, with ferryd's Base mainnet policy
+  # (1 h margins, 30 lock confirmations, 10 Zcash confirmations, a claim window over 4 h; as
+  # infra/mainnet-demo.sh) and every swap capped at 0.02 ZEC.
+  ZEC_NETWORK=main
+  ZEC_SERVER="${ZEC_SERVER:-zec.rocks:443}"
+  EVM_CHAIN_ID=8453
+  EVM_NAME="Base mainnet"
+  # mainnet.base.org refuses eth_getLogs, which ferryd needs.
+  DEFAULT_RPC="https://base-rpc.publicnode.com"
+  FERRYLOCK=
+  USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+  WETH=0x4200000000000000000000000000000000000006
+  MAX_ZAT=2000000
+fi
+
+pair_title() {
+  case $1 in
+    usdc-base) echo "ZEC <-> USDC on $EVM_NAME" ;;
+    weth-base) echo "ZEC <-> WETH on $EVM_NAME" ;;
+    btc) echo "ZEC <-> BTC on Bitcoin signet" ;;
+    ltc) echo "ZEC <-> LTC on Litecoin testnet" ;;
+  esac
+}
+is_evm() { case $1 in usdc-base | weth-base) return 0 ;; *) return 1 ;; esac; }
+token_of() { case $1 in usdc-base) echo USDC ;; weth-base) echo WETH ;; btc) echo BTC ;; ltc) echo LTC ;; esac; }
+# FERRY_USDC_BASE_URL's stem
+env_stem() { printf '%s' "$1" | tr 'a-z-' 'A-Z_'; }
+services_of() {
+  case $1 in
+    btc) echo "bitcoind-init bitcoind ferryd-z-btc ferryd-b-btc" ;;
+    ltc) echo "litecoind-init litecoind ferryd-z-ltc ferryd-b-ltc" ;;
+    *) echo "ferryd-z-$1 ferryd-b-$1" ;;
+  esac
+}
+
+# ------------------------------------------------------------------ config file
+
+# cfg_get KEY [default]: a saved answer (KEY=VALUE lines; read, never sourced).
+cfg_get() {
+  local v=
+  [ -f "$CONFIG" ] && v=$(sed -n "s/^$1=//p" "$CONFIG" | tail -n 1)
+  printf '%s' "${v:-${2:-}}"
+}
+
+cfg_set() {
+  local key=$1 val=$2
+  mkdir -p "$DATA"
+  touch "$CONFIG"
+  chmod 600 "$CONFIG"
+  { grep -v "^$key=" "$CONFIG" || true; printf '%s=%s\n' "$key" "$val"; } >"$CONFIG.tmp"
+  mv "$CONFIG.tmp" "$CONFIG"
+}
+
+# The enabled pairs, space-separated, in canonical order; checks the names.
+normalize_pairs() {
+  local raw p out=
+  raw=$(printf '%s' "$1" | tr ',' ' ')
+  for p in $raw; do
+    case " $ALL_PAIRS " in *" $p "*) ;; *) die "unknown pair \"$p\"" "The pairs are: ${ALL_PAIRS// /, }" ;; esac
+    if [ "$NET" = mainnet ]; then
+      case " $MAINNET_PAIRS " in *" $p "*) ;; *)
+        die "$(pair_title "$p") is not offered on mainnet by this script" \
+          "On mainnet it runs ${MAINNET_PAIRS// / and } (no chain node to sync)." ;;
+      esac
+    fi
+  done
+  for p in $ALL_PAIRS; do
+    case " $raw " in *" $p "*) out="$out $p" ;; esac
+  done
+  printf '%s' "${out# }"
+}
+
+PAIRS=
+load_pairs() {
+  PAIRS=$(normalize_pairs "$(cfg_get PAIRS "$DEFAULT_PAIRS")")
+  [ -n "$PAIRS" ] || PAIRS=$DEFAULT_PAIRS
+}
+has_pair() { case " $PAIRS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+has_evm() { has_pair usdc-base || has_pair weth-base; }
+web_port() { printf '%s' "${OPT_PORT:-$(cfg_get WEB_PORT "$DEFAULT_PORT")}"; }
+web_url() { printf 'http://127.0.0.1:%s' "$(web_port)"; }
+
+# ------------------------------------------------------------------ docker
+
+compose() {
+  local profiles
+  profiles=$(printf '%s' "$PAIRS" | tr ' ' ',')
+  COMPOSE_PROFILES=$profiles docker compose -p "$PROJECT" -f "$NODE/docker-compose.yml" \
+    --env-file "$DATA/compose.env" "$@"
+}
+
+# every profile, so commands also reach containers of pairs that were turned off since
+compose_all() {
+  COMPOSE_PROFILES=$(printf '%s' "$ALL_PAIRS" | tr ' ' ',') docker compose -p "$PROJECT" \
+    -f "$NODE/docker-compose.yml" --env-file "$DATA/compose.env" "$@"
+}
+
+need_docker() {
+  command -v docker >/dev/null 2>&1 ||
+    die "Docker is not installed." \
+      "Install Docker Desktop (macOS, Windows) or Docker Engine (Linux): https://docs.docker.com/get-docker/" \
+      "Then run this command again."
+  docker info >/dev/null 2>&1 ||
+    die "Docker is installed but not running (or this user may not use it)." \
+      "Start Docker Desktop, or on Linux: sudo systemctl start docker (and add yourself to the docker group)." \
+      "Then run this command again."
+  local v
+  v=$(docker compose version --short 2>/dev/null) ||
+    die "Docker Compose v2 is missing (the \`docker compose\` command)." \
+      "It comes with Docker Desktop; on Linux install the docker-compose-plugin package."
+  v=${v#v}
+  local major=${v%%.*} rest=${v#*.}
+  local minor=${rest%%.*}
+  if [ "${major:-0}" -lt 2 ] || { [ "$major" -eq 2 ] && [ "${minor:-0}" -lt 20 ]; }; then
+    die "Docker Compose $v is too old; Ferry needs 2.20 or newer." "Update Docker Desktop or the docker-compose-plugin package."
+  fi
+}
+
+need_tools() {
+  local t
+  for t in git curl openssl od tar; do
+    command -v "$t" >/dev/null 2>&1 || die "\`$t\` is required and was not found." "Install it with your system's package manager and try again."
+  done
+}
+
+# free_mb <dir>: free space where <dir> lives, in MB
+free_mb() { df -Pk "$1" 2>/dev/null | awk 'NR == 2 { print int($4 / 1024) }'; }
+
+# Docker's own disk (on macOS and Windows a virtual disk, not the host's): df inside a container.
+docker_free_mb() {
+  local img
+  for img in "$FERRYD_IMAGE" "$WEB_IMAGE" debian:bookworm-slim; do
+    if docker image inspect "$img" >/dev/null 2>&1; then
+      docker run --rm --network none --entrypoint df "$img" -Pk / 2>/dev/null | awk 'NR == 2 { print int($4 / 1024) }'
+      return 0
+    fi
+  done
+  docker run --rm --network none --entrypoint df debian:bookworm-slim -Pk / 2>/dev/null | awk 'NR == 2 { print int($4 / 1024) }'
+}
+
+check_disk() {
+  local need_docker_mb=1500 have
+  image_ok "$FERRYD_IMAGE" || need_docker_mb=$((need_docker_mb + 15000))
+  has_pair btc && need_docker_mb=$((need_docker_mb + 5000))
+  has_pair ltc && need_docker_mb=$((need_docker_mb + 5000))
+  have=$(free_mb "$(dirname "$DATA")")
+  if [ -n "$have" ] && [ "$have" -lt 1000 ]; then
+    die "Not enough disk space: $have MB free where your node keeps its wallets ($(dirname "$DATA")); it needs about 1 GB." \
+      "Free some space and try again."
+  fi
+  have=$(docker_free_mb || true)
+  if [ -n "$have" ] && [ "$have" -lt "$need_docker_mb" ]; then
+    die "Not enough disk space for Docker: $((have / 1024)) GB free, about $((need_docker_mb / 1024 + 1)) GB needed." \
+      "Building Ferry the first time needs about 15 GB; a Bitcoin or Litecoin node about 5 GB more each." \
+      "Free space (docker system prune removes unused images and build cache), or on macOS/Windows give" \
+      "Docker Desktop a bigger disk (Settings > Resources), then try again."
+  fi
+}
+
+# port_in_use <port>: something answers on 127.0.0.1:<port>
+port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+# our web container publishes <port>
+ours_on_port() {
+  docker ps --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=web" \
+    --format '{{.Ports}}' 2>/dev/null | grep -q "127.0.0.1:$1->"
+}
+
+check_port() {
+  local p
+  p=$(web_port)
+  case $p in '' | *[!0-9]*) die "--port must be a number (got \"$p\")" ;; esac
+  if port_in_use "$p" && ! ours_on_port "$p"; then
+    die "Port $p is already in use by another program." \
+      "Stop that program, or run Ferry on another port: $ME up --port $((p + 10))"
+  fi
+}
+
+# ------------------------------------------------------------------ images
+
+head_commit() { git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown; }
+image_ok() { docker image inspect "$1" >/dev/null 2>&1; }
+image_commit() { docker image inspect -f '{{ index .Config.Labels "org.ferry.commit" }}' "$1" 2>/dev/null || true; }
+
+# build_image <tag> <dockerfile> <what> <minutes>
+build_image() {
+  local tag=$1 file=$2 what=$3 minutes=$4 log pid rc start
+  mkdir -p "$DATA/logs"
+  log="$DATA/logs/build-$(basename "$file").log"
+  step "Building $what ($minutes; the log is $log)"
+  start=$(date +%s)
+  DOCKER_BUILDKIT=1 docker build --progress=plain -f "$ROOT/$file" -t "$tag" \
+    --label "org.ferry.commit=$(head_commit)" "$ROOT" >"$log" 2>&1 &
+  pid=$!
+  trap 'kill "$pid" 2>/dev/null; exit 130' INT TERM
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 15
+    if kill -0 "$pid" 2>/dev/null; then
+      printf '  %sstill building, %d min so far: %s%s\n' "$DIM" "$((($(date +%s) - start) / 60))" \
+        "$(grep -E '^#[0-9]+ \[' "$log" | tail -n 1 | cut -c1-80)" "$OFF"
+    fi
+  done
+  rc=0
+  wait "$pid" || rc=$?
+  trap - INT TERM
+  if [ "$rc" -ne 0 ]; then
+    tail -n 25 "$log" >&2
+    if grep -qi "no space left" "$log"; then
+      die "The build ran out of disk space." "Free space (docker system prune) or give Docker Desktop a bigger disk, then try again."
+    fi
+    die "Building $what failed (the end of the log is above; the whole log: $log)." \
+      "Check your internet connection (it downloads Rust crates and npm packages) and try again."
+  fi
+  ok "$what built in $((($(date +%s) - start) / 60)) min"
+}
+
+# ensure_images [force]: build what is missing, or from an older checkout, or everything.
+ensure_images() {
+  local force=${1:-} head
+  head=$(head_commit)
+  if [ -n "$FERRYD_PREBUILT" ]; then
+    image_ok "$FERRYD_IMAGE" || die "FERRYD_IMAGE=$FERRYD_IMAGE does not exist here."
+  elif [ -n "$force" ] || ! image_ok "$FERRYD_IMAGE" || [ "$(image_commit "$FERRYD_IMAGE")" != "$head" ]; then
+    image_ok "$FERRYD_IMAGE" || say "  The first build compiles Ferry and its Zcash tools from source. Later updates are much faster."
+    build_image "$FERRYD_IMAGE" infra/deploy/Dockerfile.ferryd "the Ferry daemon (ferryd)" "15-40 minutes the first time"
+  fi
+  if [ -n "$WEB_PREBUILT" ]; then
+    image_ok "$WEB_IMAGE" || die "WEB_IMAGE=$WEB_IMAGE does not exist here."
+  elif [ -n "$force" ] || ! image_ok "$WEB_IMAGE" || [ "$(image_commit "$WEB_IMAGE")" != "$head" ]; then
+    build_image "$WEB_IMAGE" infra/deploy/Dockerfile.web "the web app" "about a minute"
+  fi
+}
+
+# ------------------------------------------------------------------ questions
+
+ask_yn() { # ask_yn <question> <default y|n>
+  local q=$1 def=$2 a hint
+  if [ -n "$YES" ] || [ ! -t 0 ]; then [ "$def" = y ]; return; fi
+  if [ "$def" = y ]; then hint="Y/n"; else hint="y/N"; fi
+  while true; do
+    printf '%s [%s] ' "$q" "$hint"
+    read -r a || a=
+    a=$(printf '%s' "${a:-$def}" | tr '[:upper:]' '[:lower:]')
+    case $a in y | yes) return 0 ;; n | no) return 1 ;; esac
+  done
+}
+
+ask_pairs() {
+  local cur p out=
+  cur=$(cfg_get PAIRS)
+  cur=${cur:-$DEFAULT_PAIRS}
+  say ""
+  say "${B}Which pairs should your node swap?${OFF} Each pair runs two daemons: one sells ZEC, one buys it."
+  for p in $( [ "$NET" = mainnet ] && echo "$MAINNET_PAIRS" || echo "$ALL_PAIRS" ); do
+    local d=n note=
+    case ",$cur," in *",$p,"*) d=y ;; esac
+    case $p in
+      usdc-base) note="ready in a minute, nothing to sync" ;;
+      weth-base) note="ready in a minute, nothing to sync" ;;
+      btc) note="runs a pruned Bitcoin signet node: about 5 GB, syncs for an hour or more in the background" ;;
+      ltc) note="runs a pruned Litecoin testnet node: about 5 GB, syncs for hours in the background" ;;
+    esac
+    if ask_yn "  $(pair_title "$p") ($note)?" "$d"; then out="$out $p"; fi
+  done
+  out=${out# }
+  [ -n "$out" ] || { warn "no pair picked: running $(pair_title "$DEFAULT_PAIRS")"; out=$DEFAULT_PAIRS; }
+  cfg_set PAIRS "$(printf '%s' "$out" | tr ' ' ',')"
+}
+
+rpc_file() { printf '%s/secrets/evm-rpc' "$DATA"; }
+rpc_url() { { head -n 1 "$(rpc_file)" 2>/dev/null || true; } | tr -d '[:space:]'; }
+# scheme://host only: a provider key can be in the path
+rpc_host() { rpc_url | sed -E 's#^([a-zA-Z]+://[^/]+).*#\1#'; }
+
+# check_rpc <url>: answers eth_chainId with the chain we expect (read-only)
+check_rpc() {
+  local url=$1 out id
+  out=$(curl -sS -m 15 -H 'content-type: application/json' \
+    --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' "$url" 2>&1) || {
+    printf 'cannot reach it (%s)' "$(printf '%s' "$out" | head -n 1 | cut -c1-120)"
+    return 1
+  }
+  id=$(printf '%s' "$out" | sed -n 's/.*"result" *: *"\(0x[0-9a-fA-F]*\)".*/\1/p')
+  if [ -z "$id" ]; then
+    printf 'no chain id in its answer (%s)' "$(printf '%s' "$out" | head -c 120)"
+    return 1
+  fi
+  if [ "$((id))" != "$EVM_CHAIN_ID" ]; then
+    printf 'it is chain %s, not %s (%s)' "$((id))" "$EVM_CHAIN_ID" "$EVM_NAME"
+    return 1
+  fi
+}
+
+save_rpc() {
+  local url=$1 why
+  case $url in http://* | https://*) ;; *) die "the RPC URL must start with https:// (or http://)" ;; esac
+  why=$(check_rpc "$url") || die "That $EVM_NAME RPC doesn't work: $why." \
+    "Check the URL (it must be a $EVM_NAME endpoint, chain id $EVM_CHAIN_ID) and try again."
+  # the daemons run in containers: this computer is host.docker.internal there
+  case $url in
+    http://localhost[:/]* | http://127.0.0.1[:/]* | https://localhost[:/]* | https://127.0.0.1[:/]*)
+      url=$(printf '%s' "$url" | sed -E 's#^(https?://)(localhost|127\.0\.0\.1)#\1host.docker.internal#')
+      say "  (the daemons reach it as $(printf '%s' "$url" | sed -E 's#^([a-zA-Z]+://[^/]+).*#\1#'); it must accept connections from Docker)"
+      ;;
+  esac
+  mkdir -p "$DATA/secrets"
+  chmod 700 "$DATA/secrets"
+  printf '%s\n' "$url" >"$(rpc_file).tmp"
+  chmod 600 "$(rpc_file).tmp"
+  mv "$(rpc_file).tmp" "$(rpc_file)"
+  ok "$EVM_NAME RPC $(rpc_host) answers (chain $EVM_CHAIN_ID)"
+}
+
+ask_rpc() {
+  local cur url
+  cur=$(rpc_url)
+  if [ -n "$OPT_RPC" ]; then save_rpc "$OPT_RPC"; return; fi
+  if [ -n "$YES" ] || [ ! -t 0 ]; then
+    [ -n "$cur" ] || save_rpc "$DEFAULT_RPC"
+    return
+  fi
+  say ""
+  say "${B}$EVM_NAME RPC.${OFF} Your daemons read the chain through a JSON-RPC endpoint."
+  say "  Press Enter for ${cur:+your saved one ($(rpc_host)) or }the public $DEFAULT_RPC (shared and rate"
+  say "  limited, fine to start), or paste your own (Alchemy, Infura, QuickNode, Coinbase CDP...)."
+  printf '  RPC URL: '
+  read -r url || url=
+  url=$(printf '%s' "$url" | tr -d '[:space:][:cntrl:]')
+  if [ -z "$url" ]; then
+    [ -n "$cur" ] && return
+    url=$DEFAULT_RPC
+  fi
+  save_rpc "$url"
+}
+
+ask_ferrylock() { # mainnet: there is no published FerryLock on Base mainnet yet
+  local cur a
+  cur=$(cfg_get FERRYLOCK)
+  if [ -n "${FERRY_FERRYLOCK:-}" ]; then cur=$FERRY_FERRYLOCK; fi
+  if [ -z "$cur" ] && [ -t 0 ] && [ -z "$YES" ]; then
+    say ""
+    say "${B}FerryLock on Base mainnet.${OFF} Both sides of a swap must use the same FerryLock contract."
+    say "  Ferry has no published mainnet deployment yet: paste the address you deploy"
+    say "  (infra/mainnet-demo.sh deploy) or the one your counterparty uses."
+    printf '  FerryLock address (0x...): '
+    read -r a || a=
+    cur=$(printf '%s' "$a" | tr -d '[:space:][:cntrl:]')
+  fi
+  printf '%s' "$cur" | grep -Eq '^0x[0-9a-fA-F]{40}$' ||
+    die "A Base mainnet FerryLock address is needed for --mainnet (got \"${cur:-nothing}\")." \
+      "Set it with FERRY_FERRYLOCK=0x... ./infra/node/ferry --mainnet setup" \
+      "ferryd checks at startup that the code there is the FerryLock it was built with."
+  cfg_set FERRYLOCK "$cur"
+}
+
+confirm_mainnet() {
+  [ "$NET" = mainnet ] || return 0
+  if [ -n "$(cfg_get MAINNET_OK)" ]; then return 0; fi
+  say ""
+  say "${RED}${B}MAINNET: REAL MONEY.${OFF}"
+  say "  Ferry is unaudited hackathon software. On mainnet your node holds real ZEC, USDC and ETH in"
+  say "  hot wallets on this computer, and a swap that goes wrong can lose them. Every swap here is"
+  say "  capped at $(units_zec "$MAX_ZAT") ZEC. Back up your wallets (./infra/node/ferry --mainnet backup)."
+  [ -t 0 ] || die "--mainnet needs a typed confirmation: run it in a terminal."
+  local a
+  printf '  Type MAINNET to go on: '
+  read -r a || a=
+  [ "$a" = MAINNET ] || die "Not confirmed: nothing was started."
+  cfg_set MAINNET_OK "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
+units_zec() { awk -v z="$1" 'BEGIN { s = sprintf("%.8f", z / 1e8); sub(/0+$/, "", s); sub(/\.$/, "", s); print s }'; }
+
+setup() { # setup [force]: ask what isn't saved yet (everything with force)
+  local force=${1:-}
+  # mainnet: the typed confirmation comes before anything is created or asked
+  confirm_mainnet
+  mkdir -p "$DATA"
+  chmod 700 "$DATA"
+  if [ -n "$OPT_PAIRS" ]; then
+    cfg_set PAIRS "$(normalize_pairs "$OPT_PAIRS" | tr ' ' ',')"
+  elif [ -n "$force" ] || [ -z "$(cfg_get PAIRS)" ]; then
+    if [ -n "$YES" ] || [ ! -t 0 ]; then
+      [ -n "$(cfg_get PAIRS)" ] || cfg_set PAIRS "$DEFAULT_PAIRS"
+    else
+      ask_pairs
+    fi
+  fi
+  [ -n "$OPT_PORT" ] && cfg_set WEB_PORT "$OPT_PORT"
+  [ -n "$OPT_NEAR" ] && cfg_set NEAR "$OPT_NEAR"
+  load_pairs
+  if has_evm; then
+    if [ -n "$force" ] || [ -n "$OPT_RPC" ] || [ -z "$(rpc_url)" ]; then ask_rpc; fi
+    if [ "$NET" = mainnet ]; then ask_ferrylock; fi
+  fi
+  return 0
+}
+
+# ------------------------------------------------------------------ keys and secrets
+
+# A random secp256k1 private key, hex, in a 0600 file. Never printed: ferryd derives the
+# account, and `addresses` shows it.
+SECP256K1_N=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+new_evm_key() {
+  local file=$1 k
+  [ -s "$file" ] && return 0
+  while true; do
+    k=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n' | tr 'a-f' 'A-F')
+    [ ${#k} -eq 64 ] || die "could not read 32 random bytes from /dev/urandom"
+    # 0 < k < n (equal-length hex compares as text)
+    if [ "$k" != "0000000000000000000000000000000000000000000000000000000000000000" ] &&
+      LC_ALL=C expr "$k" '<' "$SECP256K1_N" >/dev/null; then
+      break
+    fi
+  done
+  (umask 077 && printf '0x%s\n' "$(printf '%s' "$k" | tr 'A-F' 'a-f')" >"$file.tmp")
+  mv "$file.tmp" "$file"
+  chmod 600 "$file"
+}
+
+# rpc_secret <name>: a random node RPC password (secrets/<name>-rpc-pass, for the daemons) and
+# its rpcauth line (secrets/<name>-rpcauth: user "ferry", HMAC-SHA256 with a random salt, the
+# format of Bitcoin Core's share/rpcauth), which is all the node gets.
+rpc_secret() {
+  local name=$1 pass salt hmac
+  local pf="$DATA/secrets/$name-rpc-pass" af="$DATA/secrets/$name-rpcauth"
+  if [ ! -s "$pf" ]; then
+    (umask 077 && od -An -tx1 -N32 /dev/urandom | tr -d ' \n' >"$pf")
+    rm -f "$af"
+  fi
+  if [ ! -s "$af" ]; then
+    pass=$(cat "$pf")
+    salt=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+    hmac=$(printf '%s' "$pass" | openssl dgst -sha256 -hmac "$salt" | sed 's/^.*= *//')
+    printf '%s' "$hmac" | grep -Eq '^[0-9a-f]{64}$' || die "openssl could not compute the RPC password hash"
+    (umask 077 && printf 'ferry:%s$%s\n' "$salt" "$hmac" >"$af")
+  fi
+  chmod 600 "$pf" "$af"
+}
+
+# 0700 directories, 0600 files, all the user's. The daemons' tools create some files with the
+# container's default umask (the Zcash wallet, its age identity), so this also runs after start.
+tighten_perms() {
+  [ -d "$DATA" ] || return 0
+  find "$DATA" -type d ! -perm 700 -exec chmod 700 {} + 2>/dev/null || true
+  find "$DATA" -type f ! -perm 600 -exec chmod 600 {} + 2>/dev/null || true
+}
+
+prepare_data() {
+  local p role s
+  mkdir -p "$DATA" "$DATA/secrets" "$DATA/daemons" "$DATA/tokens" "$DATA/logs" "$DATA/web"
+  for p in $PAIRS; do
+    for role in z b; do
+      s="ferryd-$role-$p"
+      mkdir -p "$DATA/daemons/$s" "$DATA/tokens/$s"
+      if is_evm "$p"; then new_evm_key "$DATA/daemons/$s/evm.key"; fi
+    done
+    case $p in
+      btc) mkdir -p "$DATA/btc-wallets"; rpc_secret btc ;;
+      ltc) mkdir -p "$DATA/ltc-wallets"; rpc_secret ltc ;;
+    esac
+  done
+  tighten_perms
+  if has_evm && [ ! -s "$(rpc_file)" ]; then save_rpc "$DEFAULT_RPC"; fi
+  # a placeholder file for the bind mounts of pairs that are off
+  for s in evm-rpc btc-rpc-pass ltc-rpc-pass; do
+    [ -e "$DATA/secrets/$s" ] || (umask 077 && : >"$DATA/secrets/$s")
+  done
+}
+
+# ------------------------------------------------------------------ makers
+
+# The makers the app lists. Your own two daemons per pair always (so you can swap between your
+# Z and B while no outside maker is listed), then public makers from infra/node/makers.txt and
+# your own additions in <data>/makers.txt that answer now and are on this network.
+MAKERS=
+MAKERS_NOTE=
+own_makers() {
+  local p tok chain='' list=''
+  for p in $PAIRS; do
+    tok=$(token_of "$p")
+    chain=
+    is_evm "$p" && chain="|base"
+    list="$list, Your $tok wallet|http://ferryd-b-$p:7112|ZEC/$tok$chain"
+    list="$list, Your ZEC wallet ($tok)|http://ferryd-z-$p:7111|ZEC/$tok$chain"
+  done
+  printf '%s' "${list#, }"
+}
+
+maker_lines() {
+  local f
+  for f in "$NODE/makers.txt" "$DATA/makers.txt"; do
+    [ -f "$f" ] && sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$f" | grep -v '^$' || true
+  done
+}
+
+probe_makers() { # sets MAKERS and MAKERS_NOTE; prints a line per public maker when verbose
+  local verbose=${1:-} line name url pair offer net want ok_list='' n_total=0 n_ok=0 count=0 p
+  MAKERS=$(own_makers)
+  for p in $PAIRS; do count=$((count + 2)); done
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    name=$(printf '%s' "$line" | cut -d'|' -f1)
+    url=$(printf '%s' "$line" | cut -d'|' -f2 | sed 's#/*$##')
+    pair=$(printf '%s' "$line" | cut -d'|' -f3)
+    case $pair in
+      ZEC/USDC) want=usdc-base ;; ZEC/WETH) want=weth-base ;; ZEC/BTC | '') want=btc ;; ZEC/LTC) want=ltc ;; *) want= ;;
+    esac
+    if [ -z "$want" ] || ! has_pair "$want"; then
+      [ -n "$verbose" ] && say "  $name ($pair): skipped, that pair isn't on this node"
+      continue
+    fi
+    n_total=$((n_total + 1))
+    offer=$(curl -fsS -m 6 --max-filesize 16384 "$url/peer/offer" 2>/dev/null) || {
+      [ -n "$verbose" ] && say "  $name ($pair) $url: not answering"
+      continue
+    }
+    net=$(printf '%s' "$offer" | sed -n 's/.*"network" *: *"\([^"]*\)".*/\1/p')
+    case $net in
+      bitcoin | base | ethereum | arbitrum | optimism) [ "$NET" = mainnet ] || { [ -n "$verbose" ] && say "  $name: a mainnet maker, skipped on test networks"; continue; } ;;
+      *) [ "$NET" = testnet ] || { [ -n "$verbose" ] && say "  $name: a test-network maker, skipped on mainnet"; continue; } ;;
+    esac
+    if [ "$count" -ge 20 ]; then
+      [ -n "$verbose" ] && say "  $name: skipped, the app lists at most 20 makers"
+      continue
+    fi
+    count=$((count + 1))
+    n_ok=$((n_ok + 1))
+    ok_list="$ok_list, $line"
+    [ -n "$verbose" ] && say "  $name ($pair) $url: answering ($net)"
+  done <<EOF
+$(maker_lines)
+EOF
+  MAKERS="$MAKERS$ok_list"
+  if [ "$n_total" -eq 0 ]; then
+    MAKERS_NOTE="No public makers are listed yet: the app trades between your own two wallets of each pair (selling ZEC from Z to B, or buying it back). Trading with other people's nodes comes once public makers are listed ($ME update brings the list)."
+  elif [ "$n_ok" -eq 0 ]; then
+    MAKERS_NOTE="None of the $n_total listed public makers answers right now: the app trades between your own two wallets of each pair for now. $ME makers shows them; up checks again each time."
+  else
+    MAKERS_NOTE="$n_ok public maker(s) answering, plus your own two wallets per pair."
+  fi
+}
+
+# ------------------------------------------------------------------ env files
+
+write_env() {
+  local p f="$DATA/compose.env" w="$DATA/web.env" main stem
+  {
+    printf '# written by infra/node/ferry on each `up`; edit %s instead\n' "$CONFIG"
+    printf 'FERRY_UID=%s\nFERRY_GID=%s\nFERRY_DATA=%s\n' "$(id -u)" "$(id -g)" "$DATA"
+    printf 'FERRYD_IMAGE=%s\nWEB_IMAGE=%s\nWEB_PORT=%s\n' "$FERRYD_IMAGE" "$WEB_IMAGE" "$(web_port)"
+    printf 'COMPOSE_PROFILES=%s\n' "$(printf '%s' "$PAIRS" | tr ' ' ',')"
+    printf 'ZEC_NETWORK=%s\nZEC_SERVER=%s\n' "$ZEC_NETWORK" "$ZEC_SERVER"
+    printf 'BASE_USDC=%s\nBASE_WETH=%s\n' "$USDC" "$WETH"
+    # changes when the RPC file does, so its daemons restart (not the URL: it can hold a key)
+    printf 'EVM_RPC_REV=%s\n' "$(openssl dgst -sha256 <"$(rpc_file)" 2>/dev/null | sed 's/^.*= *//' | cut -c1-16)"
+    if [ "$NET" = mainnet ]; then
+      printf 'BASE_FERRYLOCK=%s\n' "$(cfg_get FERRYLOCK)"
+      # ferryd's Base mainnet policy (infra/mainnet-demo.sh): it refuses anything less
+      printf 'EVM_T1_SECS=18900\nEVM_REFUND_SECS=7200\nEVM_DELTA_SECS=3600\nEVM_LOCK_CONFS=30\nZEC_CONFS=10\n'
+      # your own two wallets trade at the market (Kraken and CoinGecko), at most 0.02 ZEC a swap
+      printf 'PRICE_FEED=all\nUSDC_RATE=1000000000\nWETH_RATE=500000000000000000\n'
+      printf 'USDC_MIN_ZAT=500000\nUSDC_MAX_ZAT=%s\nWETH_MIN_ZAT=500000\nWETH_MAX_ZAT=%s\n' "$MAX_ZAT" "$MAX_ZAT"
+    else
+      printf 'BASE_FERRYLOCK=%s\n' "$FERRYLOCK"
+    fi
+    # single quotes: compose must not expand the $ in the hash
+    if [ -s "$DATA/secrets/btc-rpcauth" ]; then printf "BTC_RPCAUTH='%s'\n" "$(cat "$DATA/secrets/btc-rpcauth")"; fi
+    if [ -s "$DATA/secrets/ltc-rpcauth" ]; then printf "LTC_RPCAUTH='%s'\n" "$(cat "$DATA/secrets/ltc-rpcauth")"; fi
+  } >"$f.tmp"
+  chmod 600 "$f.tmp"
+  mv "$f.tmp" "$f"
+
+  # The web server: the first pair's daemons are the main Z and B, the others per pair; every
+  # one of them is yours, so both directions are on (FERRY_Z_SELLS / FERRY_B_BUYS, which would
+  # otherwise skip a daemon that makes offers).
+  main=${PAIRS%% *}
+  {
+    printf '# written by infra/node/ferry on each `up`\n'
+    printf 'PUBLIC_ORIGIN=%s\n' "$(web_url)"
+    printf 'FERRY_Z_URL=http://ferryd-z-%s:7101\nFERRY_Z_TOKEN_FILE=/tokens/ferryd-z-%s/api-token\n' "$main" "$main"
+    printf 'FERRY_B_URL=http://ferryd-b-%s:7102\nFERRY_B_TOKEN_FILE=/tokens/ferryd-b-%s/api-token\n' "$main" "$main"
+    printf 'FERRY_Z_SELLS=1\nFERRY_B_BUYS=1\n'
+    for p in $PAIRS; do
+      [ "$p" = "$main" ] && continue
+      stem=$(env_stem "$p")
+      printf 'FERRY_%s_URL=http://ferryd-z-%s:7101\nFERRY_%s_TOKEN_FILE=/tokens/ferryd-z-%s/api-token\n' "$stem" "$p" "$stem" "$p"
+      printf 'FERRY_%s_B_URL=http://ferryd-b-%s:7102\nFERRY_%s_B_TOKEN_FILE=/tokens/ferryd-b-%s/api-token\n' "$stem" "$p" "$stem" "$p"
+    done
+    # no fallback maker: the list below is the whole allowlist
+    printf 'FERRY_MAKER_URL=\n'
+    printf "FERRY_MAKERS='%s'\n" "$MAKERS"
+    printf 'DEMO_MAX_ZAT=%s\nDEMO_RATE_PER_HOUR=30\nDEMO_SWAPS_PER_HOUR=60\nDEMO_FAULTS=0\n' "$MAX_ZAT"
+    # NEAR Intents swaps run only on your own node, on mainnet (web/server/prod.mjs), and only
+    # when asked for with --near: that path has not yet run with real funds
+    if [ "$NET" = mainnet ] && [ "$(cfg_get NEAR)" = 1 ]; then
+      printf 'FERRY_NEAR=1\n'
+    fi
+  } >"$w.tmp"
+  chmod 600 "$w.tmp"
+  mv "$w.tmp" "$w"
+}
+
+# ------------------------------------------------------------------ health
+
+# ps_lines: "<service> <state> <health>" for each container of the project
+ps_lines() {
+  docker ps -a --filter "label=com.docker.compose.project=$PROJECT" \
+    --format '{{ .Label "com.docker.compose.service" }} {{ .State }} {{ .Status }}' 2>/dev/null |
+    awk '{ h = ""; if ($0 ~ /\(healthy\)/) h = "healthy"; else if ($0 ~ /\(unhealthy\)/) h = "unhealthy"; else if ($0 ~ /health: starting/) h = "starting"; print $1, $2, h }'
+}
+
+running() { ps_lines | awk -v s="$1" '$1 == s && $2 == "running" { f = 1 } END { exit !f }'; }
+
+node_info() { # node_info btc|ltc: getblockchaininfo JSON, or nothing
+  case $1 in
+    btc) running bitcoind && compose exec -T bitcoind bitcoin-cli -chain=signet -datadir=/home/bitcoin/.bitcoin \
+      -rpcport=38332 getblockchaininfo 2>/dev/null | tr -d '\n' || true ;;
+    ltc) running litecoind && compose exec -T litecoind litecoin-cli -testnet -datadir=/home/litecoin/.litecoin \
+      -rpcport=19332 getblockchaininfo 2>/dev/null | tr -d '\n' || true ;;
+  esac
+}
+
+# node_progress btc|ltc: one line on the chain node's sync
+node_progress() {
+  local n blocks headers pct name="Bitcoin signet node"
+  [ "$1" = ltc ] && name="Litecoin testnet node"
+  n=$(node_info "$1")
+  blocks=$(printf '%s' "$n" | sed -n 's/.*"blocks" *: *\([0-9]*\).*/\1/p')
+  headers=$(printf '%s' "$n" | sed -n 's/.*"headers" *: *\([0-9]*\).*/\1/p')
+  pct=$(printf '%s' "$n" | sed -n 's/.*"verificationprogress" *: *\([0-9.eE-]*\).*/\1/p')
+  if [ -z "$blocks" ]; then
+    printf '%s: starting' "$name"
+  else
+    printf '%s: syncing, block %s of %s headers (%s%%); it keeps going in the background' \
+      "$name" "$blocks" "${headers:-?}" "$(awk -v p="${pct:-0}" 'BEGIN { printf "%.1f", 100 * p }')"
+  fi
+}
+
+# report <status|addresses|ready>: infra/node/report.mjs, run by node in the web container
+report() {
+  local mode=$1 btc='' ltc=''
+  has_pair btc && btc=$(node_info btc)
+  has_pair ltc && ltc=$(node_info ltc)
+  local envs=(-e "FERRY_REPORT_MODE=$mode" -e "FERRY_REPORT_PAIRS=$(printf '%s' "$PAIRS" | tr ' ' ',')"
+    -e "FERRY_REPORT_NET=$NET" -e "FERRY_REPORT_PS=$(ps_lines)" -e "FERRY_REPORT_BTC_NODE=$btc"
+    -e "FERRY_REPORT_LTC_NODE=$ltc" -e "FERRY_REPORT_RPC_HOST=$(rpc_host)")
+  if running web; then
+    compose exec -T "${envs[@]}" web node --input-type=module - <"$NODE/report.mjs"
+  else
+    compose run --rm --no-deps -T "${envs[@]}" --entrypoint node web --input-type=module - <"$NODE/report.mjs" 2>/dev/null
+  fi
+}
+
+# explain <service>: the plain-language reason a daemon isn't up, from its log
+explain() {
+  local s=$1 log
+  log=$(compose logs --no-color --tail 60 "$s" 2>/dev/null || true)
+  if printf '%s' "$log" | grep -qiE '429|rate.?limit|too many requests'; then
+    say "    The $EVM_NAME RPC is rate limiting your node. Use your own RPC URL: $ME setup"
+  elif printf '%s' "$log" | grep -qiE 'not the FerryLock|FerryLock.*code|code at'; then
+    say "    The FerryLock contract on $EVM_NAME is not the one this Ferry was built with. Run $ME update."
+  elif printf '%s' "$log" | grep -qiE 'chain id'; then
+    say "    The RPC answers for another chain than $EVM_NAME. Fix it with $ME setup."
+  elif printf '%s' "$log" | grep -qiE 'lightwalletd|zec-server|transport error|zcash-devtool.*(connect|sync)|tonic'; then
+    say "    It can't reach the Zcash server $ZEC_SERVER. Check your internet connection; it retries by itself."
+  elif printf '%s' "$log" | grep -qiE 'loading block index|verifying blocks|warmup|-28'; then
+    say "    It waits for the chain node to finish starting; it retries by itself."
+  elif printf '%s' "$log" | grep -qiE 'permission denied'; then
+    say "    A file in $DATA can't be read or written. Check that the folder belongs to you."
+  fi
+  printf '%s\n' "$log" | grep -v '^\s*$' | tail -n 6 | sed "s/^/    $DIM/; s/\$/$OFF/"
+}
+
+# wait_ready: the web app answers, and each pair's daemons (the chain-node pairs only get a
+# short wait: their daemons start once the node accepts connections)
+wait_ready() {
+  local deadline p s line down st i
+  step "Waiting for your node to come up (the first start creates your Zcash wallets: a minute or two)"
+  deadline=$(($(date +%s) + 60))
+  until curl -fsS -m 3 "$(web_url)/healthz" >/dev/null 2>&1; do
+    if [ "$(date +%s)" -gt "$deadline" ]; then
+      compose logs --no-color --tail 20 web >&2 || true
+      die "The web app did not start on $(web_url)." "Its log is above; $ME logs web follows it."
+    fi
+    sleep 2
+  done
+  ok "web app on $(web_url)"
+  deadline=$(($(date +%s) + 240))
+  i=0
+  while true; do
+    st=$(report ready 2>/dev/null || true)
+    down=$(printf '%s\n' "$st" | awk '$2 == "down" { print $1 }')
+    for p in $PAIRS; do
+      case $p in btc | ltc) down=$(printf '%s\n' "$down" | grep -v -- "-$p\$" || true) ;; esac
+    done
+    [ -z "$(printf '%s' "$down" | tr -d '[:space:]')" ] && break
+    if [ "$(date +%s)" -gt "$deadline" ]; then
+      warn "some daemons are not answering yet:"
+      for s in $down; do
+        say "  $s ($(ps_lines | awk -v s="$s" '$1 == s { print $2, $3 }'))"
+        explain "$s"
+      done
+      say "  They keep retrying. $ME status checks again; $ME logs <service> shows more."
+      return 0
+    fi
+    i=$((i + 1))
+    [ $((i % 10)) -eq 0 ] && say "  ${DIM}still starting: $(printf '%s' "$down" | tr '\n' ' ')${OFF}"
+    sleep 3
+  done
+  for p in $PAIRS; do
+    case $p in
+      btc | ltc) ;;
+      *) ok "$(pair_title "$p"): both daemons answer" ;;
+    esac
+  done
+}
+
+# ------------------------------------------------------------------ commands
+
+stop_disabled_pairs() {
+  local p s list
+  for p in $ALL_PAIRS; do
+    has_pair "$p" && continue
+    list=
+    for s in $(services_of "$p"); do
+      ps_lines | awk -v s="$s" '$1 == s { f = 1 } END { exit !f }' && list="$list $s"
+    done
+    if [ -n "$list" ]; then
+      say "  stopping $(pair_title "$p") (turned off; its wallets stay in $DATA)"
+      # shellcheck disable=SC2086
+      compose_all rm -sf $list >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+open_browser() {
+  local url=$1
+  [ -n "$NO_OPEN" ] && return 0
+  if [ "$(uname -s)" = Darwin ] && command -v open >/dev/null 2>&1; then
+    open "$url" >/dev/null 2>&1 || true
+  elif command -v xdg-open >/dev/null 2>&1 && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    xdg-open "$url" >/dev/null 2>&1 || true
+  fi
+}
+
+cmd_up() {
+  need_tools
+  need_docker
+  # before any question: a busy port stops it now
+  check_port
+  setup
+  step "Ferry node on $( [ "$NET" = mainnet ] && echo "${RED}MAINNET${OFF}" || echo "test networks") ($DATA)"
+  local p
+  for p in $PAIRS; do say "  $(pair_title "$p")"; done
+  check_disk
+  prepare_data
+  ensure_images
+  step "Makers"
+  probe_makers
+  say "  $MAKERS_NOTE"
+  write_env
+  stop_disabled_pairs
+  step "Starting"
+  if has_pair btc || has_pair ltc; then
+    say "  ${YEL}The Bitcoin/Litecoin node syncs in the background, for an hour or more the first time.${OFF}"
+    say "  ${YEL}Those swaps work once it is synced; $ME status shows the progress.${OFF}"
+  fi
+  local out
+  if ! out=$(compose up -d --remove-orphans 2>&1); then
+    printf '%s\n' "$out" | sed 's/^/  /' >&2
+    die "docker compose could not start the node (the messages are above)."
+  fi
+  printf '%s\n' "$out" | grep -vE '^[[:space:]]*$' | sed 's/^/  /' || true
+  wait_ready
+  tighten_perms
+  for p in btc ltc; do
+    if has_pair "$p"; then say "  $(node_progress "$p")"; fi
+  done
+  say ""
+  say "${B}${GRN}Your Ferry node is running:${OFF} ${B}$(web_url)${OFF}"
+  say ""
+  say "  Fund your wallets:  $ME addresses"
+  say "  Back them up:       $ME backup   (your keys exist only in $DATA)"
+  say "  See how it's doing: $ME status"
+  say "  Stop it:            $ME down"
+  open_browser "$(web_url)"
+}
+
+# commands other than up/setup work on what exists
+need_node() {
+  [ -f "$DATA/compose.env" ] || die "No Ferry node here yet ($DATA)." "Start one with: $ME up"
+  need_docker
+  load_pairs
+}
+
+cmd_status() {
+  need_node
+  local any
+  any=$(ps_lines | awk '$2 == "running"' | wc -l | tr -d ' ')
+  say "${B}Ferry node${OFF} on $( [ "$NET" = mainnet ] && echo MAINNET || echo "test networks"), data in $DATA"
+  if [ "$any" -eq 0 ]; then
+    say "  Not running. Start it: $ME up"
+    return 0
+  fi
+  if curl -fsS -m 3 "$(web_url)/healthz" >/dev/null 2>&1; then
+    say "  web app: $(web_url) (answering)"
+  else
+    say "  web app: $(web_url) ${YEL}not answering${OFF} ($(ps_lines | awk '$1 == "web" { print $2, $3 }'))"
+  fi
+  say ""
+  report status || warn "could not ask the daemons (is the web container up? $ME logs web)"
+  probe_makers
+  say "Makers: $MAKERS_NOTE"
+  local s state
+  ps_lines | while read -r s state _; do
+    case $state in
+      restarting | exited | dead)
+        [ "$s" = bitcoind-init ] || [ "$s" = litecoind-init ] && continue
+        say ""
+        warn "$s is $state"
+        explain "$s"
+        ;;
+    esac
+  done
+}
+
+cmd_addresses() {
+  need_node
+  running web || die "Your node isn't running." "Start it: $ME up"
+  report addresses
+}
+
+cmd_logs() {
+  need_node
+  local target=${ARGS[0]:-} svcs=
+  case $target in
+    '') ;;
+    usdc-base | weth-base | btc | ltc) svcs=$(services_of "$target" | sed 's/[a-z]*-init //') ;;
+    *) svcs=$target ;;
+  esac
+  # shellcheck disable=SC2086
+  compose logs -f --tail 100 $svcs
+}
+
+cmd_down() {
+  [ -f "$DATA/compose.env" ] || { say "No Ferry node here ($DATA): nothing to stop."; return 0; }
+  need_docker
+  load_pairs
+  step "Stopping your Ferry node (a chain node can take a minute to save its state)"
+  local out
+  if ! out=$(compose_all down --remove-orphans 2>&1); then
+    printf '%s\n' "$out" | sed 's/^/  /' >&2
+    die "docker compose could not stop the node (the messages are above)."
+  fi
+  say "Stopped. Your wallets and keys stay in $DATA, the chain data in Docker volumes."
+  say "Start again with: $ME up"
+}
+
+cmd_update() {
+  need_tools
+  need_docker
+  step "Getting the latest Ferry"
+  if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    warn "you have local changes in $ROOT: not pulling. Rebuilding what you have."
+  elif ! git -C "$ROOT" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+    warn "this checkout doesn't track a remote branch: not pulling. Rebuilding what you have."
+  else
+    git -C "$ROOT" pull --ff-only 2>&1 | sed 's/^/  /' ||
+      die "git pull failed (the message is above)." "Fix it in $ROOT and run update again."
+  fi
+  # the newest version of this script does the rest
+  local again=(up --no-open)
+  [ -n "$YES" ] && again+=(--yes)
+  [ -n "$MAINNET" ] && again+=(--mainnet)
+  [ -n "$OPT_PORT" ] && again+=(--port "$OPT_PORT")
+  FERRY_FORCE_BUILD=1 exec "$NODE/ferry" "${again[@]}"
+}
+
+read_passphrase() { # read_passphrase <prompt> [confirm]: into PASSPHRASE
+  local a b
+  if [ -t 0 ]; then
+    printf '%s' "$1"
+    stty -echo
+    read -r a || a=
+    stty echo
+    printf '\n'
+    if [ -n "${2:-}" ]; then
+      printf 'Again: '
+      stty -echo
+      read -r b || b=
+      stty echo
+      printf '\n'
+      [ "$a" = "$b" ] || die "The two passphrases differ: nothing was written."
+    fi
+  else
+    read -r a || a=
+  fi
+  PASSPHRASE=$a
+}
+
+cmd_backup() {
+  [ -d "$DATA" ] && [ -f "$CONFIG" ] || die "No Ferry node here yet ($DATA): nothing to back up."
+  need_tools
+  local out=${ARGS[0]:-$HOME/ferry-node-backup-$NET-$(date +%Y%m%d-%H%M%S).tar.gz.enc}
+  [ -e "$out" ] && die "$out exists already: pick another name."
+  case $out in "$ROOT"/*) warn "the backup goes inside the Ferry checkout; don't commit it." ;; esac
+  say "This backup holds every key of your node: your Zcash wallets, your $EVM_NAME accounts and"
+  say "your Bitcoin/Litecoin wallets. It is encrypted with a passphrase you choose; without the"
+  say "passphrase nobody can open it, including you. Use a long one and keep it apart from the file."
+  tighten_perms
+  PASSPHRASE=
+  if [ -t 0 ]; then trap 'stty echo 2>/dev/null || true' EXIT; fi
+  read_passphrase "Passphrase: " confirm
+  [ ${#PASSPHRASE} -ge 12 ] || die "Use a passphrase of at least 12 characters."
+  # logs and the env files written on each `up` are left out; everything else is the node
+  (cd "$DATA" && tar -czf - --exclude ./logs --exclude ./compose.env --exclude ./web.env .) |
+    openssl enc -aes-256-cbc -salt -pbkdf2 -iter 600000 -md sha256 -pass fd:3 -out "$out" 3< <(printf '%s' "$PASSPHRASE")
+  PASSPHRASE=
+  chmod 600 "$out"
+  # check it opens and lists what we expect
+  ok "backup written: $out ($(du -h "$out" | awk '{ print $1 }'))"
+  say "Restore it on any computer with this checkout: $ME restore $out"
+  say "Or by hand: openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -in FILE | tar -xzf -"
+  say "Take a new backup after adding a pair (new pairs get new wallets)."
+}
+
+cmd_restore() {
+  local in=${ARGS[0]:-}
+  [ -n "$in" ] && [ -f "$in" ] || die "usage: $ME restore <backup file>"
+  need_tools
+  if [ -d "$DATA/daemons" ] && [ -n "$(ls -A "$DATA/daemons" 2>/dev/null)" ]; then
+    die "$DATA already holds a node: restoring would mix two sets of wallets." \
+      "Move it away first (keep it until you are sure), e.g.: mv $DATA $DATA.old"
+  fi
+  PASSPHRASE=
+  if [ -t 0 ]; then trap 'stty echo 2>/dev/null || true' EXIT; fi
+  read_passphrase "Passphrase: "
+  local tmp="$DATA.restore.$$"
+  mkdir -p "$tmp"
+  chmod 700 "$tmp"
+  if ! openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -pass fd:3 -in "$in" 3< <(printf '%s' "$PASSPHRASE") 2>/dev/null |
+    tar -xzf - -C "$tmp" 2>/dev/null; then
+    rm -rf "$tmp"
+    die "Could not open the backup: wrong passphrase, or not a Ferry node backup."
+  fi
+  PASSPHRASE=
+  [ -f "$tmp/config" ] || { rm -rf "$tmp"; die "That archive is not a Ferry node backup (no config in it)."; }
+  # a mainnet node's config records its confirmation; keep the two kinds of node apart
+  if grep -q '^MAINNET_OK=' "$tmp/config" && [ "$NET" != mainnet ]; then
+    rm -rf "$tmp"
+    die "That is a backup of a MAINNET node." "Restore it with: ./infra/node/ferry --mainnet restore $in"
+  fi
+  if ! grep -q '^MAINNET_OK=' "$tmp/config" && [ "$NET" = mainnet ]; then
+    rm -rf "$tmp"
+    die "That is a backup of a test-network node." "Restore it without --mainnet: ./infra/node/ferry restore $in"
+  fi
+  rm -rf "$DATA"
+  mv "$tmp" "$DATA"
+  chmod 700 "$DATA"
+  ok "restored into $DATA"
+  say "Start it with: $ME up"
+}
+
+cmd_makers() {
+  [ -f "$CONFIG" ] || setup
+  load_pairs
+  say "${B}Makers the app lists${OFF}"
+  local p
+  for p in $PAIRS; do
+    say "  Your $(token_of "$p") wallet and your ZEC wallet ($(token_of "$p")): your own B and Z for $(pair_title "$p")"
+  done
+  say "Public makers ($NODE/makers.txt, and yours in $DATA/makers.txt; format name|url|pair|chain):"
+  if [ -z "$(maker_lines)" ]; then
+    say "  none listed yet"
+  fi
+  probe_makers verbose
+  say ""
+  say "$MAKERS_NOTE"
+}
+
+case $CMD in
+  up)
+    [ -n "${FERRY_FORCE_BUILD:-}" ] && { need_docker; setup; prepare_data; ensure_images force; }
+    cmd_up
+    ;;
+  status) cmd_status ;;
+  addresses) cmd_addresses ;;
+  logs) cmd_logs ;;
+  down | stop) cmd_down ;;
+  update) cmd_update ;;
+  backup) cmd_backup ;;
+  restore) cmd_restore ;;
+  setup)
+    need_tools
+    setup force
+    say "Saved in $CONFIG. Apply it with: $ME up"
+    ;;
+  makers) cmd_makers ;;
+  help) usage ;;
+  *) usage; die "unknown command \"$CMD\"" ;;
+esac

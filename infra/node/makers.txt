@@ -1,0 +1,15 @@
+# Public Ferry makers a node lists in its app, besides the node's own two wallets per pair.
+# `ferry up` asks each one for its offer (GET <url>/peer/offer) and lists only those that answer,
+# swap a pair the node runs, and are on the node's networks (test networks, or mainnet with
+# --mainnet). `ferry update` brings a newer list. Your own additions go in <data dir>/makers.txt
+# (.ferry-node/makers.txt), in the same format.
+#
+# One maker per line: name|peer URL|pair|chain
+#   name   1-40 letters, digits, spaces or ._()-, unique
+#   url    the maker's peer endpoint (https://...), the one its ferryd serves /peer/* on
+#   pair   ZEC/USDC, ZEC/WETH, ZEC/BTC or ZEC/LTC
+#   chain  base for the USDC and WETH pairs, empty otherwise
+# e.g.  Kestrel|https://maker.example.org/ferry|ZEC/USDC|base
+#
+# None yet: the public demo's makers are private to the demo for now (docs/DEPLOY.md). Until a
+# maker is listed here, a node trades between its own two wallets of each pair.

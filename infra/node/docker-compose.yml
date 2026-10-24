@@ -1,0 +1,535 @@
+# A Ferry node on your own computer: your ferryd daemons for the pairs you picked, the nodes they
+# need, and the web app on 127.0.0.1. Run it through infra/node/ferry (it writes the env files,
+# creates the keys and picks the profiles), not plain `docker compose`. docs/RUN-A-NODE.md.
+#
+# One profile per pair, each with both roles, so you can sell ZEC (Z) and buy it (B):
+#   usdc-base  ZEC/USDC on Base Sepolia (Base mainnet with --mainnet): no chain node needed
+#   weth-base  ZEC/WETH on Base Sepolia (Base mainnet with --mainnet)
+#   btc        ZEC/BTC on Bitcoin signet: a pruned bitcoind that syncs in the background
+#   ltc        ZEC/LTC on Litecoin testnet: a pruned litecoind
+# Zcash: every daemon's own zcash-devtool wallet against a public lightwalletd (ZEC_SERVER).
+#
+# What lives where:
+# - ${FERRY_DATA} (the node's data directory, mode 0700, on your disk): each daemon's data dir
+#   (its Zcash wallet and identity, its EVM key, its swaps), the Bitcoin/Litecoin wallets, the
+#   API tokens, the RPC secrets. `ferry backup` archives exactly this.
+# - Docker volumes: only the block chains (bitcoind, litecoind), which can always be synced again.
+# Every container runs as your own user (FERRY_UID:FERRY_GID), so the files it writes are yours.
+#
+# Nothing listens beyond this computer: the web app is published on 127.0.0.1 only, and the
+# daemons' control APIs (7101/7102) and peer listeners (7111/7112) are reachable only on the
+# node's private Docker network (by the web app and by each other).
+name: ferry-node
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  read_only: true
+  tmpfs: [/tmp]
+
+# Every ferryd: the image `ferry up` builds from infra/deploy/Dockerfile.ferryd.
+x-ferryd: &ferryd
+  <<: *hardening
+  image: ${FERRYD_IMAGE:-ferry-node-ferryd:local}
+  pull_policy: never
+  user: "${FERRY_UID:-10001}:${FERRY_GID:-10001}"
+  stop_grace_period: 30s
+  networks: [node]
+  # an RPC on this computer (http://localhost:... in `ferry setup`) is host.docker.internal here
+  extra_hosts: ["host.docker.internal:host-gateway"]
+  healthcheck:
+    test: ["CMD", "ferry-api", "/api/status"]
+    interval: 30s
+    timeout: 10s
+    start_period: 120s
+
+x-env-z: &env-z
+  HOME: /data
+  FERRY_TOKEN_FILE: /run/ferry-token/api-token
+  FERRY_API_PORT: "7101"
+
+x-env-b: &env-b
+  HOME: /data
+  FERRY_TOKEN_FILE: /run/ferry-token/api-token
+  FERRY_API_PORT: "7102"
+
+# The EVM daemons read the RPC URL from a file at startup; EVM_RPC_REV (a hash of that file,
+# from `ferry`) changes with it, so `ferry up` restarts them after `ferry setup` changes the RPC.
+x-env-z-evm: &env-z-evm
+  <<: *env-z
+  FERRY_RPC_REV: ${EVM_RPC_REV:-}
+
+x-env-b-evm: &env-b-evm
+  <<: *env-b
+  FERRY_RPC_REV: ${EVM_RPC_REV:-}
+
+services:
+  # ---------------------------------------------------------------- ZEC/USDC (profile usdc-base)
+  # No node: the daemons use the Base JSON-RPC in secrets/evm-rpc (a file, so a provider key in
+  # the URL stays out of `docker inspect`). FerryLock and USDC addresses come from `ferry`.
+
+  ferryd-z-usdc-base:
+    <<: *ferryd
+    profiles: [usdc-base]
+    command:
+      - --counter=evm
+      - --role=z
+      - --name=sell-usdc
+      - --api-listen=0.0.0.0:7101
+      - --api-allow-remote
+      - --api-token-file=/run/ferry-token/api-token
+      - --listen=0.0.0.0:7111
+      - --public-url=http://ferryd-z-usdc-base:7111
+      # Your Z also makes an offer, so your own B can buy ZEC from it while no outside maker is
+      # listed. It is reachable on this node's private network only.
+      - --maker-offer=${USDC_RATE:-40000000}:${USDC_MIN_ZAT:-1000000}:${USDC_MAX_ZAT:-25000000}
+      - --maker-price-feed=${PRICE_FEED:-off}
+      - --maker-price-pair=ZEC/USDC
+      - --data-dir=/data
+      - --evm-rpc-file=/run/secrets/evm-rpc
+      - --evm-contract=${BASE_FERRYLOCK:-0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef}
+      - --evm-token=${BASE_USDC:-0x036CbD53842c5426634e7929541eC2318f3dCF7e}
+      - --evm-token-symbol=USDC
+      - --evm-token-decimals=6
+      - --evm-key-file=/data/evm.key
+      - --evm-t1-secs=${EVM_T1_SECS:-2700}
+      - --evm-refund-secs=${EVM_REFUND_SECS:-1800}
+      - --evm-delta-secs=${EVM_DELTA_SECS:-300}
+      - --evm-lock-confs=${EVM_LOCK_CONFS:-10}
+      - --evm-log-chunk=${EVM_LOG_CHUNK:-200}
+      - --zec=devtool
+      - --zec-network=${ZEC_NETWORK:-test}
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --poll-ms=${EVM_POLL_MS:-4000}
+    environment: *env-z-evm
+    volumes:
+      - ${FERRY_DATA:?}/daemons/ferryd-z-usdc-base:/data
+      - ${FERRY_DATA:?}/tokens/ferryd-z-usdc-base:/run/ferry-token
+      - ${FERRY_DATA:?}/secrets/evm-rpc:/run/secrets/evm-rpc:ro
+
+  ferryd-b-usdc-base:
+    <<: *ferryd
+    profiles: [usdc-base]
+    command:
+      - --counter=evm
+      - --role=b
+      - --name=buy-usdc
+      - --api-listen=0.0.0.0:7102
+      - --api-allow-remote
+      - --api-token-file=/run/ferry-token/api-token
+      - --listen=0.0.0.0:7112
+      - --public-url=http://ferryd-b-usdc-base:7112
+      # Your B makes an offer too, so your own Z can sell ZEC to it (private network only).
+      - --maker-offer=${USDC_RATE:-40000000}:${USDC_MIN_ZAT:-1000000}:${USDC_MAX_ZAT:-25000000}
+      - --maker-price-feed=${PRICE_FEED:-off}
+      - --maker-price-pair=ZEC/USDC
+      - --data-dir=/data
+      - --evm-rpc-file=/run/secrets/evm-rpc
+      - --evm-contract=${BASE_FERRYLOCK:-0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef}
+      - --evm-token=${BASE_USDC:-0x036CbD53842c5426634e7929541eC2318f3dCF7e}
+      - --evm-token-symbol=USDC
+      - --evm-token-decimals=6
+      - --evm-key-file=/data/evm.key
+      - --evm-t1-secs=${EVM_T1_SECS:-2700}
+      - --evm-refund-secs=${EVM_REFUND_SECS:-1800}
+      - --evm-delta-secs=${EVM_DELTA_SECS:-300}
+      - --evm-lock-confs=${EVM_LOCK_CONFS:-10}
+      - --evm-log-chunk=${EVM_LOG_CHUNK:-200}
+      - --zec=devtool
+      - --zec-network=${ZEC_NETWORK:-test}
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --poll-ms=${EVM_POLL_MS:-4000}
+    environment: *env-b-evm
+    volumes:
+      - ${FERRY_DATA:?}/daemons/ferryd-b-usdc-base:/data
+      - ${FERRY_DATA:?}/tokens/ferryd-b-usdc-base:/run/ferry-token
+      - ${FERRY_DATA:?}/secrets/evm-rpc:/run/secrets/evm-rpc:ro
+
+  # ---------------------------------------------------------------- ZEC/WETH (profile weth-base)
+
+  ferryd-z-weth-base:
+    <<: *ferryd
+    profiles: [weth-base]
+    command:
+      - --counter=evm
+      - --role=z
+      - --name=sell-weth
+      - --api-listen=0.0.0.0:7101
+      - --api-allow-remote
+      - --api-token-file=/run/ferry-token/api-token
+      - --listen=0.0.0.0:7111
+      - --public-url=http://ferryd-z-weth-base:7111
+      # wei per ZEC: 12000000000000000 is 0.012 WETH per ZEC
+      - --maker-offer=${WETH_RATE:-12000000000000000}:${WETH_MIN_ZAT:-1000000}:${WETH_MAX_ZAT:-25000000}
+      - --maker-price-feed=${PRICE_FEED:-off}
+      - --maker-price-pair=ZEC/ETH
+      - --data-dir=/data
+      - --evm-rpc-file=/run/secrets/evm-rpc
+      - --evm-contract=${BASE_FERRYLOCK:-0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef}
+      - --evm-token=${BASE_WETH:-0x4200000000000000000000000000000000000006}
+      - --evm-token-symbol=WETH
+      - --evm-token-decimals=18
+      - --evm-key-file=/data/evm.key
+      - --evm-t1-secs=${EVM_T1_SECS:-2700}
+      - --evm-refund-secs=${EVM_REFUND_SECS:-1800}
+      - --evm-delta-secs=${EVM_DELTA_SECS:-300}
+      - --evm-lock-confs=${EVM_LOCK_CONFS:-10}
+      - --evm-log-chunk=${EVM_LOG_CHUNK:-200}
+      - --zec=devtool
+      - --zec-network=${ZEC_NETWORK:-test}
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --poll-ms=${EVM_POLL_MS:-4000}
+    environment: *env-z-evm
+    volumes:
+      - ${FERRY_DATA:?}/daemons/ferryd-z-weth-base:/data
+      - ${FERRY_DATA:?}/tokens/ferryd-z-weth-base:/run/ferry-token
+      - ${FERRY_DATA:?}/secrets/evm-rpc:/run/secrets/evm-rpc:ro
+
+  ferryd-b-weth-base:
+    <<: *ferryd
+    profiles: [weth-base]
+    command:
+      - --counter=evm
+      - --role=b
+      - --name=buy-weth
+      - --api-listen=0.0.0.0:7102
+      - --api-allow-remote
+      - --api-token-file=/run/ferry-token/api-token
+      - --listen=0.0.0.0:7112
+      - --public-url=http://ferryd-b-weth-base:7112
+      - --maker-offer=${WETH_RATE:-12000000000000000}:${WETH_MIN_ZAT:-1000000}:${WETH_MAX_ZAT:-25000000}
+      - --maker-price-feed=${PRICE_FEED:-off}
+      - --maker-price-pair=ZEC/ETH
+      - --data-dir=/data
+      - --evm-rpc-file=/run/secrets/evm-rpc
+      - --evm-contract=${BASE_FERRYLOCK:-0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef}
+      - --evm-token=${BASE_WETH:-0x4200000000000000000000000000000000000006}
+      - --evm-token-symbol=WETH
+      - --evm-token-decimals=18
+      - --evm-key-file=/data/evm.key
+      - --evm-t1-secs=${EVM_T1_SECS:-2700}
+      - --evm-refund-secs=${EVM_REFUND_SECS:-1800}
+      - --evm-delta-secs=${EVM_DELTA_SECS:-300}
+      - --evm-lock-confs=${EVM_LOCK_CONFS:-10}
+      - --evm-log-chunk=${EVM_LOG_CHUNK:-200}
+      - --zec=devtool
+      - --zec-network=${ZEC_NETWORK:-test}
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --poll-ms=${EVM_POLL_MS:-4000}
+    environment: *env-b-evm
+    volumes:
+      - ${FERRY_DATA:?}/daemons/ferryd-b-weth-base:/data
+      - ${FERRY_DATA:?}/tokens/ferryd-b-weth-base:/run/ferry-token
+      - ${FERRY_DATA:?}/secrets/evm-rpc:/run/secrets/evm-rpc:ro
+
+  # ---------------------------------------------------------------- ZEC/BTC (profile btc)
+  # A pruned Bitcoin signet node. Its block chain is a Docker volume; the wallets ferryd creates
+  # in it are in ${FERRY_DATA}/btc-wallets, so they are backed up with the rest.
+
+  # Gives the chain volume to your uid once (bitcoind itself runs without capabilities).
+  bitcoind-init:
+    profiles: [btc]
+    image: bitcoin/bitcoin:28.1
+    entrypoint: ["sh", "-c", "[ \"$$(stat -c %u:%g /home/bitcoin/.bitcoin)\" = \"$$OWNER\" ] || chown -R \"$$OWNER\" /home/bitcoin/.bitcoin"]
+    environment:
+      OWNER: "${FERRY_UID:-10001}:${FERRY_GID:-10001}"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    volumes:
+      - bitcoind:/home/bitcoin/.bitcoin
+    network_mode: none
+
+  bitcoind:
+    <<: *hardening
+    profiles: [btc]
+    image: bitcoin/bitcoin:28.1
+    user: "${FERRY_UID:-10001}:${FERRY_GID:-10001}"
+    entrypoint: ["bitcoind"]
+    command:
+      - -chain=${BTC_CHAIN:-signet}
+      - -datadir=/home/bitcoin/.bitcoin
+      - -walletdir=/wallets
+      - -prune=${BTC_PRUNE_MB:-2000}
+      - -server
+      - -printtoconsole
+      - -rpcauth=${BTC_RPCAUTH:-}
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=172.16.0.0/12
+      - -rpcallowip=10.0.0.0/8
+      - -rpcallowip=192.168.0.0/16
+      - -rpcport=38332
+      - -fallbackfee=0.00002
+      - -dbcache=${BTC_DBCACHE_MB:-450}
+    environment:
+      HOME: /home/bitcoin
+    depends_on:
+      bitcoind-init:
+        condition: service_completed_successfully
+    volumes:
+      - bitcoind:/home/bitcoin/.bitcoin
+      - ${FERRY_DATA:?}/btc-wallets:/wallets
+    # bitcoind must flush its cache on shutdown; killed mid-sync it restarts from its last flush.
+    stop_grace_period: 5m
+    networks: [node]
+
+  ferryd-z-btc:
+    <<: *ferryd
+    profiles: [btc]
+    depends_on: [bitcoind]
+    command:
+      - --role=z
+      - --name=sell-btc
+      - --btc-wallet=ferry-z
+      - --api-listen=0.0.0.0:7101
+      - --api-allow-remote
+      - --api-token-file=/run/ferry-token/api-token
+      - --listen=0.0.0.0:7111
+      - --public-url=http://ferryd-z-btc:7111
+      # sat per ZEC; swaps of 0.1 to 0.25 ZEC (the 1500 sat fee may be at most 5% of the BTC)
+      - --maker-offer=${BTC_RATE:-410000}:${BTC_MIN_ZAT:-10000000}:${BTC_MAX_ZAT:-25000000}
+      - --maker-price-feed=${PRICE_FEED:-off}
+      - --data-dir=/data
+      - --network=${BTC_CHAIN:-signet}
+      - --btc-rpc=http://bitcoind:38332
+      - --btc-rpc-user=ferry
+      - --btc-rpc-pass-file=/run/secrets/btc-rpc-pass
+      - --zec=devtool
+      - --zec-network=${ZEC_NETWORK:-test}
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --t1=${BTC_T1:-6}
+      - --t2=${BTC_T2:-6}
+      - --delta=${BTC_DELTA:-2}
+      - --btc-lock-confs=${BTC_LOCK_CONFS:-1}
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --cancel-confs=${BTC_CANCEL_CONFS:-1}
+      - --fee-sat=${BTC_FEE_SAT:-1500}
+      - --poll-ms=5000
+    environment: *env-z
+    volumes:
+      - ${FERRY_DATA:?}/daemons/ferryd-z-btc:/data
+      - ${FERRY_DATA:?}/tokens/ferryd-z-btc:/run/ferry-token
+      - ${FERRY_DATA:?}/secrets/btc-rpc-pass:/run/secrets/btc-rpc-pass:ro
+
+  ferryd-b-btc:
+    <<: *ferryd
+    profiles: [btc]
+    depends_on: [bitcoind]
+    command:
+      - --role=b
+      - --name=buy-btc
+      - --btc-wallet=ferry-b
+      - --api-listen=0.0.0.0:7102
+      - --api-allow-remote
+      - --api-token-file=/run/ferry-token/api-token
+      - --listen=0.0.0.0:7112
+      - --public-url=http://ferryd-b-btc:7112
+      - --maker-offer=${BTC_RATE:-410000}:${BTC_MIN_ZAT:-10000000}:${BTC_MAX_ZAT:-25000000}
+      - --maker-price-feed=${PRICE_FEED:-off}
+      - --data-dir=/data
+      - --network=${BTC_CHAIN:-signet}
+      - --btc-rpc=http://bitcoind:38332
+      - --btc-rpc-user=ferry
+      - --btc-rpc-pass-file=/run/secrets/btc-rpc-pass
+      - --zec=devtool
+      - --zec-network=${ZEC_NETWORK:-test}
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --t1=${BTC_T1:-6}
+      - --t2=${BTC_T2:-6}
+      - --delta=${BTC_DELTA:-2}
+      - --btc-lock-confs=${BTC_LOCK_CONFS:-1}
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --cancel-confs=${BTC_CANCEL_CONFS:-1}
+      - --fee-sat=${BTC_FEE_SAT:-1500}
+      - --poll-ms=5000
+    environment: *env-b
+    volumes:
+      - ${FERRY_DATA:?}/daemons/ferryd-b-btc:/data
+      - ${FERRY_DATA:?}/tokens/ferryd-b-btc:/run/ferry-token
+      - ${FERRY_DATA:?}/secrets/btc-rpc-pass:/run/secrets/btc-rpc-pass:ro
+
+  # ---------------------------------------------------------------- ZEC/LTC (profile ltc)
+  # Litecoin Core 0.21.5.6, pinned by digest like infra/deploy. The public test network
+  # (testnet4: addresses tltc1..., about 2.5 min blocks), pruned.
+
+  litecoind-init:
+    profiles: [ltc]
+    image: uphold/litecoin-core:0.21@sha256:46ebcaa617f66f3f35be4d7c2fe46bb07f037fd9f4482c4e1d1b044997d30b1c
+    entrypoint: ["sh", "-c", "[ \"$$(stat -c %u:%g /home/litecoin/.litecoin)\" = \"$$OWNER\" ] || chown -R \"$$OWNER\" /home/litecoin/.litecoin"]
+    environment:
+      OWNER: "${FERRY_UID:-10001}:${FERRY_GID:-10001}"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    volumes:
+      - litecoind:/home/litecoin/.litecoin
+    network_mode: none
+
+  litecoind:
+    <<: *hardening
+    profiles: [ltc]
+    image: uphold/litecoin-core:0.21@sha256:46ebcaa617f66f3f35be4d7c2fe46bb07f037fd9f4482c4e1d1b044997d30b1c
+    user: "${FERRY_UID:-10001}:${FERRY_GID:-10001}"
+    # litecoind directly: the image's entrypoint would chown and switch users, which needs
+    # capabilities this container doesn't have.
+    entrypoint: ["litecoind"]
+    command:
+      - -testnet
+      - -datadir=/home/litecoin/.litecoin
+      - -walletdir=/wallets
+      - -prune=${LTC_PRUNE_MB:-2000}
+      - -server
+      - -printtoconsole
+      - -rpcauth=${LTC_RPCAUTH:-}
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=172.16.0.0/12
+      - -rpcallowip=10.0.0.0/8
+      - -rpcallowip=192.168.0.0/16
+      - -rpcport=19332
+      - -fallbackfee=0.0002
+      - -dbcache=${LTC_DBCACHE_MB:-300}
+    environment:
+      HOME: /home/litecoin
+    depends_on:
+      litecoind-init:
+        condition: service_completed_successfully
+    volumes:
+      - litecoind:/home/litecoin/.litecoin
+      - ${FERRY_DATA:?}/ltc-wallets:/wallets
+    stop_grace_period: 5m
+    networks: [node]
+
+  ferryd-z-ltc:
+    <<: *ferryd
+    profiles: [ltc]
+    depends_on: [litecoind]
+    command:
+      - --role=z
+      - --name=sell-ltc
+      - --btc-wallet=ferry-z
+      - --chain=ltc
+      - --network=testnet
+      - --api-listen=0.0.0.0:7101
+      - --api-allow-remote
+      - --api-token-file=/run/ferry-token/api-token
+      - --listen=0.0.0.0:7111
+      - --public-url=http://ferryd-z-ltc:7111
+      - --maker-offer=${LTC_RATE:-100000000}:${LTC_MIN_ZAT:-1000000}:${LTC_MAX_ZAT:-25000000}
+      - --maker-price-feed=${PRICE_FEED:-off}
+      - --data-dir=/data
+      - --btc-rpc=http://litecoind:19332
+      - --btc-rpc-user=ferry
+      - --btc-rpc-pass-file=/run/secrets/ltc-rpc-pass
+      - --zec=devtool
+      - --zec-network=${ZEC_NETWORK:-test}
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --t1=24
+      - --t2=24
+      - --delta=8
+      - --btc-lock-confs=2
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --cancel-confs=2
+      - --fee-sat=2000
+      - --poll-ms=5000
+    environment: *env-z
+    volumes:
+      - ${FERRY_DATA:?}/daemons/ferryd-z-ltc:/data
+      - ${FERRY_DATA:?}/tokens/ferryd-z-ltc:/run/ferry-token
+      - ${FERRY_DATA:?}/secrets/ltc-rpc-pass:/run/secrets/ltc-rpc-pass:ro
+
+  ferryd-b-ltc:
+    <<: *ferryd
+    profiles: [ltc]
+    depends_on: [litecoind]
+    command:
+      - --role=b
+      - --name=buy-ltc
+      - --btc-wallet=ferry-b
+      - --chain=ltc
+      - --network=testnet
+      - --api-listen=0.0.0.0:7102
+      - --api-allow-remote
+      - --api-token-file=/run/ferry-token/api-token
+      - --listen=0.0.0.0:7112
+      - --public-url=http://ferryd-b-ltc:7112
+      - --maker-offer=${LTC_RATE:-100000000}:${LTC_MIN_ZAT:-1000000}:${LTC_MAX_ZAT:-25000000}
+      - --maker-price-feed=${PRICE_FEED:-off}
+      - --data-dir=/data
+      - --btc-rpc=http://litecoind:19332
+      - --btc-rpc-user=ferry
+      - --btc-rpc-pass-file=/run/secrets/ltc-rpc-pass
+      - --zec=devtool
+      - --zec-network=${ZEC_NETWORK:-test}
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --t1=24
+      - --t2=24
+      - --delta=8
+      - --btc-lock-confs=2
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --cancel-confs=2
+      - --fee-sat=2000
+      - --poll-ms=5000
+    environment: *env-b
+    volumes:
+      - ${FERRY_DATA:?}/daemons/ferryd-b-ltc:/data
+      - ${FERRY_DATA:?}/tokens/ferryd-b-ltc:/run/ferry-token
+      - ${FERRY_DATA:?}/secrets/ltc-rpc-pass:/run/secrets/ltc-rpc-pass:ro
+
+  # ---------------------------------------------------------------- the web app
+  # web/server/prod.mjs with FERRY_OWN_NODE=1 (one user, on this computer). Its daemons, makers
+  # and caps are in ${FERRY_DATA}/web.env, which `ferry up` writes for the pairs you run. It
+  # reads every daemon's API token from the token directories (read-only); the browser never
+  # sees a token.
+  web:
+    <<: *hardening
+    image: ${WEB_IMAGE:-ferry-node-web:local}
+    pull_policy: never
+    user: "${FERRY_UID:-10001}:${FERRY_GID:-10001}"
+    env_file:
+      - ${FERRY_DATA:?}/web.env
+    environment:
+      PORT: "8080"
+      HOST: 0.0.0.0
+      FERRY_OWN_NODE: "1"
+      FERRY_NEAR_STATE: /state/near/jobs.json
+    ports:
+      - 127.0.0.1:${WEB_PORT:-7865}:8080
+    volumes:
+      - ${FERRY_DATA:?}/tokens:/tokens:ro
+      - ${FERRY_DATA:?}/web:/state
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+    networks: [node]
+
+# One private bridge: the web app and the daemons talk on it; it has outbound internet for the
+# Zcash lightwalletd, the Base RPC and the chains' peer-to-peer networks.
+networks:
+  node: {}
+
+# The block chains only (no keys): delete them and they sync again.
+volumes:
+  bitcoind: {}
+  litecoind: {}

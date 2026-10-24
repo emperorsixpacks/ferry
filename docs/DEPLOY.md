@@ -1,5 +1,8 @@
 # Deploying the Ferry testnet demo
 
+To run Ferry for yourself on your own computer instead, see [RUN-A-NODE.md](RUN-A-NODE.md)
+(`./infra/node/ferry up`).
+
 This guide takes you from a fresh clone of the repository to the public demo running on one Linux
 server. The demo uses test coins only. It always runs ZEC/BTC:
 

@@ -15,6 +15,25 @@ three, and the app lists several **makers** with live market rates.
 Built for the [Zecathon](https://thezecathon.com) **Cross-chain** track: *swaps, bridges and intents
 that reach other chains without unshielding on the way through.*
 
+## Run your own node
+
+Each person swaps through their own Ferry node: the app plus the daemons that hold the swap
+wallets and act at the deadlines. One command starts it on your computer, in Docker, on test
+networks:
+
+```sh
+git clone https://github.com/JemIIahh/ferry.git && cd ferry && ./infra/node/ferry up
+```
+
+It asks which pairs to run (ZEC ⇄ USDC on Base Sepolia by default, ready in a minute; Bitcoin
+signet and Litecoin testnet sync in the background), creates your wallets locally, builds Ferry
+(15-40 minutes the first time) and opens the app at http://127.0.0.1:7865. Then
+`./infra/node/ferry addresses` says what to fund and where, and `status`, `logs`, `backup`,
+`update` and `down` do what they say. There is no "connect wallet": a swap needs key shares and
+signatures ordinary wallets can't produce, and someone must be online at the deadlines.
+[docs/RUN-A-NODE.md](docs/RUN-A-NODE.md) explains it all in plain language, including mainnet
+(`--mainnet`, small caps).
+
 ## Why
 
 Every route between ZEC and other chains today passes through someone's custody, or through a
