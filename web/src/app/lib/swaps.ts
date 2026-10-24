@@ -31,7 +31,11 @@ export function summary(v: SwapView, status: Status | null): string {
   const a = amounts(v, status);
   const phase = phaseOf(v);
   if (phase === "done" || phase === "settled") return v.role === "Z" ? `Received ${a.btc}` : `Received ${a.zec}`;
-  if (phase === "refunded") return v.role === "Z" ? `${a.zec} back in your wallet` : `${a.btc} back in your wallet`;
+  if (phase === "refunded") {
+    const locked = v.timeline.some((e) => e.kind === (v.role === "Z" ? "zec_lock_broadcast" : "btc_lock_broadcast"));
+    if (!locked) return "Called off before any of your coins moved";
+    return v.role === "Z" ? `${a.zec} back in your wallet` : `${a.btc} back in your wallet`;
+  }
   if (phase === "lost") return `Deadline passed while you were offline`;
   const steps = stepsOf(v);
   const at = steps.findIndex((s) => s.status === "active");

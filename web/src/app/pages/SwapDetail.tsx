@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ArrowCounterClockwise, Check, CheckCircle, Clock, Lock, Warning } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, Check, CheckCircle, CircleNotch, Clock, Lock, Warning } from "@phosphor-icons/react";
 import type { Status, SwapView } from "@/api";
 import { Link } from "@/router";
 import { btcText } from "@/swap/shared";
@@ -13,6 +13,7 @@ import { StatusBadge } from "../components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { useLocal } from "../lib/daemon";
 import { STATUS, amounts, direction } from "../lib/swaps";
+import { useWalletCaughtUp } from "../lib/walletSync";
 
 // /app/swap/:id, laid out like SealPad's SaleDetail: header, banner, progress, details,
 // transactions, and what each chain sees.
@@ -30,6 +31,7 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
   const mine = swap.role === "Z" ? "ZEC" : "BTC";
   const by = unwoundBy(status, swap, bt);
   const live = phase === "progress" || phase === "unwinding";
+  const refused = swap.timeline.some((e) => e.kind === "zec_lock_refused");
   const d = swap.deadlines;
 
   return (
@@ -46,12 +48,18 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
       {live ? (
         <Banner tone={phase === "unwinding" ? "warn" : "info"} icon={<Clock size={22} weight="duotone" className="mt-0.5 shrink-0 text-brand-500" />}>
           <p className="text-sm font-semibold text-slate-900">
-            {phase === "unwinding" ? `Nothing is lost. Your ${mine} should be back by about ${by ? clock(by) : "–"}.` : `If anything goes wrong, your ${mine} comes back to you automatically by about ${by ? clock(by) : "–"}.`}
+            {refused
+              ? `Nothing left your wallet. The swap is being called off and should be closed by about ${by ? clock(by) : "–"}.`
+              : phase === "unwinding"
+                ? `Nothing is lost. Your ${mine} should be back by about ${by ? clock(by) : "–"}.`
+                : `If anything goes wrong, your ${mine} comes back to you automatically by about ${by ? clock(by) : "–"}.`}
           </p>
           <p className="mt-1 font-mono text-xs text-slate-600">
-            {phase === "unwinding"
-              ? "The swap didn't finish in time, so it was called off. The ways back were signed before anything was locked."
-              : "Both ways back were signed before anything was locked. Keep this daemon running until the swap is done."}
+            {refused
+              ? "Your wallet couldn't send the ZEC from shielded notes only, so no ZEC moved. The other side takes its bitcoin back after the deadline."
+              : phase === "unwinding"
+                ? "The swap didn't finish in time, so it was called off. The ways back were signed before anything was locked."
+                : "Both ways back were signed before anything was locked. Keep this daemon running until the swap is done."}
           </p>
         </Banner>
       ) : (
@@ -180,7 +188,9 @@ function Outcome({ swap, status }: { swap: SwapView; status: Status | null }) {
     refunded: {
       icon: <ArrowCounterClockwise size={28} weight="duotone" className="mx-auto text-slate-500" />,
       title: lockedMine ? `Your ${z ? a.zec : a.btc} is back in your wallet` : "Nothing left your wallet",
-      note: "The swap didn't complete, so it was undone. Nothing changed hands.",
+      note: swap.timeline.some((e) => e.kind === "zec_lock_refused")
+        ? "Your wallet couldn't send the ZEC from shielded notes only, so the swap was called off before any ZEC moved."
+        : "The swap didn't complete, so it was undone. Nothing changed hands.",
     },
     lost: {
       icon: <Warning size={28} weight="duotone" className="mx-auto text-rose-600" />,
@@ -188,6 +198,19 @@ function Outcome({ swap, status }: { swap: SwapView; status: Status | null }) {
       note: `Your daemon was offline past the deadline, so the ${a.btc} went to the other side.`,
     },
   }[phase as "done" | "settled" | "refunded" | "lost"];
+  const caughtUp = useWalletCaughtUp(swap, status);
+  if (!caughtUp) {
+    // the chain has settled but the wallet hasn't shown it yet: don't contradict the header
+    return (
+      <Card>
+        <CardContent className="space-y-4 py-6 text-center">
+          <CircleNotch size={28} weight="bold" className="mx-auto animate-spin text-brand-500" />
+          <p className="text-lg font-semibold text-slate-900">Updating wallet…</p>
+          <p className="mx-auto max-w-md text-xs text-slate-500">The swap is finished on chain. Your wallet is picking up the result.</p>
+        </CardContent>
+      </Card>
+    );
+  }
   return (
     <Card>
       <CardContent className="space-y-4 py-6 text-center">

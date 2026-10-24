@@ -5,7 +5,7 @@ import { zec } from "@/format";
 import { Link, navigate } from "@/router";
 import { btcFor, btcText } from "@/swap/shared";
 import { phaseOf } from "@/swap/steps";
-import { roughDuration, typicalSeconds, type BlockTimes } from "@/swap/timing";
+import { confirmationsLabel, roughDuration, typicalSeconds, type BlockTimes } from "@/swap/timing";
 import { Detail, Label, Layout, PageHeader } from "../components/Layout";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { StatusBadge } from "../components/ui/badge";
@@ -139,7 +139,19 @@ function SwapForm({ status, bt, busySwap }: { status: Status | null; bt: BlockTi
           <div className="grid grid-cols-2 gap-4 border-t border-slate-100 pt-4 text-sm md:grid-cols-4">
             <Detail label="Rate" value={<span className="font-mono">{offer ? `1 ZEC = ${btcText(offer.rate_sat_per_zec)} BTC` : "–"}</span>} />
             <Detail label="Network fee" value={<span className="font-mono">{offer?.fee_sat != null ? `${offer.fee_sat.toLocaleString("en-US")} sat` : "–"}</span>} />
-            <Detail label="Takes" value={status ? `Typically ${roughDuration(typicalSeconds(status, bt))}` : "–"} />
+            <Detail
+              label="Takes"
+              value={
+                status ? (
+                  <>
+                    Typically {roughDuration(typicalSeconds(status, bt))}
+                    <span className="mt-0.5 block font-mono text-[11px] font-normal text-slate-500">{confirmationsLabel(status)}</span>
+                  </>
+                ) : (
+                  "–"
+                )
+              }
+            />
             <Detail label="If it fails" value="Your coins come back" />
           </div>
           <div className="flex flex-wrap items-center gap-4">

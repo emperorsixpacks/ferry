@@ -37,7 +37,7 @@ export function phaseOf(v: SwapView): Phase {
   if (v.outcome === "swapped") return "done";
   if (v.outcome === "refunded") return "refunded";
   if (v.outcome === "punished") return v.role === "Z" ? "settled" : "lost";
-  if (find(v, "cancel_broadcast", "cancel_seen") || ["Cancelled", "ZecReclaiming"].includes(v.state)) return "unwinding";
+  if (find(v, "cancel_broadcast", "cancel_seen", "zec_lock_refused") || ["Cancelled", "ZecReclaiming", "ZecLockRefused"].includes(v.state)) return "unwinding";
   return "progress";
 }
 
@@ -71,6 +71,16 @@ export function stepsOf(v: SwapView): Step[] {
     const cancel = find(v, "cancel_broadcast", "cancel_seen");
     if (v.role === "Z") {
       const lockedZec = !!find(v, "zec_lock_broadcast");
+      const refused = find(v, "zec_lock_refused");
+      if (refused) {
+        // Z's wallet wouldn't fund the lock shielded-only, so no ZEC ever left it
+        const done = v.outcome === "refunded" ? v.timeline[v.timeline.length - 1] : undefined;
+        return activate([
+          step("Your wallet couldn't send the ZEC from shielded notes only, so nothing was sent", refused),
+          step("The swap was called off", cancel, "Waiting for the deadline, then for the Bitcoin network"),
+          step("Their Bitcoin goes back to them", find(v, "secret_extracted", "refund_seen") ?? done, "Waiting for the Bitcoin network"),
+        ]);
+      }
       const refundSeen = find(v, "secret_extracted");
       const back = find(v, "reclaimed") ?? (v.outcome === "refunded" ? refundSeen : undefined);
       return activate([

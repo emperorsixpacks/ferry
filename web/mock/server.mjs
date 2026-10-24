@@ -8,7 +8,8 @@
 // confirmations, the T1/T2 relative timelocks and the peer's messages. POST /fault makes one
 // party stop acting, which drives the cancel/refund and punish paths.
 //
-// Env: MOCK_SPEED (default 1, higher is faster), MOCK_Z_PORT, MOCK_B_PORT.
+// Env: MOCK_SPEED (default 1, higher is faster), MOCK_Z_PORT, MOCK_B_PORT, MOCK_WALLET_LAG_MS,
+// MOCK_BTC_NETWORK / MOCK_ZEC_NETWORK (labels only; the mock still mines fast).
 
 import http from "node:http";
 import { randomBytes } from "node:crypto";
@@ -22,7 +23,9 @@ const BTC_BLOCK_MS = ms(5000);
 const BTC_FAST_BLOCK_MS = ms(1200); // see the clock below
 const ZEC_BLOCK_MS = ms(3500);
 const STEP_GAP_MS = ms(2000); // pause between off-chain protocol steps, so they can be read
-const SWEEP_DELAY_MS = ms(8000); // B's random delay before sweeping, to avoid lining up with redeem
+const SWEEP_DELAY_MS = ms(8000);
+// a real wallet shows incoming coins a sync after the outcome; MOCK_WALLET_LAG_MS imitates that
+const WALLET_LAG_MS = Number(process.env.MOCK_WALLET_LAG_MS ?? 0); // B's random delay before sweeping, to avoid lining up with redeem
 
 const T1 = 12;
 const T2 = 24;
@@ -46,8 +49,8 @@ const btcAmount = (sat) => (sat / 1e8).toFixed(4).replace(/0+$/, "").replace(/\.
 const zecAmount = (zat) => (zat / 1e8).toFixed(2) + " ZEC";
 
 const chains = {
-  btc: { network: "regtest", height: 412, txs: [], lastBlock: now() },
-  zec: { network: "regtest", height: 233, pool: "ironwood", txs: [], lastBlock: now() },
+  btc: { network: process.env.MOCK_BTC_NETWORK ?? "regtest", height: 412, txs: [], lastBlock: now() },
+  zec: { network: process.env.MOCK_ZEC_NETWORK ?? "regtest", height: 233, pool: "ironwood", txs: [], lastBlock: now() },
 };
 
 const START = { Z: { zec_shielded_zat: 500000000, btc_sat: 0 }, B: { zec_shielded_zat: 0, btc_sat: 5000000 } };
@@ -57,6 +60,13 @@ const parties = {
 };
 
 const swaps = [];
+
+function credit(role, asset, amount) {
+  const apply = () => (parties[role].balances[asset] += amount);
+  if (WALLET_LAG_MS > 0) setTimeout(apply, WALLET_LAG_MS);
+  else apply();
+}
+let refuseNextLock = false; // mock only: POST /api/_mock/refuse-next-lock
 
 function broadcast(chain, kind, swap) {
   const tx = { txid: hex(32), kind, swapId: swap.id, height: null };
@@ -230,7 +240,7 @@ function stepB(s) {
       if (s.tx.zec_sweep && mined("zec", s.tx.zec_sweep)) {
         v.state = "ZecSwept";
         v.outcome = "swapped";
-        parties.B.balances.zec_shielded_zat += s.amounts.zec_zat;
+        credit("B", "zec_shielded_zat", s.amounts.zec_zat);
         log(s, v, "local", "swap_complete", "Swap complete. B holds " + zecAmount(s.amounts.zec_zat) + " in its own Ironwood notes");
       }
       return;
@@ -245,7 +255,7 @@ function stepB(s) {
       if (s.tx.refund && mined("btc", s.tx.refund)) {
         v.state = "Refunded";
         v.outcome = "refunded";
-        parties.B.balances.btc_sat += s.amounts.btc_sat;
+        credit("B", "btc_sat", s.amounts.btc_sat);
         log(s, v, "local", "refunded", "BTC is back in B's wallet. Revealing b unlocks nothing for B");
       }
       return;
@@ -310,6 +320,14 @@ function stepZ(s) {
       }
       return;
     case "BtcLockSeen": {
+      if (refuseNextLock) {
+        // like ferryd when Z's wallet can't fund the lock from Ironwood notes only: nothing is sent
+        refuseNextLock = false;
+        v.state = "ZecLockRefused";
+        f.refused = true;
+        log(s, v, "local", "zec_lock_refused", "Z's wallet couldn't fund the lock from Ironwood notes only; nothing was sent");
+        return;
+      }
       parties.Z.balances.zec_shielded_zat -= s.amounts.zec_zat;
       const tx = broadcast("zec", "zec_lock", s);
       v.state = "ZecLocked";
@@ -336,7 +354,7 @@ function stepZ(s) {
       if (s.tx.btc_redeem && mined("btc", s.tx.btc_redeem)) {
         v.state = "BtcRedeemed";
         v.outcome = "swapped";
-        parties.Z.balances.btc_sat += s.amounts.btc_sat - FEE_SAT;
+        credit("Z", "btc_sat", s.amounts.btc_sat - FEE_SAT);
         log(s, v, "local", "swap_complete", `Swap complete. ${btcAmount(s.amounts.btc_sat - FEE_SAT)} is in Z's wallet`);
         return;
       }
@@ -349,7 +367,10 @@ function stepZ(s) {
         log(s, v, "btc", "secret_extracted", locked
           ? "Read b from B's tx_refund witness. Z can now spend the joint note on its own"
           : "Read b from B's tx_refund witness. No ZEC was locked, so there is nothing to reclaim", s.tx.refund);
-        if (!locked) v.outcome = "refunded";
+        if (!locked) {
+          v.outcome = "refunded";
+          v.state = "Refunded";
+        }
         return;
       }
       if (locked && v.secrets.peer_learned && !s.tx.zec_reclaim) {
@@ -361,7 +382,7 @@ function stepZ(s) {
       if (s.tx.zec_reclaim && mined("zec", s.tx.zec_reclaim)) {
         v.state = "ZecReclaimed";
         v.outcome = "refunded";
-        parties.Z.balances.zec_shielded_zat += s.amounts.zec_zat;
+        credit("Z", "zec_shielded_zat", s.amounts.zec_zat);
         log(s, v, "local", "reclaimed", `${zecAmount(s.amounts.zec_zat)} is back in Z's own Ironwood notes`);
         return;
       }
@@ -374,7 +395,7 @@ function stepZ(s) {
       if (s.tx.punish && mined("btc", s.tx.punish)) {
         v.state = "Punished";
         v.outcome = "punished";
-        parties.Z.balances.btc_sat += s.amounts.btc_sat;
+        credit("Z", "btc_sat", s.amounts.btc_sat);
         log(s, v, "local", "punished", "Z holds the BTC. Z's ZEC stays in the joint note, which is B's penalty for not refunding");
       }
       return;
@@ -460,7 +481,7 @@ setInterval(() => {
   // the block producer speeds up so the abort paths don't take minutes.
   const waiting = swaps.some((s) => {
     const [z, b] = [s.views.Z, s.views.B];
-    const bWaits = z.stalled && (b.state === "RedeemSigSent" || (b.state === "BtcLocked" && !s.tx.zec_lock));
+    const bWaits = (z.stalled || z.flags.refused) && (b.state === "RedeemSigSent" || (b.state === "BtcLocked" && !s.tx.zec_lock));
     const zWaits = b.stalled && (z.state === "ZecLocked" || z.state === "Cancelled");
     return bWaits || zWaits;
   });
@@ -530,6 +551,11 @@ function handler(role) {
 
     // mock only, for screenshot and film scripts: forget every swap and restore the starting
     // balances, so each story starts from the same wallet. Chains keep their heights.
+    if (req.method === "POST" && path === "/api/_mock/refuse-next-lock") {
+      refuseNextLock = true;
+      return send(res, 200, { ok: true });
+    }
+
     if (req.method === "POST" && path === "/api/_mock/reset") {
       swaps.length = 0;
       for (const r of ["Z", "B"]) parties[r].balances = { ...START[r] };

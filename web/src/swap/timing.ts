@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type { Status, SwapView } from "../api";
 
 // Seconds per block. Public networks use their target spacing; regtest has whatever block
-// producer is running, so it is measured from the heights this page has seen.
+// producer is running (the demo stack mines both chains every ~5 s), so it starts from that and
+// is then measured from the heights this page has seen.
 const TARGET = { btc: 600, zec: 75 };
-const REGTEST_GUESS = { btc: 5, zec: 3 };
+const REGTEST_GUESS = { btc: 5, zec: 5 };
 
 export interface BlockTimes {
   btc: number;
@@ -56,11 +57,18 @@ function terms(status: Status | null, swap?: SwapView): Terms {
   };
 }
 
-// How long a swap usually takes from start to finish: the BTC lock confirms, the ZEC lock
-// confirms, the redeem confirms, and the counterparty's sweep waits up to ~20 s.
+// How long a swap usually takes, from the offer's terms and the block times: the BTC lock's
+// confirmations, then the ZEC lock's, plus a margin for the blocks that carry the lock and the
+// redeem, the counterparty's random sweep delay (up to ~20 s) and the wallets' own handling.
 export function typicalSeconds(status: Status | null, bt: BlockTimes): number {
   const t = terms(status, undefined);
-  return (t.lockConfs + 1) * bt.btc + (t.zecConfs + 1) * bt.zec + 20;
+  const margin = bt.btc + bt.zec + 20 + 60;
+  return t.lockConfs * bt.btc + t.zecConfs * bt.zec + margin;
+}
+
+export function confirmationsLabel(status: Status | null): string {
+  const t = terms(status, undefined);
+  return `${t.lockConfs} Bitcoin + ${t.zecConfs} Zcash confirmations`;
 }
 
 // When the swap has fully unwound if the other side disappears: T1 after the BTC lock confirms,
