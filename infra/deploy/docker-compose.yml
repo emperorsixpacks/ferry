@@ -1,9 +1,22 @@
 # Ferry public testnet demo on one host: signet bitcoind, the two parties' ferryd (Zcash testnet
 # through zcash-devtool), the web UI and Caddy for TLS. See docs/DEPLOY.md.
-#   docker compose -f infra/deploy/docker-compose.yml --env-file infra/deploy/.env up -d --build
+#
+# Run it through infra/deploy/compose (deploy.sh does), not plain `docker compose`: the wrapper
+# reads the enabled pairs from COMPOSE_PROFILES in infra/deploy/.env and tells the web server
+# about them (FERRY_<PAIR>_URL, FERRY_MAKERS).
+#   infra/deploy/compose up -d --build
+#
+# ZEC/BTC always runs. More pairs are compose profiles, each off unless COMPOSE_PROFILES names it:
+#   ltc        ZEC/LTC: a pruned Litecoin testnet node and its maker (B) and taker (Z)
+#   usdc-base  ZEC/USDC on Base Sepolia: maker and taker
+#   weth-base  ZEC/WETH on Base Sepolia: maker and taker
+# In every pair B is the maker and Z the taker the public UI drives, as for ZEC/BTC.
 #
 # Secrets never appear on a command line or in `docker inspect`:
-# - the bitcoind RPC password is a file (secrets/btc_rpc_pass); bitcoind only gets its rpcauth hash
+# - the node RPC passwords are files (secrets/btc_rpc_pass, secrets/ltc_rpc_pass); the nodes only
+#   get their rpcauth hashes
+# - the Base Sepolia keys are files (secrets/<pair>-<z|b>.key), created on the server by
+#   infra/deploy/ctl secrets and readable only by the daemons' uid
 # - each daemon creates its API token in its own small volume, which the web server mounts read-only
 name: ferry
 
@@ -14,16 +27,34 @@ x-hardening: &hardening
   read_only: true
   tmpfs: [/tmp]
 
-x-ferryd: &ferryd
+# Every ferryd: one image, the same healthcheck.
+x-ferryd-base: &ferryd-base
   <<: *hardening
   build:
     context: ../..
     dockerfile: infra/deploy/Dockerfile.ferryd
-  image: ferry-ferryd:local
+  image: ${FERRYD_IMAGE:-ferry-ferryd:local}
+  stop_grace_period: 30s
+  healthcheck:
+    test: ["CMD", "ferry-api", "/api/status"]
+    interval: 30s
+    timeout: 10s
+    start_period: 60s
+
+# ZEC/BTC: the daemons talk to bitcoind.
+x-ferryd: &ferryd
+  <<: *ferryd-base
   depends_on: [bitcoind]
   networks: [app, chain]
   secrets: [btc_rpc_pass]
-  stop_grace_period: 30s
+
+# ZEC/LTC: the daemons talk to litecoind.
+x-ferryd-ltc: &ferryd-ltc
+  <<: *ferryd-base
+  profiles: [ltc]
+  depends_on: [litecoind]
+  networks: [app, chain]
+  secrets: [ltc_rpc_pass]
 
 services:
   # Gives the chain volume to bitcoind's uid once (bitcoind itself runs without capabilities).
@@ -108,11 +139,6 @@ services:
     volumes:
       - ferryd-b:/data
       - token-b:/run/ferry-token
-    healthcheck:
-      test: ["CMD", "ferry-api", "/api/status"]
-      interval: 30s
-      timeout: 10s
-      start_period: 60s
 
   ferryd-z:
     <<: *ferryd
@@ -149,21 +175,324 @@ services:
     volumes:
       - ferryd-z:/data
       - token-z:/run/ferry-token
-    healthcheck:
-      test: ["CMD", "ferry-api", "/api/status"]
-      interval: 30s
-      timeout: 10s
-      start_period: 60s
+
+  # ---------------------------------------------------------------- ZEC/LTC (profile ltc)
+  # Litecoin Core 0.21.5.6 (Taproot + MWEB), pinned by digest like infra/ltc/regtest.sh. The
+  # public test network (testnet4: addresses tltc1…, about 2.5 min blocks), pruned.
+
+  litecoind-init:
+    profiles: [ltc]
+    image: uphold/litecoin-core:0.21@sha256:46ebcaa617f66f3f35be4d7c2fe46bb07f037fd9f4482c4e1d1b044997d30b1c
+    entrypoint: ["sh", "-c", "[ \"$$(stat -c %u /home/litecoin/.litecoin)\" = 999 ] || chown -R 999:999 /home/litecoin/.litecoin"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE]
+    volumes:
+      - litecoind:/home/litecoin/.litecoin
+    network_mode: none
+
+  litecoind:
+    <<: *hardening
+    profiles: [ltc]
+    image: uphold/litecoin-core:0.21@sha256:46ebcaa617f66f3f35be4d7c2fe46bb07f037fd9f4482c4e1d1b044997d30b1c
+    user: "999:999"
+    # litecoind directly: the image's entrypoint would chown and switch users, which needs
+    # capabilities this container doesn't have.
+    entrypoint: ["litecoind"]
+    command:
+      - -testnet
+      - -datadir=/home/litecoin/.litecoin
+      - -prune=${LTC_PRUNE_MB:-2000}
+      - -server
+      - -printtoconsole
+      # rpcauth of secrets/ltc_rpc_pass (infra/deploy/ctl secrets writes both). Not `:?` like
+      # bitcoind's: compose would then refuse every command while the profile is off.
+      - -rpcauth=${LTC_RPCAUTH:-}
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=172.16.0.0/12
+      - -rpcallowip=10.0.0.0/8
+      - -rpcallowip=192.168.0.0/16
+      - -rpcport=19332
+      - -fallbackfee=0.0002
+      - -dbcache=${LTC_DBCACHE_MB:-300}
+    depends_on:
+      litecoind-init:
+        condition: service_completed_successfully
+    volumes:
+      - litecoind:/home/litecoin/.litecoin
+    stop_grace_period: 10m
+    networks: [chain]
+
+  ferryd-b-ltc:
+    <<: *ferryd-ltc
+    command:
+      - --role=b
+      - --name=bram
+      - --btc-wallet=bram
+      - --chain=ltc
+      - --network=testnet
+      - --api-listen=0.0.0.0:7102
+      - --api-token-file=/run/ferry-token/api-token
+      - --listen=0.0.0.0:7112
+      - --public-url=http://ferryd-b-ltc:7112
+      - --maker-offer=${LTC_RATE:-100000000}:${LTC_MIN_ZAT:-1000000}:${LTC_MAX_ZAT:-25000000}
+      - --maker-price-feed=${LTC_PRICE_FEED:-off}
+      - --maker-spread-bps=${LTC_SPREAD_BPS:-0}
+      - --data-dir=/data
+      - --btc-rpc=http://litecoind:19332
+      - --btc-rpc-user=ferry
+      - --btc-rpc-pass-file=/run/secrets/ltc_rpc_pass
+      - --zec=devtool
+      - --zec-network=test
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --api-allow-remote
+      - --t1=${LTC_T1:-24}
+      - --t2=${LTC_T2:-24}
+      - --delta=${LTC_DELTA:-8}
+      - --btc-lock-confs=${LTC_LOCK_CONFS:-2}
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --cancel-confs=${LTC_CANCEL_CONFS:-2}
+      - --fee-sat=${LTC_FEE_LIT:-2000}
+      - --poll-ms=${POLL_MS:-5000}
+    environment:
+      FERRY_TOKEN_FILE: /run/ferry-token/api-token
+      FERRY_API_PORT: "7102"
+    volumes:
+      - ferryd-b-ltc:/data
+      - token-b-ltc:/run/ferry-token
+
+  ferryd-z-ltc:
+    <<: *ferryd-ltc
+    command:
+      - --role=z
+      - --name=zoe
+      - --btc-wallet=zoe
+      - --chain=ltc
+      - --network=testnet
+      - --api-listen=0.0.0.0:7101
+      - --api-token-file=/run/ferry-token/api-token
+      - --listen=0.0.0.0:7111
+      - --public-url=http://ferryd-z-ltc:7111
+      - --data-dir=/data
+      - --btc-rpc=http://litecoind:19332
+      - --btc-rpc-user=ferry
+      - --btc-rpc-pass-file=/run/secrets/ltc_rpc_pass
+      - --zec=devtool
+      - --zec-network=test
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --api-allow-remote
+      - --t1=${LTC_T1:-24}
+      - --t2=${LTC_T2:-24}
+      - --delta=${LTC_DELTA:-8}
+      - --btc-lock-confs=${LTC_LOCK_CONFS:-2}
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --cancel-confs=${LTC_CANCEL_CONFS:-2}
+      - --fee-sat=${LTC_FEE_LIT:-2000}
+      - --poll-ms=${POLL_MS:-5000}
+    environment:
+      FERRY_TOKEN_FILE: /run/ferry-token/api-token
+      FERRY_API_PORT: "7101"
+    volumes:
+      - ferryd-z-ltc:/data
+      - token-z-ltc:/run/ferry-token
+
+  # ---------------------------------------------------------------- ZEC/USDC and ZEC/WETH on
+  # Base Sepolia (profiles usdc-base, weth-base). Chain 84532, the shared FerryLock (ferryd checks
+  # at startup that its code is the FerryLock it was built with), Circle's test USDC and the
+  # chain's WETH. No node here: the daemons use BASE_SEPOLIA_RPC. Timing as in
+  # infra/evm-testnet.sh (docs/EVM.md, "Timing on a public chain").
+
+  ferryd-b-usdc-base:
+    <<: *ferryd-base
+    profiles: [usdc-base]
+    networks: [app]
+    secrets: [usdc_base_b_key]
+    command:
+      - --counter=evm
+      - --role=b
+      - --name=bram
+      - --api-listen=0.0.0.0:7102
+      - --api-token-file=/run/ferry-token/api-token
+      - --listen=0.0.0.0:7112
+      - --public-url=http://ferryd-b-usdc-base:7112
+      - --maker-offer=${USDC_RATE:-40000000}:${USDC_MIN_ZAT:-1000000}:${USDC_MAX_ZAT:-25000000}
+      - --maker-price-feed=${USDC_PRICE_FEED:-off}
+      - --maker-price-pair=ZEC/USDC
+      - --maker-spread-bps=${USDC_SPREAD_BPS:-0}
+      - --data-dir=/data
+      - --evm-rpc=${BASE_SEPOLIA_RPC:-https://sepolia.base.org}
+      - --evm-contract=${BASE_SEPOLIA_FERRYLOCK:-0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef}
+      - --evm-token=${BASE_SEPOLIA_USDC:-0x036CbD53842c5426634e7929541eC2318f3dCF7e}
+      - --evm-token-symbol=USDC
+      - --evm-token-decimals=6
+      - --evm-key-file=/run/secrets/usdc_base_b_key
+      - --evm-t1-secs=${EVM_T1_SECS:-2700}
+      - --evm-refund-secs=${EVM_REFUND_SECS:-1800}
+      - --evm-delta-secs=${EVM_DELTA_SECS:-300}
+      - --evm-lock-confs=${EVM_LOCK_CONFS:-10}
+      - --evm-log-chunk=${EVM_LOG_CHUNK:-200}
+      - --zec=devtool
+      - --zec-network=test
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --api-allow-remote
+      - --poll-ms=${EVM_POLL_MS:-4000}
+    environment:
+      FERRY_TOKEN_FILE: /run/ferry-token/api-token
+      FERRY_API_PORT: "7102"
+    volumes:
+      - ferryd-b-usdc-base:/data
+      - token-b-usdc-base:/run/ferry-token
+
+  ferryd-z-usdc-base:
+    <<: *ferryd-base
+    profiles: [usdc-base]
+    networks: [app]
+    secrets: [usdc_base_z_key]
+    command:
+      - --counter=evm
+      - --role=z
+      - --name=zoe
+      - --api-listen=0.0.0.0:7101
+      - --api-token-file=/run/ferry-token/api-token
+      - --listen=0.0.0.0:7111
+      - --public-url=http://ferryd-z-usdc-base:7111
+      - --data-dir=/data
+      - --evm-rpc=${BASE_SEPOLIA_RPC:-https://sepolia.base.org}
+      - --evm-contract=${BASE_SEPOLIA_FERRYLOCK:-0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef}
+      - --evm-token=${BASE_SEPOLIA_USDC:-0x036CbD53842c5426634e7929541eC2318f3dCF7e}
+      - --evm-token-symbol=USDC
+      - --evm-token-decimals=6
+      - --evm-key-file=/run/secrets/usdc_base_z_key
+      - --evm-t1-secs=${EVM_T1_SECS:-2700}
+      - --evm-refund-secs=${EVM_REFUND_SECS:-1800}
+      - --evm-delta-secs=${EVM_DELTA_SECS:-300}
+      - --evm-lock-confs=${EVM_LOCK_CONFS:-10}
+      - --evm-log-chunk=${EVM_LOG_CHUNK:-200}
+      - --zec=devtool
+      - --zec-network=test
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --api-allow-remote
+      - --poll-ms=${EVM_POLL_MS:-4000}
+    environment:
+      FERRY_TOKEN_FILE: /run/ferry-token/api-token
+      FERRY_API_PORT: "7101"
+    volumes:
+      - ferryd-z-usdc-base:/data
+      - token-z-usdc-base:/run/ferry-token
+
+  ferryd-b-weth-base:
+    <<: *ferryd-base
+    profiles: [weth-base]
+    networks: [app]
+    secrets: [weth_base_b_key]
+    command:
+      - --counter=evm
+      - --role=b
+      - --name=bram
+      - --api-listen=0.0.0.0:7102
+      - --api-token-file=/run/ferry-token/api-token
+      - --listen=0.0.0.0:7112
+      - --public-url=http://ferryd-b-weth-base:7112
+      # wei per ZEC: 12000000000000000 is 0.012 WETH per ZEC
+      - --maker-offer=${WETH_RATE:-12000000000000000}:${WETH_MIN_ZAT:-1000000}:${WETH_MAX_ZAT:-25000000}
+      - --maker-price-feed=${WETH_PRICE_FEED:-off}
+      - --maker-price-pair=ZEC/ETH
+      - --maker-spread-bps=${WETH_SPREAD_BPS:-0}
+      - --data-dir=/data
+      - --evm-rpc=${BASE_SEPOLIA_RPC:-https://sepolia.base.org}
+      - --evm-contract=${BASE_SEPOLIA_FERRYLOCK:-0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef}
+      - --evm-token=${BASE_SEPOLIA_WETH:-0x4200000000000000000000000000000000000006}
+      - --evm-token-symbol=WETH
+      - --evm-token-decimals=18
+      - --evm-key-file=/run/secrets/weth_base_b_key
+      - --evm-t1-secs=${EVM_T1_SECS:-2700}
+      - --evm-refund-secs=${EVM_REFUND_SECS:-1800}
+      - --evm-delta-secs=${EVM_DELTA_SECS:-300}
+      - --evm-lock-confs=${EVM_LOCK_CONFS:-10}
+      - --evm-log-chunk=${EVM_LOG_CHUNK:-200}
+      - --zec=devtool
+      - --zec-network=test
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --api-allow-remote
+      - --poll-ms=${EVM_POLL_MS:-4000}
+    environment:
+      FERRY_TOKEN_FILE: /run/ferry-token/api-token
+      FERRY_API_PORT: "7102"
+    volumes:
+      - ferryd-b-weth-base:/data
+      - token-b-weth-base:/run/ferry-token
+
+  ferryd-z-weth-base:
+    <<: *ferryd-base
+    profiles: [weth-base]
+    networks: [app]
+    secrets: [weth_base_z_key]
+    command:
+      - --counter=evm
+      - --role=z
+      - --name=zoe
+      - --api-listen=0.0.0.0:7101
+      - --api-token-file=/run/ferry-token/api-token
+      - --listen=0.0.0.0:7111
+      - --public-url=http://ferryd-z-weth-base:7111
+      - --data-dir=/data
+      - --evm-rpc=${BASE_SEPOLIA_RPC:-https://sepolia.base.org}
+      - --evm-contract=${BASE_SEPOLIA_FERRYLOCK:-0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef}
+      - --evm-token=${BASE_SEPOLIA_WETH:-0x4200000000000000000000000000000000000006}
+      - --evm-token-symbol=WETH
+      - --evm-token-decimals=18
+      - --evm-key-file=/run/secrets/weth_base_z_key
+      - --evm-t1-secs=${EVM_T1_SECS:-2700}
+      - --evm-refund-secs=${EVM_REFUND_SECS:-1800}
+      - --evm-delta-secs=${EVM_DELTA_SECS:-300}
+      - --evm-lock-confs=${EVM_LOCK_CONFS:-10}
+      - --evm-log-chunk=${EVM_LOG_CHUNK:-200}
+      - --zec=devtool
+      - --zec-network=test
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --api-allow-remote
+      - --poll-ms=${EVM_POLL_MS:-4000}
+    environment:
+      FERRY_TOKEN_FILE: /run/ferry-token/api-token
+      FERRY_API_PORT: "7101"
+    volumes:
+      - ferryd-z-weth-base:/data
+      - token-z-weth-base:/run/ferry-token
+
+  # ---------------------------------------------------------------- front
 
   web:
     <<: *hardening
     build:
       context: ../..
       dockerfile: infra/deploy/Dockerfile.web
-    image: ferry-web:local
+    image: ${WEB_IMAGE:-ferry-web:local}
     # Same uid as ferryd, so it can read the daemons' 0600 token files (mounted read-only).
     user: "10001:10001"
-    depends_on: [ferryd-z, ferryd-b]
+    # The pairs' takers start first (when their profile is on), so each token volume is created
+    # by its daemon, owned by the daemon's uid. `required: false` needs compose >= 2.20.
+    depends_on:
+      ferryd-z: {condition: service_started}
+      ferryd-b: {condition: service_started}
+      ferryd-z-ltc: {condition: service_started, required: false}
+      ferryd-z-usdc-base: {condition: service_started, required: false}
+      ferryd-z-weth-base: {condition: service_started, required: false}
     # Contract: header of web/server/prod.mjs. It strips the browser Origin after its own
     # PUBLIC_ORIGIN check, so the daemons never see one.
     environment:
@@ -171,12 +500,23 @@ services:
       FERRY_Z_URL: http://ferryd-z:7101
       FERRY_B_URL: http://ferryd-b:7102
       FERRY_MAKER_URL: http://ferryd-b:7112
-      # optional maker list for /app (empty: the one maker above); see web/server/makers.mjs
+      # The maker list on /app (empty: the one maker above). infra/deploy/compose fills it with
+      # every enabled pair's maker unless .env sets it; see web/server/makers.mjs.
       FERRY_MAKERS: ${FERRY_MAKERS:-}
       FERRY_Z_TOKEN_FILE: /tokens/z/api-token
       FERRY_B_TOKEN_FILE: /tokens/b/api-token
+      # Z's daemon for each optional pair. infra/deploy/compose sets the URL of the enabled ones
+      # only; an empty URL leaves the pair out of GET /api/pairs ("not available here").
+      FERRY_LTC_URL: ${FERRY_LTC_URL:-}
+      FERRY_LTC_TOKEN_FILE: /tokens/ltc/api-token
+      FERRY_USDC_BASE_URL: ${FERRY_USDC_BASE_URL:-}
+      FERRY_USDC_BASE_TOKEN_FILE: /tokens/usdc-base/api-token
+      FERRY_WETH_BASE_URL: ${FERRY_WETH_BASE_URL:-}
+      FERRY_WETH_BASE_TOKEN_FILE: /tokens/weth-base/api-token
       PUBLIC_ORIGIN: https://${DOMAIN:?set DOMAIN in infra/deploy/.env}
       TRUST_PROXY: "1"
+      # The guard applies to every pair's taker: these caps are in ZEC, and each pair's maker
+      # adds its own range (<PAIR>_MIN_ZAT/<PAIR>_MAX_ZAT).
       DEMO_MAX_ZAT: ${DEMO_MAX_ZAT:-50000000}
       DEMO_RATE_PER_HOUR: ${DEMO_RATE_PER_HOUR:-3}
       DEMO_SWAPS_PER_HOUR: ${DEMO_SWAPS_PER_HOUR:-12}
@@ -186,6 +526,9 @@ services:
     volumes:
       - token-z:/tokens/z:ro
       - token-b:/tokens/b:ro
+      - token-z-ltc:/tokens/ltc:ro
+      - token-z-usdc-base:/tokens/usdc-base:ro
+      - token-z-weth-base:/tokens/weth-base:ro
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
       interval: 30s
@@ -209,16 +552,27 @@ services:
       - caddy_config:/config
     networks: [front]
 
-# caddy↔web, web↔daemons, daemons↔bitcoind. All are ordinary bridges (bitcoind and the daemons
-# need outbound internet for P2P and the Zcash lightwalletd).
+# caddy↔web, web↔daemons, daemons↔nodes. All are ordinary bridges (the nodes and the daemons
+# need outbound internet for P2P, the Zcash lightwalletd and the Base Sepolia RPC).
 networks:
   front: {}
   app: {}
   chain: {}
 
+# A secret of a profile that is off is never read, so its file need not exist.
 secrets:
   btc_rpc_pass:
     file: ./secrets/btc_rpc_pass
+  ltc_rpc_pass:
+    file: ./secrets/ltc_rpc_pass
+  usdc_base_b_key:
+    file: ./secrets/usdc-base-b.key
+  usdc_base_z_key:
+    file: ./secrets/usdc-base-z.key
+  weth_base_b_key:
+    file: ./secrets/weth-base-b.key
+  weth_base_z_key:
+    file: ./secrets/weth-base-z.key
 
 volumes:
   bitcoind: {}
@@ -226,5 +580,18 @@ volumes:
   ferryd-z: {}
   token-b: {}
   token-z: {}
+  litecoind: {}
+  ferryd-b-ltc: {}
+  ferryd-z-ltc: {}
+  token-b-ltc: {}
+  token-z-ltc: {}
+  ferryd-b-usdc-base: {}
+  ferryd-z-usdc-base: {}
+  token-b-usdc-base: {}
+  token-z-usdc-base: {}
+  ferryd-b-weth-base: {}
+  ferryd-z-weth-base: {}
+  token-b-weth-base: {}
+  token-z-weth-base: {}
   caddy_data: {}
   caddy_config: {}
