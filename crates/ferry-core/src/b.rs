@@ -95,6 +95,10 @@ pub struct BSwap {
     keypath_enc_sig: Option<EncryptedSignature>,
     lock_confs: u32,
     cancel_confs: Option<u32>,
+    /// A note at the joint address was spent before we sent the redeem adaptor: someone else
+    /// knows the joint key (e.g. Z learned `b` from a leaked tx_refund). Never send it then.
+    #[serde(default)]
+    zec_spent_early: bool,
 }
 
 impl BSwap {
@@ -115,6 +119,7 @@ impl BSwap {
             keypath_enc_sig: None,
             lock_confs: 0,
             cancel_confs: None,
+            zec_spent_early: false,
         };
         (b, vec![fund])
     }
@@ -277,7 +282,11 @@ impl BSwap {
         }
         match event {
             ChainEvent::BtcLockConfirmed { confs, txout } => self.on_lock_confirmed(confs, &txout),
-            ChainEvent::ZecNoteSeen { value, confs } => self.on_zec_note(value, confs),
+            ChainEvent::ZecNoteSeen {
+                value,
+                confs,
+                spent,
+            } => self.on_zec_note(value, confs, spent),
             ChainEvent::BtcSpend { tx, confs } => self.on_spend(&tx, confs),
             ChainEvent::ZecSwept { confs } => {
                 if self.state == BState::BtcRedeemed && confs >= 1 {
@@ -299,9 +308,18 @@ impl BSwap {
         Ok(vec![])
     }
 
-    fn on_zec_note(&mut self, value: u64, confs: u32) -> Result<Vec<Action>, Error> {
+    fn on_zec_note(&mut self, value: u64, confs: u32, spent: bool) -> Result<Vec<Action>, Error> {
         let params = &self.session.params;
         let waiting = matches!(self.state, BState::BtcLocked | BState::ZecSeen { .. });
+        // We have not swept, so a spent note means someone else holds the joint key: the redeem
+        // adaptor would hand Z the BTC on top. Withhold it for good; the swap runs into
+        // cancel + refund.
+        if waiting && spent {
+            self.zec_spent_early = true;
+        }
+        if self.zec_spent_early {
+            return Ok(vec![]);
+        }
         // A short note never gets the redeem signature: the swap runs into cancel + refund.
         if !waiting || value < params.zec_amount {
             return Ok(vec![]);
@@ -415,23 +433,33 @@ impl BSwap {
         if self.state == BState::Cancelled
             && self.cancel_confs.is_some_and(|c| params.can_refund(c))
         {
-            let txs = self.txs()?;
-            let hash = txs.sighash(Spend::Refund);
-            let enc = self
-                .refund_enc_sig
-                .as_ref()
+            let refund = self
+                .completed_refund()?
                 .expect("refund adaptor received before lock");
-            let sig_z = adaptor::decrypt(&self.session.me.share_secp_bytes(), enc)
-                .filter(|s| adaptor::verify_libsecp(&self.session.peer.btc_key, &hash, s))
-                .ok_or(Error::BadSignature("decrypted refund signature"))?;
-            let sig_b = self.session.me.btc_key().sign(&hash);
             self.state = BState::Refunding;
-            return Ok(vec![Action::BroadcastBtc(txs.complete(
-                Spend::Refund,
-                &sig_b,
-                &sig_z,
-            )?)]);
+            return Ok(vec![Action::BroadcastBtc(refund)]);
         }
         Ok(vec![])
+    }
+
+    /// The fully signed tx_cancel, once co-signed.
+    pub fn cancel_tx(&self) -> Option<&Transaction> {
+        self.cancel_tx.as_ref()
+    }
+
+    /// tx_refund with both signatures: Z's adaptor signature decrypted with our share, plus
+    /// ours. None before Z's adaptor arrived. Publishing it reveals `b` (to Z, who can then
+    /// reclaim its ZEC), so it must not reach Z before tx_cancel is confirmed.
+    pub fn completed_refund(&self) -> Result<Option<Transaction>, Error> {
+        let Some(enc) = self.refund_enc_sig.as_ref() else {
+            return Ok(None);
+        };
+        let txs = self.txs()?;
+        let hash = txs.sighash(Spend::Refund);
+        let sig_z = adaptor::decrypt(&self.session.me.share_secp_bytes(), enc)
+            .filter(|s| adaptor::verify_libsecp(&self.session.peer.btc_key, &hash, s))
+            .ok_or(Error::BadSignature("decrypted refund signature"))?;
+        let sig_b = self.session.me.btc_key().sign(&hash);
+        Ok(Some(txs.complete(Spend::Refund, &sig_b, &sig_z)?))
     }
 }

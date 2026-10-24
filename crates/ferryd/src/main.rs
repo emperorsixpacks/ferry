@@ -6,6 +6,7 @@ mod http;
 mod mock_zec;
 mod rebroadcast;
 mod record;
+mod tower;
 mod view;
 
 use anyhow::{bail, Context};

@@ -1384,6 +1384,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 self.exchange(rec).await;
             }
             self.rebroadcast(rec).await;
+            crate::tower::arm(&self.cli, rec).await;
         }
         self.maybe_timeout(rec).await;
         self.maybe_resume(rec).await?;
@@ -1593,6 +1594,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             out.push(Event::Chain(ChainEvent::ZecNoteSeen {
                 value: note.value,
                 confs: note.confirmations,
+                spent: note.spent_by.is_some(),
             }));
         }
         // Swept means the lock note itself is spent by our sweep, not merely that a

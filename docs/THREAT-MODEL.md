@@ -51,7 +51,8 @@ Z has ZEC and wants bitcoin. B has bitcoin and wants ZEC. B always locks first.
   **Or hand the job to a watchtower** ([WATCHTOWER.md](WATCHTOWER.md)). You give it your signed
   call-off, refund or penalty transactions, and it broadcasts them on time while you are
   offline. It holds no keys and can't redirect your coins; at worst it fails to act. B must pick
-  a tower that won't pass the refund to the other side early: never the other side's own tower.
+  a tower that won't pass the refund to the other side early, so Ferry arms one for B only when B
+  marks it as its own (`--watchtower-own`). Z can use any tower.
 - **Keep your machine safe.** Ferry holds your keys like any wallet does.
 
 ## What the other side learns

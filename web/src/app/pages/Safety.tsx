@@ -12,7 +12,7 @@ import { Box, Section } from "./HowItWorks";
 const sections = [
   { id: "trust", label: "Who you trust" },
   { id: "whatif", label: "What if…" },
-  { id: "online", label: "Your one job" },
+  { id: "online", label: "Online, or a watchtower" },
   { id: "them", label: "What they learn" },
   { id: "world", label: "What the world sees" },
   { id: "limits", label: "Known limits" },
@@ -91,12 +91,13 @@ export function Safety() {
               <WhatIf />
             </Section>
 
-            <Section id="online" n="03" eyebrow="Your one job" icon={<Clock size={18} weight="duotone" className="text-brand-500" />} title="Stay online until the swap ends">
+            <Section id="online" n="03" eyebrow="Your one job" icon={<Clock size={18} weight="duotone" className="text-brand-500" />} title="Stay online, or arm a watchtower">
               <p>
                 Ferry watches the deadlines and acts for you, but only while it is running. This is true of every swap of this kind, not just Ferry. Being late
-                costs the bitcoin side more than the ZEC side.
+                costs the bitcoin side more than the ZEC side. If you can't stay online, a watchtower can meet the deadlines for you.
               </p>
               <Online />
+              <Watchtower />
             </Section>
 
             <Section id="them" n="04" eyebrow="What they learn" icon={<Eye size={18} weight="duotone" className="text-brand-500" />} title="The other side sees the swap, not you">
@@ -302,6 +303,37 @@ function Online() {
       <p className="mt-4 text-slate-600">
         Ferry also stays clear of the edges: it won't claim or refund right before a deadline, when a transaction stuck in the queue could give a secret away.
       </p>
+    </Box>
+  );
+}
+
+function Watchtower() {
+  const cant = ["move your coins anywhere else: everything it holds pays only you", "act early: Bitcoin itself enforces the deadlines"];
+  return (
+    <Box label="A watchtower">
+      <p className="text-slate-700">
+        Once the swap's way back is signed, Ferry can hand a watchtower your signed call-off and your refund (bitcoin side) or penalty (ZEC side). It holds no
+        keys. It watches the chain and sends each one on time, even with your machine off.
+      </p>
+      <ul className="mt-3 space-y-2">
+        {cant.map((c) => (
+          <li key={c} className="flex gap-2 text-slate-700">
+            <ShieldCheck size={16} className="mt-0.5 shrink-0 text-brand-500" />
+            It can't {c}
+          </li>
+        ))}
+        <li className="flex gap-2 text-slate-700">
+          <Warning size={16} className="mt-0.5 shrink-0 text-slate-400" />
+          At worst it fails to act, and you are back to staying online yourself
+        </li>
+      </ul>
+      <div className="mt-4 rounded border border-brand-300 bg-brand-50/40 p-3">
+        <Label>If you hold the bitcoin: only your own tower</Label>
+        <p className="mt-1 text-slate-700">
+          Your refund reveals your half of the shared ZEC key. A tower that passed it to the other side early could let them take both coins. Ferry won't arm
+          a tower for the bitcoin side unless you mark it as your own. The ZEC side can use any tower: its penalty reveals nothing.
+        </p>
+      </div>
     </Box>
   );
 }

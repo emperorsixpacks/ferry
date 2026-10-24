@@ -55,6 +55,8 @@ export interface SwapView {
   secrets: { mine_revealed: boolean; peer_learned: boolean };
   timeline: TimelineEntry[];
   observer: { btc: string[]; zec: string[] };
+  /** Our package at the watchtower (ferryd --watchtower); absent without one. */
+  watchtower?: { url: string; status: "pending" | "armed" | "refused"; package_id: string | null; note: string } | null;
 }
 
 export const DAEMONS: Record<Role, string> = { Z: "/daemon/z", B: "/daemon/b" };

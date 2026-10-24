@@ -99,6 +99,30 @@ The status view has `status` (`armed` → `cancel_broadcast` → `refund_broadca
 for), the txids, the confirmation counts, a broadcast log with the counts each transaction was
 sent at, and an event log. It **never contains the transactions themselves**.
 
+## With ferryd
+
+```
+ferryd … --watchtower http://127.0.0.1:7700 --watchtower-token-file ~/.ferry-watchtower/token [--watchtower-own]
+```
+
+Once tx_cancel is co-signed (`CancelSigned`, for both roles) ferryd builds its package and uploads
+it. A failed upload is retried every 10 seconds. The swap view and the UI then show **Watchtower
+armed**, and the timeline gets a `watchtower_armed` entry.
+
+- **B arms only a tower marked as its own** (`--watchtower-own`). Without the flag, B logs why,
+  marks the tower `refused` in the swap view, and adds a `watchtower_refused` timeline entry.
+  Z's package holds no secret, so Z arms any tower.
+- **B never sends the redeem adaptor once the ZEC lock note is spent.** B has not swept, so a spent
+  note means someone else already holds the joint key, for example Z after learning `b` from a
+  leaked refund. Sending the adaptor would then hand Z the BTC as well, so B withholds it and the
+  swap runs into cancel and refund. ferryd reports the note as spent only for a mined or still-live
+  transaction. (Sim test `no_redeem_adaptor_once_the_lock_note_is_spent`.)
+
+`infra/demo-watchtower.sh run` plays this end to end on regtest with mock ZEC. B arms its own tower,
+locks BTC and is killed; its tower calls the swap off and refunds it, and Z reclaims its ZEC. Then B
+runs without `--watchtower-own` and refuses to arm. B is killed after locking and Z after
+locking ZEC; Z's tower calls the swap off and punishes. Each party comes back to a finished swap.
+
 ## Running it
 
 ```
@@ -142,9 +166,9 @@ So:
 - The tower never serves the transactions back. `GET /packages/{id}` shows only status and
   txids, with or without a token.
 - Z's package contains no secret. A Z tower is trusted only to stay up.
-- A further safeguard belongs in ferryd: B should not send the redeem adaptor signature if the
-  ZEC lock note is already spent (today B only checks its value and confirmations). This closes
-  the case where Z learns `b` early and pulls its ZEC out before B has committed to anything.
+- ferryd enforces this: B arms a tower only with `--watchtower-own`.
+- B never sends the redeem adaptor signature once the ZEC lock note is spent. That covers a leak
+  before B has committed to anything: Z can pull its ZEC out, but it can't also get the BTC.
 
 ## Privacy
 

@@ -58,6 +58,9 @@ struct Faults {
     delay_redeem_adaptor_until: Option<u32>,
     /// B ignores the chain while the mined cancel has fewer confirmations than this.
     b_asleep_until_cancel_confs: Option<u32>,
+    /// The lock note shows up already spent by someone else (Z learned `b` early, e.g. from
+    /// a leaked tx_refund, and pulled its ZEC back).
+    zec_note_spent_early: bool,
 }
 
 struct Sim {
@@ -75,6 +78,7 @@ struct Sim {
     rejected: Vec<String>,
     b_lock_broadcast: bool,
     refused_amount: Option<u64>,
+    redeem_adaptors_sent: u32,
 }
 
 impl Sim {
@@ -105,6 +109,7 @@ impl Sim {
             rejected: vec![],
             b_lock_broadcast: false,
             refused_amount: None,
+            redeem_adaptors_sent: 0,
         };
         sim.exec(Role::Z, z_actions[1..].to_vec());
         sim.exec(Role::B, b_actions);
@@ -128,6 +133,9 @@ impl Sim {
             match a {
                 Action::SendMessage(env) => {
                     let ev = Event::Peer(env.clone());
+                    if matches!(env.message, Message::RedeemAdaptor { .. }) {
+                        self.redeem_adaptors_sent += 1;
+                    }
                     match (from, &env.message) {
                         (Role::B, Message::RedeemAdaptor { .. })
                             if self.faults.drop_redeem_adaptor => {}
@@ -280,6 +288,7 @@ impl Sim {
             out.push(ChainEvent::ZecNoteSeen {
                 value,
                 confs: self.height - h,
+                spent: self.faults.zec_note_spent_early,
             });
         }
         // A sweep confirms only if there was a note to sweep.
@@ -470,6 +479,22 @@ fn refund_when_b_withholds_redeem_adaptor() {
     assert!(sim.mined(&sim.txid(ferry_core::Spend::Refund)));
     sim.assert_sweep_valid(Role::Z);
     assert!(sim.sweeps.iter().all(|(r, ..)| *r == Role::Z));
+}
+
+#[test]
+fn no_redeem_adaptor_once_the_lock_note_is_spent() {
+    let mut sim = Sim::new(Faults {
+        zec_note_spent_early: true,
+        ..Default::default()
+    });
+    sim.mine_until(40, |s| s.b_state() == BState::Refunded);
+    assert_eq!(sim.redeem_adaptors_sent, 0, "B must not hand Z the BTC too");
+    assert!(!sim.chain.contains_key(&sim.txid(ferry_core::Spend::Redeem)));
+    assert!(sim.mined(&sim.txid(ferry_core::Spend::Refund)));
+    // Control: the same swap with an unspent note does send it.
+    let mut sim = Sim::new(Faults::default());
+    sim.mine_until(10, |s| s.b_state() == BState::ZecSwept);
+    assert_eq!(sim.redeem_adaptors_sent, 1);
 }
 
 #[test]

@@ -136,6 +136,11 @@ impl ZSwap {
         self.lock_outpoint
     }
 
+    /// The fully signed tx_cancel, once co-signed.
+    pub fn cancel_tx(&self) -> Option<&Transaction> {
+        self.cancel_tx.as_ref()
+    }
+
     /// Whether we have sent ZEC to the joint address.
     pub fn zec_locked(&self) -> bool {
         self.zec_locked

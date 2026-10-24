@@ -57,6 +57,7 @@ infra/demo.sh up                # bitcoind regtest + two ferryd daemons + block 
 cd web && pnpm install && source ../.demo/env && pnpm dev:ui   # the crossing, live, at http://localhost:5180
 infra/demo.sh help              # the three demo stories (swap, refund, punish) and curl examples
 infra/demo.sh down
+infra/demo-watchtower.sh run    # a party is killed mid-swap; its watchtower refunds or punishes
 ```
 
 ## Deploying
