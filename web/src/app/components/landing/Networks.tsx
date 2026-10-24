@@ -2,13 +2,15 @@ import { useRef, type CSSProperties, type ReactNode } from "react";
 import { ChainLogo, type ChainMarkId } from "../Logos";
 import { cn } from "../../lib/utils";
 import { Mark } from "./marks";
-import { DIRECT_CHAINS, NEAR_CHAINS } from "./stats";
 import { useOnScreen, useReducedMotion } from "./motion";
 
-// The networks: a row of chain tiles gliding past. Ferry's six direct chains first, then a few that
-// NEAR Intents reaches, then how many more. Each chain's colour is only in its mark, and as a faint
-// ring and tint under the pointer. The row holds still under the pointer and off screen, and wraps
-// instead of moving with reduced motion.
+// The networks: a row of chain tiles gliding past. Ferry's three direct chains first (the ones the
+// installer and the demo offer; ferryd's Ethereum, Arbitrum and Optimism settings have never run,
+// docs/WHAT-IS-REAL.md), then a few that NEAR Intents reaches on mainnet, then "more", with no count:
+// NEAR Intents' list changes, and Ferry has not run it with real funds. Each chain's colour is only
+// in its mark, and as a faint ring and tint under the pointer. The row holds still under the pointer
+// and off screen, and wraps instead of moving with reduced motion. The tiles go round twice per
+// half of the marquee, so even a wide screen never sees the end of the row.
 
 interface Tile {
   key: string;
@@ -21,10 +23,7 @@ interface Tile {
 const DIRECT: [ChainMarkId, string, string][] = [
   ["bitcoin", "Bitcoin", "#F7931A"],
   ["litecoin", "Litecoin", "#345D9D"],
-  ["ethereum", "Ethereum", "#627EEA"],
   ["base", "Base", "#0052FF"],
-  ["arbitrum", "Arbitrum", "#12AAFF"],
-  ["optimism", "Optimism", "#FF0420"],
 ];
 
 const TILES: Tile[] = [
@@ -38,32 +37,38 @@ export function Networks() {
   const ref = useRef<HTMLDivElement>(null);
   const on = useOnScreen(ref);
   const reduced = useReducedMotion();
-  const items = (
+  // `again`: a repeat for the marquee, hidden from screen readers
+  const items = (again = false) => (
     <>
       {TILES.map((t) => (
-        <li key={t.key}>
+        <li key={t.key} aria-hidden={again || undefined}>
           <TileView t={t} />
         </li>
       ))}
-      <li>
+      <li aria-hidden={again || undefined}>
         <div className="flex h-[76px] items-center gap-3 rounded-2xl border border-dashed border-slate-300 bg-white px-5">
-          <span className="text-2xl font-semibold tracking-tight text-slate-900 tabular-nums">+{NEAR_CHAINS - DIRECT_CHAINS - 3}</span>
+          <span className="text-2xl font-semibold tracking-tight text-slate-900">More</span>
           <span className="text-[13px] leading-snug text-slate-500">
-            more chains
+            chains via NEAR Intents,
             <br />
-            via NEAR Intents
+            on mainnet
           </span>
         </div>
       </li>
     </>
   );
-  if (reduced) return <ul className="mx-auto flex max-w-6xl flex-wrap justify-center gap-3 px-4 sm:px-6">{items}</ul>;
+  if (reduced) return <ul className="mx-auto flex max-w-6xl flex-wrap justify-center gap-3 px-4 sm:px-6">{items()}</ul>;
   return (
     <div ref={ref} className={cn("lp-marquee-wrap relative overflow-hidden", !on && "lp-paused")}>
-      <div className="lp-marquee py-2">
-        <ul className="flex shrink-0 gap-3 pr-3">{items}</ul>
+      {/* each half holds the tiles twice, so a longer loop keeps them moving as calmly as before */}
+      <div className="lp-marquee py-2" style={{ animationDuration: "100s" }}>
+        <ul className="flex shrink-0 gap-3 pr-3">
+          {items()}
+          {items(true)}
+        </ul>
         <ul className="flex shrink-0 gap-3 pr-3" aria-hidden>
-          {items}
+          {items(true)}
+          {items(true)}
         </ul>
       </div>
       <div className="pointer-events-none absolute inset-y-0 left-0 w-12 bg-gradient-to-r from-canvas to-transparent sm:w-32" />
@@ -78,7 +83,7 @@ function TileView({ t }: { t: Tile }) {
       {t.mark}
       <span>
         <span className="block text-[15px] font-semibold whitespace-nowrap text-slate-900">{t.name}</span>
-        <span className="block text-xs whitespace-nowrap text-slate-500">{t.near ? "via NEAR Intents" : "Direct atomic swaps"}</span>
+        <span className="block text-xs whitespace-nowrap text-slate-500">{t.near ? "NEAR Intents, on mainnet" : "Direct atomic swaps"}</span>
       </span>
     </div>
   );

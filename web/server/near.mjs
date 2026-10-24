@@ -38,7 +38,7 @@ import { dirname } from "node:path";
 import http from "node:http";
 import https from "node:https";
 import { pairLabel } from "./quotes.mjs";
-import { symbolFamily } from "./paths.mjs";
+import { ferryMinutes, swapNet, symbolFamily } from "./paths.mjs";
 import { receiveAddress } from "./own.mjs";
 import { PAUSES, assetOf, buildRoute, canRoute } from "./routes.mjs";
 
@@ -117,8 +117,6 @@ export function dryAddress(blockchain, side) {
   return a ? [a, side] : [PLACEHOLDER, "INTENTS"];
 }
 
-// what a Ferry leg takes, roughly, before NEAR Intents' part (mainnet block times)
-const FERRY_SECS = { btc: 1800, ltc: 900, evm: 600 };
 // what a Bitcoin or Litecoin lock's own fee needs on top of the amount (ferryd's B keeps as much)
 export const LOCK_FEE_RESERVE = 10_000;
 // a buy asks NEAR Intents for this much more coin than the ZEC costs now, so a rate that ticks up
@@ -491,8 +489,14 @@ export function ownDaemons({ sell = [], buy = [], call, ttlMs = 15_000 }) {
 // Ferry's leg, from the maker directory (makers.mjs summaries)
 
 const isEvm = (pair) => pair.includes("-");
-const coinKind = (pair) => (pair === "btc" ? "btc" : pair === "ltc" ? "ltc" : "evm");
-export const ferrySecs = (pair) => FERRY_SECS[coinKind(pair)];
+// what a Ferry leg takes, before NEAR Intents' part: the middle of server/paths.mjs's range on a
+// main network (NEAR Intents runs there), in seconds
+export const ferrySecs = (pair) => {
+  const [lo, hi] = ferryMinutes(pair);
+  return Math.round(((lo + hi) / 2) * 60);
+};
+// [from, to] seconds of the Ferry leg on the network its daemon runs
+const ferryRange = (pair, status) => ferryMinutes(pair, swapNet(status?.chains?.btc?.network, status?.chains?.zec?.network) ?? "main").map((m) => m * 60);
 
 // The best maker for our side of `pair` at `zat`: selling ZEC (we are Z) pays the most net of its
 // payout fee; buying (we are B) costs the least. null: nobody takes it now.
@@ -809,6 +813,9 @@ export function nearDesk({
     good.sort((a, b) => (dir === "sell" ? cmp(BigInt(b.near.amount_out), BigInt(a.near.amount_out)) : cmp(BigInt(a.near.amount_in), BigInt(b.near.amount_in))) || ferrySecs(a.v.pair) - ferrySecs(b.v.pair));
     const best = good[0];
     const v = best.v;
+    // the Ferry leg's usual range plus NEAR Intents' own estimate; time_s the middle of it
+    const [flo, fhi] = ferryRange(v.pair, v.status);
+    const fmid = Math.round((flo + fhi) / 2);
     return {
       status: 200,
       body: {
@@ -817,9 +824,10 @@ export function nearDesk({
         asset: asset.assetId,
         via: v.pair,
         maker: v.leg.maker.name,
-        ferry: { rate_sat_per_zec: v.leg.rate, counter: v.leg.gross.toString(), fee: v.leg.fee.toString(), units: v.units.toString(), time_s: ferrySecs(v.pair) },
+        ferry: { rate_sat_per_zec: v.leg.rate, counter: v.leg.gross.toString(), fee: v.leg.fee.toString(), units: v.units.toString(), time_s: fmid, time_range_s: [flo, fhi] },
         near: best.near,
-        time_s: ferrySecs(v.pair) + best.near.time_s,
+        time_s: fmid + best.near.time_s,
+        time_range_s: [flo + best.near.time_s, fhi + best.near.time_s],
         execution: v.run,
         reason: v.run ? null : reason(),
         address: address ? "ok" : null,

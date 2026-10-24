@@ -67,17 +67,21 @@ B_NAME="${B_NAME:-bram}"
 SWAP_ZAT="${SWAP_ZAT:-1000000}"
 MIN_ZAT="${MIN_ZAT:-500000}"
 MAX_ZAT="${MAX_ZAT:-$CAP_ZAT}"
-# B (the maker, the owner's own) buys ZEC this far under the market (basis points).
-SPREAD_BPS="${SPREAD_BPS:-50}"
+# B (the maker, the owner's own) buys ZEC this far under the market (basis points): at least 100,
+# ferryd's floor for a mainnet maker that follows a feed (crates/ferryd/src/config.rs,
+# MAINNET_MIN_SPREAD_BPS). B is a fixed-rate maker here, so this script holds it to that floor.
+SPREAD_BPS="${SPREAD_BPS:-100}"
 # RATE (USDC base units per ZEC) is set from the market at `up` unless given.
 RATE="${RATE:-}"
 
-# Base mainnet policy (ferryd's EvmPolicy for chain 8453; it refuses anything less): 1 h margins,
-# 30 lock confirmations, 10 Zcash confirmations, at least 4 h from the proposal to t1 - Δ, and a
-# refund window t2 - t1 - Δ of at least 1 h. T1 = 4 h + Δ + 15 min of slack.
-T1_SECS="${T1_SECS:-18900}"
-REFUND_SECS="${REFUND_SECS:-7200}"
-DELTA_SECS="${DELTA_SECS:-3600}"
+# Base mainnet policy (ferryd's EvmPolicy for chain 8453; it refuses anything less): 2 h margins
+# (Base once stopped for about 2 h), 30 lock confirmations, 10 Zcash confirmations, at least 2 h
+# from the proposal to t1 - Δ, and a refund window t2 - t1 - Δ of at least Δ. T1 = 2 h + Δ + 15 min
+# of slack; t2 - t1 = 24 h + Δ, so B has a day to refund (the same terms as infra/node/ferry
+# --mainnet; ferry-core's shipped_base_mainnet_terms test checks both).
+T1_SECS="${T1_SECS:-15300}"
+REFUND_SECS="${REFUND_SECS:-93600}"
+DELTA_SECS="${DELTA_SECS:-7200}"
 LOCK_CONFS="${LOCK_CONFS:-30}"
 ZEC_CONFS="${ZEC_CONFS:-10}"
 POLL_MS="${POLL_MS:-4000}"
@@ -163,11 +167,12 @@ code at FerryLock is this build's and the token's symbol() and decimals() match.
 RPC answers eth_getLogs (ferryd needs it; https://mainnet.base.org often refuses it).
 
 Deadlines (Base mainnet policy, seconds of Base block time):
-  T1_SECS=$T1_SECS from the proposal to t1 (claim window of at least 4 h before t1 - Δ)
-  DELTA_SECS=$DELTA_SECS both margins; REFUND_SECS=$REFUND_SECS t1 to t2 (refund window of 1 h)
+  T1_SECS=$T1_SECS from the proposal to t1 (claim window of at least 2 h before t1 - Δ)
+  DELTA_SECS=$DELTA_SECS both margins; REFUND_SECS=$REFUND_SECS t1 to t2 (refund window of 24 h)
   LOCK_CONFS=$LOCK_CONFS Base blocks (about 1 min); ZEC_CONFS=$ZEC_CONFS Zcash blocks (about 12.5 min)
-  The happy path takes about 15-25 min. If something stops, B refunds at t1 (about 5 h 15 min
-  after the start) and Z takes its ZEC back; if B vanishes, Z punishes at t2 (about 7 h 15 min).
+  The happy path takes about 15-25 min. If something stops, B refunds at t1 (about 4 h 15 min
+  after the start; it has until about 28 h 15 min) and Z takes its ZEC back; if B vanishes, Z
+  punishes at t2 (about 30 h 15 min).
 
 Environment (defaults in brackets):
   EVM_RPC [https://mainnet.base.org, or the URL in $STATE/base-rpc]
@@ -359,17 +364,20 @@ PY
 }
 
 # market_rate <market json>: USDC base units per ZEC, SPREAD_BPS under the market; dies when the
-# sources disagree by more than 3% or none answers.
+# sources disagree by more than 2% (ferryd's MAX_SOURCE_GAP_BPS, the same rule a node's makers
+# pause on), when none answers, or when SPREAD_BPS is under the 100 bps mainnet floor.
 market_rate() {
   python3 - "$1" "$SPREAD_BPS" <<'PY'
 import json, sys
 m = json.loads(sys.argv[1])
 spread = int(sys.argv[2])
+if spread < 100:
+    sys.exit("SPREAD_BPS=%d: a mainnet maker keeps at least 100 bps (1%%) of the market" % spread)
 a, k, usdc = m.get("zec"), m.get("kraken_zec"), m.get("usdc") or 1.0
 if a is None and k is None:
     sys.exit("no ZEC price from 1Click or Kraken")
-if a is not None and k is not None and abs(a - k) / k > 0.03:
-    sys.exit("the ZEC price from 1Click ($%.2f) and Kraken ($%.2f) differ by more than 3%%" % (a, k))
+if a is not None and k is not None and max(a, k) / min(a, k) - 1 > 0.02:
+    sys.exit("the ZEC price from 1Click ($%.2f) and Kraken ($%.2f) differ by more than 2%%" % (a, k))
 p = a if a is not None else k
 if not 1 <= p <= 100000:
     sys.exit("a ZEC price of $%s looks wrong" % p)

@@ -5,7 +5,7 @@ import { CHAIN_NAMES, coin } from "@/format";
 import { Link } from "@/router";
 import { btcText } from "@/swap/shared";
 import { phaseOf, stepsOf, transactions } from "@/swap/steps";
-import { clock, clockSeconds, roughDuration, typicalSeconds, unwoundBy } from "@/swap/timing";
+import { clock, clockSeconds, typicalMinutes, unwoundBy } from "@/swap/timing";
 import { CopyText } from "../components/CopyText";
 import { Layout } from "../components/Layout";
 import { PairLogo, TokenLogo } from "../components/Logos";
@@ -14,6 +14,7 @@ import { StatusIcon, Tracker } from "../components/Progress";
 import { ToneBadge } from "../components/ui/badge";
 import { Fold } from "../components/ui/fold";
 import { useLocal } from "../lib/daemon";
+import { aboutText } from "../lib/paths";
 import { STATUS_WORD, lockedMine, plainSteps, swapAmounts, wordsFor, type Tone } from "../lib/progress";
 import { shortAddress } from "../lib/receive";
 import { useWalletCaughtUp } from "../lib/walletSync";
@@ -66,10 +67,13 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
   const by = unwoundBy(status, swap, bt);
   const caughtUp = useWalletCaughtUp(swap, status);
   const word = STATUS_WORD[phase];
+  // how long a swap of this pair usually takes on its network, "about 15–20 min"
+  const usual = typicalMinutes(status, pair);
+  const usualText = usual ? aboutText(usual) : null;
 
   let head: { tone: Tone; title: string; sub: ReactNode };
   if (!caughtUp) head = { tone: "live", title: "Updating wallet…", sub: "The swap is finished. Your wallet is picking up the result." };
-  else if (phase === "progress") head = { tone: "live", title: "Swapping…", sub: status ? `Usually ${roughDuration(typicalSeconds(status, bt))}.` : null };
+  else if (phase === "progress") head = { tone: "live", title: "Swapping…", sub: usualText ? `Usually ${usualText}.` : null };
   else if (phase === "unwinding")
     head = {
       tone: "warn",
@@ -104,7 +108,8 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
 
   const steps = plainSteps(swap, w);
   const started = swap.timeline[0]?.at;
-  const eta = started && status ? new Date(Date.parse(started) + typicalSeconds(status, bt) * 1000) : null;
+  // done by the end of the usual range; past it, the page says it's taking longer
+  const eta = started && usual ? new Date(Date.parse(started) + usual[1] * 60_000) : null;
   const armed = swap.watchtower?.status === "armed";
 
   return (

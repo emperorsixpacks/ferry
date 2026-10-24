@@ -53,7 +53,7 @@ export function Safety() {
               Threat model
             </StatusBadge>
             <StatusBadge variant="outline">Testnet</StatusBadge>
-            <StatusBadge variant="outline">4 min read</StatusBadge>
+            <StatusBadge variant="outline">5 min read</StatusBadge>
           </div>
         </div>
 
@@ -164,8 +164,8 @@ function Trust() {
       </div>
       <div className="rounded border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
         <Label className="mb-1">About this demo</Label>
-        The public demo runs both sides on one server with test coins, so you can watch a swap without installing anything. In real use, each side runs its
-        own Ferry.
+        The public demo runs both sides on one server with our test coins, so you can watch a swap without installing anything; we see every swap on it.
+        In real use, each side runs its own Ferry.
       </div>
     </div>
   );
@@ -438,12 +438,41 @@ function World() {
 
 // 06 ------------------------------------------------------------------------------------------
 
+// docs/THREAT-MODEL.md, "Known limits", in plain words, in the same order: keep the two in step.
+// What has run, and where, is docs/WHAT-IS-REAL.md.
 const LIMITS = [
-  ["Unaudited cross-chain proof", "The proof tying your two keys together comes from an experimental library. A bug there could break the fairness guarantee."],
-  ["Fixed fees on the way back", "The call-off, refund and penalty are signed in advance with a set fee. If fees spike they could confirm slowly. Mainnet needs a fee-bump plan."],
+  [
+    "A partner must be online",
+    "Someone has to hold the other coin and be there to lock and sign. If no partner is online, nothing is locked. Today every partner is ours: one per pair on the public demo, and your own node swaps between its own two wallets until outside partners are listed.",
+  ],
+  [
+    "Either side can walk away",
+    "The side that locks second can watch the price and decide not to lock, and the first can hold back its go-ahead. The swap is then called off at the deadline: it costs the walker little, and the other side waits. The ZEC lock is invisible to the other chain, so no contract can tell who walked away, and nobody can be fined.",
+  ],
+  ["Swaps take minutes", "Each side waits for the other's lock to confirm. Our live test swap, USDC on Base Sepolia, took about 7 minutes. Mainnet asks for more confirmations, so it takes longer."],
+  ["Fees on both chains", "A swap is at least two transactions on each chain, each with its usual fee. A called-off swap still pays fees, and very small swaps don't pay off."],
+  [
+    "The bitcoin side must refund in time",
+    "If a swap is called off, the side holding bitcoin, litecoin or USDC must send its refund within a window, or the ZEC side takes its coin. Ferry does it while it runs. While you're offline only a watchtower you run yourself can, and neither the node installer nor the demo starts one. The ZEC side has no such deadline.",
+  ],
+  [
+    "If the bitcoin side vanishes, the ZEC stays locked",
+    "If it goes silent after the ZEC is locked, the ZEC side takes its coin after the second deadline: paid as if the swap had finished, only hours later. But the ZEC stays in the shared address, because neither side holds the whole key, and Ferry has no step yet to hand it over.",
+  ],
+  [
+    "Unaudited cross-chain proof",
+    "The proof tying your two keys together is Serai's experimental code, which Serai's 2023 audit left out and Serai itself doesn't recommend. A bug there could let one side take both coins. That is why the node's mainnet mode caps each swap at 0.02 ZEC.",
+  ],
+  [
+    "Fixed fees on the way back",
+    "On Bitcoin and Litecoin the call-off, refund and penalty are signed in advance with a set fee, and nothing can raise it later. If fees spike they could confirm too slowly, so Bitcoin and Litecoin stay on test networks until there is a fee-bump design.",
+  ],
   ["Zcash reorganisations", "Zcash blocks are only probably final, so the bitcoin side waits for several confirmations. A deeper reorganisation is still a risk."],
   ["Not quantum-recoverable", "The shared address uses a key Zcash's quantum-recovery plan doesn't cover. It is single-use and short-lived, like today's FROST multisig setups."],
-  ["Testnet only", "Ferry has run real swaps on test networks and in a full local test with real shielded notes, but it has no independent review and has not run on mainnet."],
+  [
+    "Test networks so far",
+    "One live swap on public test networks (ZEC for USDC on Base Sepolia, 2026-10-20) and a full local test with real shielded notes. Nothing has run on mainnet, and nobody outside the project has reviewed Ferry.",
+  ],
 ];
 
 function Limits() {

@@ -167,7 +167,7 @@ New rules for EVM, because **a transaction that reverts still publishes its call
   shows `b` while Z can still claim. Z would then get both the USDC and its ZEC back.
 - **Sequencer liveness.** Base has a single sequencer. It can delay a claim, and the forced
   L1-inclusion path takes up to the 12 h sequencing window. The Base mainnet policy therefore
-  asks for 1 h margins and at least 4 h from the proposal to t1 − Δ; Base Sepolia asks for 2 min
+  asks for 2 h margins and at least 2 h from the proposal to t1 − Δ; Base Sepolia asks for 2 min
   margins (`EvmPolicy::for_chain`).
 
 **Per-chain minimums** (`EvmPolicy::for_chain`). Each party refuses terms below these. Δ is both
@@ -176,8 +176,8 @@ margins; the claim window is the time from the proposal to t1 − Δ.
 | Chain (id) | Δ | lock confirmations | ZEC confirmations | claim window |
 |---|---|---|---|---|
 | Ethereum (1) | 15 min | 64 (~13 min) | 10 | 2 h |
-| Base (8453), Optimism (10) | 1 h | 30 (~1 min) | 10 | 4 h |
-| Arbitrum One (42161) | 1 h | 240 (~1 min) | 10 | 4 h |
+| Base (8453), Optimism (10) | 2 h | 30 (~1 min) | 10 | 2 h |
+| Arbitrum One (42161) | 2 h | 240 (~1 min) | 10 | 2 h |
 | Sepolia, Base Sepolia, OP Sepolia, Arbitrum Sepolia | 2 min | 2 | 3 | 20 min |
 | anvil (31337) | only with `--dev-policy`: 2 s | 1 | 1 | 10 s |
 | anything else | refused, unless `--evm-testnet-policy` | | | |
@@ -189,12 +189,20 @@ margins; the claim window is the time from the proposal to t1 − Δ.
   slashed. 2 h covers B's lock and its confirmations (~13 min), Z's ZEC lock and 10 Zcash
   confirmations (~12.5 min), and the claim with its 15 min margin, with room to spare.
 - **Base and Optimism** are both OP Stack chains with 2 s blocks, a single sequencer and a 12 h
-  forced-inclusion window, so they share one policy: the 1 h margins and 4 h window above. 30
+  forced-inclusion window, so they share one policy: the 2 h margins and 2 h window above. 30
   lock confirmations are a minute of blocks. They guard against the sequencer replacing recent
   blocks, not against L1 reorgs: full finality waits for the batch to be posted and finalized on
   Ethereum.
+  - **Δ = 2 h** because Base has stopped making blocks before: for 33 minutes on 2025-08-05,
+    and for about 2 hours in 2026. A claim or refund sent just before its cutoff then still lands
+    in time. Δ never goes below 1 h.
+  - **The 2 h claim window** is the time a swap has to finish, and it needs about 15 to 20
+    minutes (10 Zcash confirmations are most of it). It is also how long the side that locks
+    second holds a free option on the price. That option is worth about 0.48% of the amount at
+    2 h, against 0.68% at 4 h (an at-the-money estimate at 80% yearly volatility). If the window
+    runs out, nothing is lost: B refunds at t1 and Z takes its ZEC back.
 - **Arbitrum One** has a single sequencer and a 24 h delay before a transaction can be forced in
-  through L1, so its margins and claim window are at least Base's. It makes a block about every
+  through L1, so its margins and claim window are Base's. It makes a block about every
   0.25 s, so 240 lock confirmations cover the same minute as Base's 30 (blocks come only with
   transactions, so a quiet chain takes longer, never less).
 - **ZEC confirmations** are the Zcash side's and don't depend on the EVM chain: 10 (about
@@ -206,7 +214,25 @@ margins; the claim window is the time from the proposal to t1 − Δ.
   test-network minimums; ferryd refuses that flag for a listed chain, so it can't loosen a
   mainnet.
 
-**The honest limit.** A 1 h margin protects against a sequencer that is slow or down for a
+**What Ferry runs on Base mainnet.** `infra/node/ferry --mainnet` and `infra/mainnet-demo.sh`
+use the same terms: t1 = 4 h 15 min after the proposal (the 2 h claim window, Δ and 15 minutes of
+slack), Δ = 2 h, and t2 − t1 = 26 h. From the proposal:
+
+| | when |
+|---|---|
+| the swap usually finishes | about 15 to 20 minutes |
+| Z's last claim (t1 − Δ) | 2 h 15 min |
+| B's refund opens (t1): a called-off swap unwinds from here | 4 h 15 min |
+| B's last refund (t2 − Δ): **B has 24 hours** | 28 h 15 min |
+| Z may take B's tokens (t2) | 30 h 15 min |
+
+The 24-hour refund window lets the side buying ZEC be offline for a day without losing its coin.
+The cost falls on Z: if B vanishes after
+locking, Z's penalty payout waits until t2, and a B that refunds late keeps Z's ZEC locked longer
+(its own coin is locked just as long). ferry-core's `shipped_base_mainnet_terms` test reads both
+scripts and checks these numbers against the policy.
+
+**The honest limit.** A 2 h margin protects against a sequencer that is slow or down for a
 while. It does not cover one that withholds a transaction for its whole forced-inclusion window
 (12 h on Base and Optimism, 24 h on Arbitrum). Such a sequencer can make Z's claim or B's refund
 miss its window. If the withheld transaction is then included after the deadline, it reverts but
@@ -476,7 +502,7 @@ commands at the fork with
 ### Limits
 
 - **Test networks only.** Test ETH, test USDC and TAZ have no value. Base mainnet has a much
-  stricter policy (1 h margins, 30 confirmations), and nothing here has been run there.
+  stricter policy (2 h margins, 30 confirmations), and nothing here has been run there.
   `infra/mainnet-demo.sh` is the tooling for one small owner-funded run on Base mainnet and Zcash
   mainnet (at most 0.02 ZEC, paid on through NEAR Intents), rehearsed on a fork of Base mainnet
   under that policy ([MAINNET-DEMO.md](MAINNET-DEMO.md)).

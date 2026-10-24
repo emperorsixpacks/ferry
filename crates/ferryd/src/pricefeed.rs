@@ -5,7 +5,9 @@
 //! market instead of the fixed `--maker-offer` rate. Every refresh asks each source for the
 //! base/quote price (no API keys), takes the median of the ones that answered with a fresh,
 //! positive price, and applies the spread. When no source has answered for `stale_after`, the
-//! offer pauses (`making: false`) rather than quote a stale price.
+//! offer pauses (`making: false`) rather than quote a stale price. It also pauses while the
+//! sources that answered disagree by more than `max_gap_bps` ([`MAX_SOURCE_GAP_BPS`]), until a
+//! refresh finds them close again.
 //!
 //! A taker fetches the offer, then proposes at that rate. A refresh may land in between, so the
 //! maker also accepts the previous rate for `grace` after it was replaced.
@@ -28,6 +30,13 @@ pub const STALE_AFTER: Duration = Duration::from_secs(300);
 pub const GRACE: Duration = Duration::from_secs(120);
 /// Per-request timeout of every feed call.
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+/// The offer pauses while the highest and lowest price that answered are further apart than this
+/// (2%). The rate comes from the median, which with two sources is their midpoint, so it is at most
+/// half the gap (1%) from either one: within the 1% spread a mainnet maker keeps
+/// ([`crate::config::MAINNET_MIN_SPREAD_BPS`]), whichever source is right. A wider gap means a
+/// source is broken or the market moves faster than the feeds, and a maker quoting then could pay
+/// more than the market or ask less. Quiet markets keep these feeds well inside it.
+pub const MAX_SOURCE_GAP_BPS: u32 = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Asset {
@@ -410,6 +419,19 @@ pub struct FeedConfig {
     pub refresh: Duration,
     pub stale_after: Duration,
     pub grace: Duration,
+    /// Pause while the answers are further apart than this (basis points of the lowest).
+    pub max_gap_bps: u32,
+}
+
+/// How far apart the highest and the lowest price are, in basis points of the lowest (0 for one
+/// price or none).
+pub fn gap_bps(prices: &[f64]) -> f64 {
+    let lo = prices.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = prices.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if prices.len() < 2 || lo.is_nan() || lo <= 0.0 {
+        return 0.0;
+    }
+    (hi / lo - 1.0) * 10_000.0
 }
 
 #[derive(Debug, Default)]
@@ -424,6 +446,8 @@ struct RateState {
     answered: Vec<&'static str>,
     /// Why the last refresh failed, if it did.
     last_error: Option<String>,
+    /// The last refresh's sources disagreed by more than `max_gap_bps`: paused until one agrees.
+    disagree: bool,
 }
 
 /// What the offer quotes right now.
@@ -434,7 +458,7 @@ pub struct Quote {
     pub source: String,
     /// Unix seconds of the price the rate comes from.
     pub updated_at: u64,
-    /// Every source has been failing for longer than `stale_after`.
+    /// Every source has been failing for longer than `stale_after`, or the sources disagree.
     pub paused: bool,
 }
 
@@ -470,6 +494,22 @@ impl LiveRate {
             .filter_map(|(_, r)| r.as_ref().err().map(String::as_str))
             .collect();
         let mut st = self.state.write().expect("not poisoned");
+        let gap = gap_bps(&prices);
+        if gap > f64::from(self.cfg.max_gap_bps) {
+            // Neither price can be trusted: keep the old rate, unused while paused.
+            let quotes: Vec<String> = results
+                .iter()
+                .filter_map(|(k, r)| r.as_ref().ok().map(|p| format!("{} {p}", k.name())))
+                .collect();
+            st.disagree = true;
+            st.last_error = Some(format!(
+                "the price sources disagree ({}: {:.1}% apart, more than {:.1}%): not quoting                  until they agree",
+                quotes.join(", "),
+                gap / 100.0,
+                f64::from(self.cfg.max_gap_bps) / 100.0
+            ));
+            return;
+        }
         let rate =
             median(&mut prices).and_then(|p| self.cfg.pair.rate_units(p, self.cfg.spread_bps));
         match rate {
@@ -480,6 +520,7 @@ impl LiveRate {
                 st.rate = Some(rate);
                 st.updated_at = Some(now_unix);
                 st.last_ok = Some(now);
+                st.disagree = false;
                 st.answered = results
                     .iter()
                     .filter(|(_, r)| r.is_ok())
@@ -501,9 +542,10 @@ impl LiveRate {
     pub fn quote_at(&self, now: Instant) -> Option<Quote> {
         let st = self.state.read().expect("not poisoned");
         let rate = st.rate?;
-        let paused = st
-            .last_ok
-            .is_none_or(|t| now.duration_since(t) > self.cfg.stale_after);
+        let paused = st.disagree
+            || st
+                .last_ok
+                .is_none_or(|t| now.duration_since(t) > self.cfg.stale_after);
         let spread = match self.cfg.spread_bps {
             0 => String::new(),
             s => format!(" {s:+}bps"),
@@ -571,7 +613,7 @@ impl LiveRate {
             }
             _ => tracing::warn!(
                 pair = %self.cfg.pair,
-                "maker offer paused: no fresh price ({})",
+                "maker offer paused: no price to trust ({})",
                 self.last_error().unwrap_or_default()
             ),
         }
@@ -719,6 +761,7 @@ mod tests {
             refresh: REFRESH,
             stale_after: STALE_AFTER,
             grace: GRACE,
+            max_gap_bps: MAX_SOURCE_GAP_BPS,
         }
     }
 
@@ -868,6 +911,68 @@ mod tests {
         assert_eq!((q.rate, q.paused), (420_000, false));
     }
 
+    /// Sources further apart than MAX_SOURCE_GAP_BPS pause the offer: no firm quotes, no
+    /// proposals at any rate, until a refresh finds them close again (or only one answers).
+    #[test]
+    fn disagreeing_sources_pause_the_offer() {
+        use SourceKind::{CoinGecko, Kraken};
+        let live = LiveRate::new(cfg(vec![], 100));
+        let t0 = Instant::now();
+        // 1.99% apart: quoted at their midpoint, plus the spread
+        live.apply(&[(Kraken, Ok(0.004)), (CoinGecko, Ok(0.0040796))], t0, 1);
+        let q = live.quote_at(t0).unwrap();
+        assert!(!q.paused);
+        assert_eq!(q.rate, 408_020); // 0.0040398 * 1.01
+        assert!(live.amount_matches_at(100_000_000, 408_020, t0));
+
+        // 2.01% apart: paused, nothing matches (not the old rate either), and the error says why
+        live.apply(&[(Kraken, Ok(0.004)), (CoinGecko, Ok(0.0040804))], t0, 2);
+        let q = live.quote_at(t0).unwrap();
+        assert!(q.paused);
+        assert_eq!((q.rate, q.updated_at), (408_020, 1), "the rate is not moved");
+        assert!(!live.amount_matches_at(100_000_000, 408_020, t0));
+        let err = live.last_error().unwrap();
+        assert!(
+            err.contains("disagree") && err.contains("kraken 0.004") && err.contains("2.0%"),
+            "{err}"
+        );
+        let o = live_offer(&offer(ferry_core::Role::B), Some(&live), None, t0);
+        assert!(o.paused && !o.making);
+        // a far-off third source pauses it too, whatever the median of the other two says
+        live.apply(
+            &[(Kraken, Ok(0.0041)), (CoinGecko, Ok(0.0041)), (Kraken, Ok(0.0050))],
+            t0,
+            3,
+        );
+        assert!(live.quote_at(t0).unwrap().paused);
+
+        // close again: quoted at the new price
+        live.apply(&[(Kraken, Ok(0.0041)), (CoinGecko, Ok(0.00411))], t0, 4);
+        let q = live.quote_at(t0).unwrap();
+        assert!(!q.paused && q.updated_at == 4);
+        assert!(live.amount_matches_at(100_000_000, q.rate, t0));
+        // one source alone has nothing to disagree with
+        live.apply(&[(Kraken, Ok(0.0050)), (CoinGecko, Err("timed out".into()))], t0, 5);
+        assert!(!live.quote_at(t0).unwrap().paused);
+        assert_eq!(gap_bps(&[]), 0.0);
+        assert_eq!(gap_bps(&[1.0]), 0.0);
+        assert!((gap_bps(&[1.02, 1.0]) - 200.0).abs() < 1e-6);
+    }
+
+    /// The threshold and the spread go together: two sources up to MAX_SOURCE_GAP_BPS apart put
+    /// their median at most half of it from either one, within the spread a mainnet maker keeps.
+    #[test]
+    fn the_gap_is_covered_by_the_mainnet_spread() {
+        let gap = i32::try_from(MAX_SOURCE_GAP_BPS).unwrap();
+        assert!(gap / 2 <= crate::config::MAINNET_MIN_SPREAD_BPS);
+        let (lo, hi) = (1.0, 1.0 + f64::from(gap) / 10_000.0);
+        let mid = median(&mut [lo, hi]).unwrap();
+        for p in [lo, hi] {
+            let off_bps = (mid - p).abs() / p * 10_000.0;
+            assert!(off_bps <= f64::from(crate::config::MAINNET_MIN_SPREAD_BPS) + 1e-9);
+        }
+    }
+
     #[test]
     fn previous_rate_accepted_during_grace() {
         let live = LiveRate::new(cfg(vec![], 0));
@@ -1014,12 +1119,12 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_takes_the_median_of_a_mocked_feed() {
-        let (url, server) = mock_feeds("0.0040", 0.0042, false).await;
+        let (url, server) = mock_feeds("0.0041", 0.00412, false).await;
         let live = LiveRate::new(cfg(sources(&url), 100));
         live.refresh(&feed_client().unwrap()).await;
         let q = live.quote().unwrap();
-        // median of 0.0040 and 0.0042 = 0.0041, +100 bps = 414100 sat
-        assert_eq!(q.rate, 414_100);
+        // median of 0.0041 and 0.00412 = 0.00411, +100 bps = 415110 sat
+        assert_eq!(q.rate, 415_110);
         assert_eq!(q.source, "median(kraken,coingecko) +100bps");
         assert!(!q.paused);
         assert!(unix_now() - q.updated_at < 5);

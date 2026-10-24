@@ -4,7 +4,7 @@ import { counterBalance, pairChain, startSwap, type PairId, type Role, type Rout
 import { CHAIN_NAMES, amountIn, coin, zec } from "@/format";
 import { Link, navigate } from "@/router";
 import { btcText } from "@/swap/shared";
-import { roughDuration, typicalSeconds } from "@/swap/timing";
+import { typicalText } from "@/swap/timing";
 import { ComboCard } from "../components/ComboCard";
 import { Layout } from "../components/Layout";
 import { PartnerList } from "../components/MakerList";
@@ -13,7 +13,7 @@ import { NearOnlyCard } from "../components/NearOnlyCard";
 import { OffCard } from "../components/OffCard";
 import { RouteCard } from "../components/RouteCard";
 import { ReceiveTo } from "../components/ReceiveTo";
-import { Fact, FlipButton, Panel, PathLine, PrivacyLine, Section, SidePill, YouHave, amountSize, capital, minutesText } from "../components/SwapParts";
+import { Fact, FlipButton, Panel, PathLine, PrivacyLine, Section, SidePill, YouHave, amountSize, capital } from "../components/SwapParts";
 import { CoinPicker, tokenSubtitle } from "../components/TokenPicker";
 import { Sheet } from "../components/ui/sheet";
 import { cn } from "../lib/utils";
@@ -238,7 +238,7 @@ function RouteBanner({ route }: { route: RouteView }) {
 // works it out. The rate comes from the best partner for the direction; the partner and details
 // are behind the settings pill above the card.
 function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip }: CardProps & { status: Status | null }) {
-  const { role, dir, bt, daemon, pair, info } = useLocal();
+  const { role, dir, daemon, pair, info } = useLocal();
   const buying = dir === "buy";
   // where what you get goes: your Ferry node, or your own wallet (on your own node)
   const receive = receiveFor(buying ? "zec" : pair, status, info.own);
@@ -437,7 +437,7 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
                           : "–"
                   }
                 />
-                <Fact label="Typical time" value={status ? capital(roughDuration(typicalSeconds(status, bt))) : "–"} />
+                <Fact label="Typical time" value={capital(typicalText(status, pair) ?? "–")} />
                 <Fact label="If it fails" value={`Your ${buying ? ticker : "ZEC"} comes back automatically after the deadline.`} />
                 <Fact label="Privacy" value={`Your ZEC ${buying ? "arrives" : "stays"} shielded, and nothing on either chain links the two sides.`} />
               </dl>
@@ -479,7 +479,7 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
               {pickedOut.name} is {pickedOut.busy ? "busy right now" : !pickedOut.online ? "offline" : "not taking swaps"}, so {maker.name} takes this one.
             </p>
           ) : null}
-          <PathLine path={path} time={status ? minutesText(typicalSeconds(status, bt)) : undefined} />
+          <PathLine path={path} time={typicalText(status, pair) ?? undefined} />
         </div>
 
         <button

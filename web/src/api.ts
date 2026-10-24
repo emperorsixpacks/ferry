@@ -387,7 +387,8 @@ export interface NearQuote {
   // the coin Ferry swaps ZEC for (sell) or with (buy), and the partner for it
   via: PairId;
   maker: string;
-  ferry: { rate_sat_per_zec: number; counter: string; fee: string; units: string; time_s: number };
+  // time_s: the Ferry leg's usual time; time_range_s its range on this node's network (older servers: none)
+  ferry: { rate_sat_per_zec: number; counter: string; fee: string; units: string; time_s: number; time_range_s?: [number, number] };
   near: {
     amount_in: string;
     amount_out: string;
@@ -399,6 +400,8 @@ export interface NearQuote {
     verified: boolean;
   };
   time_s: number;
+  // [from, to] seconds: the Ferry leg's usual range plus NEAR Intents' estimate (older servers: none)
+  time_range_s?: [number, number];
   execution: boolean;
   reason: "demo" | "mainnet" | null;
   address: "ok" | null;

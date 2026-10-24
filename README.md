@@ -2,15 +2,22 @@
 
 **Shielded ZEC ⇄ BTC, LTC or USDC. No bridge. No custodian. Nothing unshielded.**
 
+> **For judges:** start with [what is real and what is a mock](docs/WHAT-IS-REAL.md), with the
+> evidence for each run. Then [why not NEAR Intents, Maya or THORChain for the ZEC side](docs/WHAT-IS-REAL.md#why-not-near-maya-or-thorchain-for-the-zec-side)
+> and the [known limits](docs/THREAT-MODEL.md#known-limits) of this design.
+
 Ferry is a trustless atomic swap between shielded Zcash and native Bitcoin. The ZEC moves from
 one Ironwood note to another and never touches a transparent address. The BTC sits in an ordinary
 Taproot output. Nobody holds both sides, and either party can walk away with its own coins.
 
 The same construction also swaps shielded ZEC for **Litecoin** (same Taproot scripts, see
-[docs/LITECOIN.md](docs/LITECOIN.md)) and for **USDC or WETH on an EVM chain** through a small
+[docs/LITECOIN.md](docs/LITECOIN.md)) and for **USDC or WETH on Base** through a small
 `FerryLock` contract ([docs/EVM.md](docs/EVM.md); WETH is wrapped ETH, at most about 18.4 WETH per
-swap). A keyless **watchtower** can act at the deadlines for a party that goes offline, on all
-three, and the app lists several **makers** with live market rates.
+swap). A **watchtower** can act at the deadlines for a party that goes offline, on all three. The
+app asks each partner (**maker**) it lists for a signed price and takes the best. Today there is
+one partner per pair, run by us: on the public demo it quotes a fixed demo rate, not a market
+price (`PRICE_FEED=off`), and nodes list no outside partners yet
+([infra/node/makers.txt](infra/node/makers.txt)).
 
 Built for the [Zecathon](https://thezecathon.com) **Cross-chain** track: *swaps, bridges and intents
 that reach other chains without unshielding on the way through.*
@@ -100,11 +107,23 @@ every Ironwood spend shows only `rk = ak + α·G` with a fresh `α`.
 
 ## Run it
 
+Which Zcash each command uses:
+
+- **The stand-in Zcash chain** (ferryd's `--zec mock`, a file both daemons share: no real notes,
+  no encryption, no real blocks). It is the default in `infra/demo.sh` and `infra/demo-ltc.sh`,
+  and always used by `infra/evm-demo.sh`, `infra/demo-watchtower.sh`, `infra/route-demo.sh` and
+  the two `fork` rehearsals. The other chain is real: Bitcoin or Litecoin regtest, or anvil.
+- **Real shielded ZEC:** `ZEC_BACKEND=devtool infra/demo.sh up` (Zebra + Zaino regtest in
+  Docker), `infra/e2e-real.sh` (the swap, refund and penalty, every ZEC transaction checked),
+  `infra/evm-testnet.sh` without `fork` (Zcash testnet), and `infra/mainnet-demo.sh` without
+  `fork` (Zcash mainnet; not run yet).
+
 ```bash
-infra/demo.sh up                # bitcoind regtest + two ferryd daemons + block producer
+infra/demo.sh up                # bitcoind regtest + stand-in Zcash + two ferryd + block producer
 cd web && pnpm install && source ../.demo/env && pnpm dev:ui   # the crossing, live, at http://localhost:5180
 infra/demo.sh help              # the three demo stories (swap, refund, punish) and curl examples
 infra/demo.sh down
+infra/e2e-real.sh               # real shielded ZEC: swap, refund and penalty on regtest (~10 min)
 MAKER=z infra/demo.sh test      # buying ZEC: Z makes, B takes; happy, refund and punish on regtest
 MAKER=z infra/evm-demo.sh test  # the same with USDC on anvil (TOKEN=weth for WETH)
 infra/demo-watchtower.sh run    # a party is killed mid-swap; its watchtower refunds or punishes
@@ -146,18 +165,24 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
 - Ironwood joint key: a note sent to an `ak = ±(Z_p + B_p)` address swept on regtest with a
   RedPallas signature from the combined key.
 - Two daemons swap end to end over HTTP (happy, refund, punish) against regtest Bitcoin, and
-  against regtest Litecoin (`--chain ltc`).
+  against regtest Litecoin (`--chain ltc`), with the stand-in Zcash chain (`--zec mock`). With
+  Bitcoin, the same three stories also run on real Zcash regtest notes (`infra/e2e-real.sh`,
+  below); Litecoin has run only with the stand-in chain.
 - ZEC ⇄ USDC: FerryLock has 34 Foundry tests (5 fuzz, including the scalar check against an
   independent secp256k1 implementation); two daemons with `--counter evm` run happy, refund and
-  punish against anvil. B's go-ahead is an off-chain EIP-712 signature, so nothing on chain dates
-  the ZEC lock.
+  punish against anvil and on a fork of Base Sepolia, with the stand-in Zcash chain. One live swap
+  on public test networks, with real shielded notes: 0.05 test ZEC for 2 test USDC on Base Sepolia
+  and Zcash testnet, 2026-10-20 ([log](docs/evidence/evm-base-sepolia-live-2026-10-20.txt)). B's
+  go-ahead is an off-chain EIP-712 signature, so nothing on chain dates the ZEC lock.
 - Watchtower: with the owner offline, it broadcasts cancel then refund (B) or cancel then punish (Z)
-  on Bitcoin and Litecoin regtest; it holds no keys, and every package is validated against the
-  swap's own templates. On EVM it calls FerryLock's refund (B) or punish (Z) on anvil, inside the
-  same windows, from its own gas account; Z's package is keyless and B's holds B's key share, so
-  B arms only its own tower.
-- Makers: ferryd can quote the median of Kraken/CoinGecko plus a spread and pauses when the feed is
-  stale; the app lists the operator's allowlisted makers with rate, age, range and liquidity.
+  on Bitcoin and Litecoin regtest, with the stand-in Zcash chain; it holds no keys, and every
+  package is validated against the swap's own templates. On EVM it calls FerryLock's refund (B) or
+  punish (Z) on anvil, inside the same windows, from its own gas account; Z's package is keyless
+  and B's holds B's key share, so B arms only its own tower.
+- Makers: ferryd can quote the median of Kraken/CoinGecko plus a spread (at least 1% on mainnet)
+  and pauses when the feed is stale or the two sources are more than 2% apart; the app lists the
+  operator's allowlisted makers with rate, age, range and liquidity. The public demo has one maker
+  per pair, ours, at a fixed rate (`PRICE_FEED=off`).
 - Firm quotes, intent-style: you state the swap, partners answer with signed firm prices for 45 s,
   the best is taken, and an atomic swap settles it, so nobody holds funds in between. Only a rounded-up
   size bucket leaves your server, and only to its own partners
@@ -188,16 +213,25 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ## Known gaps
 
-Plain-language versions of these, with what happens in every abort case, are in
-[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
+Each of these, with what Ferry does about it and what is still open, is in
+[docs/THREAT-MODEL.md, "Known limits"](docs/THREAT-MODEL.md#known-limits). What has actually run,
+and where, is in [docs/WHAT-IS-REAL.md](docs/WHAT-IS-REAL.md).
 
+- A partner must be online with the other coin. Today the only partners are ours.
+- The second side to lock holds a free option, and no chain can fine whoever walks away: the
+  shielded ZEC lock is invisible to the other chain.
+- Swaps take minutes (confirmations on both chains) and pay fees on both chains.
+- Liveness: B (the side holding BTC, LTC or tokens) must refund within its window, or delegate it
+  to its own [watchtower](docs/WATCHTOWER.md). The tower must stay up (and, on EVM, funded for gas).
+  An offline Z loses only the trade.
+- If B vanishes after Z locks, Z takes B's coin and the ZEC stays locked in the joint address:
+  neither side holds the whole key.
+- The cross-group DLEQ is Serai's `dleq` under its `experimental` feature, which Serai's 2023 audit
+  excluded; its README says "none are recommended". So mainnet is capped at 0.02 ZEC per swap.
+- Presigned Bitcoin transactions use fixed fees, so Bitcoin and Litecoin stay on test networks
+  until an anchor/CPFP design ships.
 - The joint viewing key is built from an arbitrary `ak`, so it is not quantum-recoverable under
   ZIP 2005 (the same constructor FROST setups use today). The address is single-use and short-lived.
-- The cross-group DLEQ is unaudited (Serai's `dleq`, experimental feature).
-- Presigned Bitcoin transactions use fixed fees; mainnet needs an anchor/CPFP plan.
-- Liveness: each party must be online until its deadline, as in every adaptor-signature swap, or
-  delegate its deadline actions to a [watchtower](docs/WATCHTOWER.md). The tower must stay up
-  (and, on EVM, funded for gas); B's must be its own.
 
 ## Credits
 

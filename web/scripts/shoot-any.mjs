@@ -230,7 +230,8 @@ const card = async (p, name, { sell, buy, button, line, priv }) => {
   check(line.test(l), `${name}: the path line (${l})`);
   check(priv.test(await privacy(p)), `${name}: the privacy line`);
 };
-const ZB = { sell: "zec", buy: "btc", button: "Sell ZEC", line: /^Ferry · one swap · about/, priv: /^Your ZEC stays shielded, and nothing on either chain links the two sides\.$/ };
+// the mock's chains are regtest: one swap there takes about 1-5 min (server/paths.mjs)
+const ZB = { sell: "zec", buy: "btc", button: "Sell ZEC", line: /^Ferry · one swap · about 1–5 min$/, priv: /^Your ZEC stays shielded, and nothing on either chain links the two sides\.$/ };
 await card(desk, "ZEC → BTC", ZB);
 await card(phone, "ZEC → BTC", ZB);
 await settle();
@@ -295,7 +296,7 @@ await desk.getByRole("searchbox", { name: "Search by name or chain" }).fill("sol
 await nearList.getByRole("option", { name: /^SOL.*Solana/ }).click();
 await ready(desk, "Sell ZEC for SOL");
 l = await pathLine(desk);
-check(/^Ferry BTC NEAR Intents · about \d+ min$/.test(l), `ZEC → SOL: Ferry, then NEAR Intents (${l})`);
+check(/^Ferry BTC NEAR Intents · about \d+–\d+ min$/.test(l), `ZEC → SOL: Ferry, then NEAR Intents, and the time as a range (${l})`);
 check(/never goes to NEAR Intents\. The NEAR Intents part is public, and you trust NEAR Intents for it\.$/.test(await privacy(desk)), "ZEC → SOL: the privacy line");
 await settle();
 await shot(desk, "05-zec-sol-near-1440");
@@ -318,7 +319,7 @@ await ready(desk, "Sell ZEC for SOL");
 await desk.getByRole("button", { name: "Switch direction" }).click();
 await ready(desk, "Buy ZEC with SOL");
 l = await pathLine(desk);
-check(/^NEAR Intents BTC Ferry · about \d+ min$/.test(l), `SOL → ZEC: the arrow, then NEAR Intents first (${l})`);
+check(/^NEAR Intents BTC Ferry · about \d+–\d+ min$/.test(l), `SOL → ZEC: the arrow, then NEAR Intents first (${l})`);
 await settle();
 await shot(desk, "06-sol-zec-near-1440");
 await card(phone, "SOL → ZEC", { sell: near(SOL_ID), buy: "zec", button: "Buy ZEC with SOL", line: /^NEAR Intents/, priv: /no ZEC goes through NEAR Intents/ });
