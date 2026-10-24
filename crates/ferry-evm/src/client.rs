@@ -78,6 +78,25 @@ pub struct TxInfo {
     pub block_number: u64,
 }
 
+/// A transaction signed by us and not broadcast yet ([`EvmClient::sign_transfer`]): its hash is
+/// final, so it can be recorded before it goes out and sent again as is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedTx {
+    pub hash: B256,
+    /// EIP-2718 encoding, for `eth_sendRawTransaction`.
+    pub raw: Vec<u8>,
+    pub nonce: u64,
+    pub gas_limit: u64,
+    pub max_fee_per_gas: u128,
+}
+
+impl SignedTx {
+    /// The most its gas can cost (wei).
+    pub fn max_cost(&self) -> U256 {
+        U256::from(self.gas_limit) * U256::from(self.max_fee_per_gas)
+    }
+}
+
 /// What the node knows about a transaction we sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TxStatus {
@@ -374,6 +393,118 @@ impl EvmClient {
     pub async fn submit_punish(&self, id: B256) -> Result<B256, Error> {
         let c = self.lock_contract();
         submit(c.punish(id)).await
+    }
+
+    /// The node's current EIP-1559 fees: (max fee per gas, max priority fee per gas), in wei.
+    pub async fn fees(&self) -> Result<(u128, u128), Error> {
+        let f = self.provider.estimate_eip1559_fees().await?;
+        Ok((f.max_fee_per_gas, f.max_priority_fee_per_gas))
+    }
+
+    /// Our account's nonce: the next one to use counting our mempool transactions
+    /// (`pending`), or only the mined ones.
+    pub async fn nonce(&self, pending: bool) -> Result<u64, Error> {
+        let call = self.provider.get_transaction_count(self.from);
+        Ok(if pending {
+            call.pending().await?
+        } else {
+            call.latest().await?
+        })
+    }
+
+    /// Pay `amount` of `token` (an ERC-20 `transfer`), or of the chain's own coin when `token`
+    /// is None, to `to`, from our account: simulated (`eth_call`, which must not revert and, for
+    /// a token, must return true), gas estimated (plus a fifth), fees from the node, signed with
+    /// `signer` (our account's key) at our next nonce, and NOT broadcast.
+    pub async fn sign_transfer(
+        &self,
+        signer: &PrivateKeySigner,
+        token: Option<Address>,
+        to: Address,
+        amount: U256,
+    ) -> Result<SignedTx, Error> {
+        use alloy::eips::eip2718::Encodable2718;
+        use alloy::network::{NetworkTransactionBuilder, TransactionBuilder};
+        use alloy::rpc::types::TransactionRequest;
+        use alloy::sol_types::SolCall;
+        if signer.address() != self.from {
+            return Err(Error::Rpc("the signer is not this client's account".into()));
+        }
+        let req = match token {
+            Some(token) => {
+                let ok = IERC20::new(token, &self.provider)
+                    .transfer(to, amount)
+                    .from(self.from)
+                    .call()
+                    .await
+                    .map_err(would_revert)?;
+                if !ok {
+                    return Err(Error::WouldRevert(
+                        "the token's transfer returned false".into(),
+                    ));
+                }
+                TransactionRequest::default()
+                    .with_to(token)
+                    .with_input(IERC20::transferCall { to, amount }.abi_encode())
+            }
+            None => {
+                let req = TransactionRequest::default()
+                    .with_from(self.from)
+                    .with_to(to)
+                    .with_value(amount);
+                self.provider
+                    .call(req.clone())
+                    .await
+                    .map_err(|e| Error::WouldRevert(e.to_string()))?;
+                req
+            }
+        }
+        .with_from(self.from);
+        let gas = self
+            .provider
+            .estimate_gas(req.clone())
+            .await
+            .map_err(|e| Error::WouldRevert(e.to_string()))?;
+        let gas_limit = gas.saturating_add(gas / 5);
+        let (max_fee_per_gas, priority) = self.fees().await?;
+        let nonce = self.nonce(true).await?;
+        let env = req
+            .with_nonce(nonce)
+            .with_chain_id(self.chain_id().await?)
+            .with_gas_limit(gas_limit)
+            .with_max_fee_per_gas(max_fee_per_gas)
+            .with_max_priority_fee_per_gas(priority.min(max_fee_per_gas))
+            .build(&EthereumWallet::from(signer.clone()))
+            .await
+            .map_err(|e| Error::Rpc(format!("signing: {e}")))?;
+        Ok(SignedTx {
+            hash: *env.tx_hash(),
+            raw: env.encoded_2718(),
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+        })
+    }
+
+    /// Broadcast a transaction signed earlier ([`EvmClient::sign_transfer`]): `Ok(Ok(hash))`
+    /// accepted, `Ok(Err(message))` refused by the node (a JSON-RPC error: it was not taken),
+    /// `Err` no answer (it may have been taken).
+    pub async fn send_raw(&self, raw: &[u8]) -> Result<Result<B256, String>, Error> {
+        match self.provider.send_raw_transaction(raw).await {
+            Ok(p) => Ok(Ok(*p.tx_hash())),
+            Err(alloy::transports::RpcError::ErrorResp(e)) => Ok(Err(e.message.to_string())),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// What a mined transaction cost in gas (wei): gas used × effective gas price. None while
+    /// it is not mined.
+    pub async fn tx_cost(&self, hash: B256) -> Result<Option<U256>, Error> {
+        Ok(self
+            .provider
+            .get_transaction_receipt(hash)
+            .await?
+            .map(|r| U256::from(r.gas_used()) * U256::from(r.effective_gas_price())))
     }
 
     pub async fn tx_status(&self, hash: B256) -> Result<TxStatus, Error> {

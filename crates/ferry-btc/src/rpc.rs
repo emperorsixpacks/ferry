@@ -41,11 +41,26 @@ impl RpcError {
     }
 }
 
+/// A node fee rate in coin per 1000 vbytes, as sat/vB rounded up (None if not positive).
+fn per_kvb_to_sat_vb(per_kvb: f64) -> Option<u64> {
+    let sat_per_kvb = Amount::from_btc(per_kvb).ok()?.to_sat();
+    (sat_per_kvb > 0).then(|| sat_per_kvb.div_ceil(1000))
+}
+
 /// A funded and wallet-signed lock transaction that has not been broadcast.
 #[derive(Clone, Debug)]
 pub struct FundedLock {
     pub tx: Transaction,
     pub vout: u32,
+}
+
+/// A wallet-funded and wallet-signed payment that has not been broadcast
+/// ([`BitcoinRpc::fund_payment`]).
+#[derive(Clone, Debug)]
+pub struct FundedPayment {
+    pub tx: Transaction,
+    /// What the inputs pay above the outputs.
+    pub fee: Amount,
 }
 
 #[derive(Clone, Debug)]
@@ -370,6 +385,21 @@ impl BitcoinRpc {
         self.parse_addr("labeled_address", &addr, network)
     }
 
+    /// A new receiving address of the wallet, under `label`.
+    pub async fn labeled_new_address(
+        &self,
+        label: &str,
+        network: Network,
+    ) -> Result<Address, RpcError> {
+        let s: String = self
+            .wallet_call(
+                "getnewaddress",
+                json!([label, self.coin.wallet_address_type()]),
+            )
+            .await?;
+        self.parse_addr("getnewaddress", &s, network)
+    }
+
     /// Regtest only: mine `n` blocks to `to`.
     pub async fn generate_to_address(
         &self,
@@ -423,6 +453,95 @@ impl BitcoinRpc {
             tx,
             vout: vout as u32,
         })
+    }
+
+    /// The node's fee estimate for confirmation within `blocks` blocks, in sat/vB (rounded
+    /// up); None when it has none (a regtest node, a fresh one).
+    pub async fn estimate_fee_rate(&self, blocks: u16) -> Result<Option<u64>, RpcError> {
+        let v: Value = self.call("estimatesmartfee", json!([blocks])).await?;
+        Ok(v["feerate"].as_f64().and_then(per_kvb_to_sat_vb))
+    }
+
+    /// The lowest fee rate the node's mempool takes now, in sat/vB (rounded up): the larger of
+    /// `mempoolminfee` and `minrelaytxfee`.
+    pub async fn min_fee_rate(&self) -> Result<u64, RpcError> {
+        let v: Value = self.call("getmempoolinfo", json!([])).await?;
+        Ok(["mempoolminfee", "minrelaytxfee"]
+            .iter()
+            .filter_map(|k| v[*k].as_f64().and_then(per_kvb_to_sat_vb))
+            .max()
+            .unwrap_or(1))
+    }
+
+    /// Fund and sign a payment of `amount` to `to` from the wallet at `fee_rate` sat/vB, with
+    /// change back to the wallet, without broadcasting it. Like [`BitcoinRpc::fund_lock`], only
+    /// segwit inputs are accepted, so its txid is final once signed and it can be recorded
+    /// before it goes out. Nothing is locked or reserved in the wallet.
+    pub async fn fund_payment(
+        &self,
+        to: &Address,
+        amount: Amount,
+        fee_rate: u64,
+    ) -> Result<FundedPayment, RpcError> {
+        let decode = |detail: String| RpcError::Decode {
+            method: "fund_payment".into(),
+            detail,
+        };
+        let raw: String = self
+            .wallet_call(
+                "createrawtransaction",
+                json!([[], {self.addr_str(to): amount.to_btc()}]),
+            )
+            .await?;
+        let funded: Value = self
+            .wallet_call(
+                "fundrawtransaction",
+                json!([raw, {"fee_rate": fee_rate, "lockUnspents": false}]),
+            )
+            .await?;
+        let fee = funded["fee"]
+            .as_f64()
+            .and_then(|f| Amount::from_btc(f).ok())
+            .ok_or_else(|| decode(format!("no fee in {funded}")))?;
+        let signed: Value = self
+            .wallet_call("signrawtransactionwithwallet", json!([funded["hex"]]))
+            .await?;
+        if signed["complete"].as_bool() != Some(true) {
+            return Err(decode("wallet could not fully sign the payment".into()));
+        }
+        let tx: Transaction = deserialize_hex(signed["hex"].as_str().unwrap_or_default())
+            .map_err(|e| decode(e.to_string()))?;
+        if tx
+            .input
+            .iter()
+            .any(|i| i.witness.is_empty() || !i.script_sig.is_empty())
+        {
+            return Err(decode(
+                "the wallet funded it with non-segwit inputs (malleable txid)".into(),
+            ));
+        }
+        let spk = to.script_pubkey();
+        if !tx
+            .output
+            .iter()
+            .any(|o| o.script_pubkey == spk && o.value == amount)
+        {
+            return Err(decode("the payment output is missing".into()));
+        }
+        Ok(FundedPayment { tx, fee })
+    }
+
+    /// Confirmations of a transaction of our own wallet (`gettransaction`): negative when a
+    /// conflicting transaction has that many, None when the wallet does not know it.
+    pub async fn wallet_tx_confirmations(&self, txid: &Txid) -> Result<Option<i64>, RpcError> {
+        match self
+            .wallet_call::<Value>("gettransaction", json!([txid.to_string()]))
+            .await
+        {
+            Ok(v) => Ok(Some(v["confirmations"].as_i64().unwrap_or(0))),
+            Err(e) if e.code() == Some(RPC_INVALID_ADDRESS_OR_KEY) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn broadcast(&self, tx: &Transaction) -> Result<Txid, RpcError> {
@@ -491,5 +610,19 @@ impl BitcoinRpc {
             Err(e) if e.code() == Some(RPC_INVALID_ADDRESS_OR_KEY) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::per_kvb_to_sat_vb;
+
+    #[test]
+    fn node_fee_rates_in_sat_per_vbyte() {
+        assert_eq!(per_kvb_to_sat_vb(0.00001), Some(1)); // the default relay fee
+        assert_eq!(per_kvb_to_sat_vb(0.0002), Some(20));
+        assert_eq!(per_kvb_to_sat_vb(0.000015), Some(2), "rounded up");
+        assert_eq!(per_kvb_to_sat_vb(0.0), None);
+        assert_eq!(per_kvb_to_sat_vb(-1.0), None);
     }
 }

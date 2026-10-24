@@ -29,7 +29,7 @@ pub use ready::{ready_digest, ready_signer, swap_id};
 #[cfg(feature = "client")]
 pub use alloy::signers::local::PrivateKeySigner;
 #[cfg(feature = "client")]
-pub use client::{EvmClient, OnChainSwap, SwapState, TokenInfo, TxInfo, TxStatus};
+pub use client::{EvmClient, OnChainSwap, SignedTx, SwapState, TokenInfo, TxInfo, TxStatus};
 #[cfg(feature = "client")]
 pub use events::{revealed_in_calldata, Revealed, SwapEvent, SwapEventKind, SwapWatcher};
 #[cfg(feature = "client")]
@@ -65,6 +65,7 @@ pub mod bindings {
         interface IERC20 {
             function allowance(address owner, address spender) external view returns (uint256);
             function approve(address spender, uint256 amount) external returns (bool);
+            function transfer(address to, uint256 amount) external returns (bool);
             function balanceOf(address who) external view returns (uint256);
             function symbol() external view returns (string);
             function decimals() external view returns (uint8);
