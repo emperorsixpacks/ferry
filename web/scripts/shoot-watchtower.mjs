@@ -1,7 +1,8 @@
 // `pnpm shoot:watchtower`: the watchtower touches of the UI, against the daemons of
 // `infra/demo-watchtower.sh up` (source its env first). Into screenshots/app/watchtower/:
 //   safety-online   /safety, section 03 (stay online, or arm a watchtower)
-//   swap-z, swap-b  a swap in progress with the "Watchtower armed" badge, as Z and as B
+//   swap-z, swap-b  a swap in progress ("a watchtower also keeps the deadlines"), as Z and as B
+//   tower-z, tower-b  its Technical details opened at the "Watchtower armed" row
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { chromium } from "playwright";
@@ -81,6 +82,12 @@ for (const width of [1440, 390]) {
     await page.goto(`${BASE}/app/swap/${id}${who === "b" ? "?as=b" : ""}`);
     await sleep(2500);
     await shot(`swap-${who}`);
+    // the tower's state is in the technical details
+    await page.getByRole("button", { name: "Technical details" }).click();
+    await page.getByText(/Watchtower armed|No watchtower|Arming the watchtower/).scrollIntoViewIfNeeded();
+    await page.evaluate(() => window.scrollBy(0, 200));
+    await sleep(600);
+    await shot(`tower-${who}`);
   }
   await page.close();
 }

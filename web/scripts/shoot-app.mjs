@@ -2,7 +2,7 @@
 // screenshots/app/. Each story starts from a fresh mock world (POST /api/_mock/reset), so the
 // wallet in every shot matches the story it tells.
 //
-//   landing, how-it-works, inspect, app (empty, validation error, with swaps), offline
+//   landing, how-it-works, help, inspect, app (empty, validation error), activity, offline
 //   Z: swap in progress, done; refund (cancelling, refunded); settled (the other side stalls)
 //   B (screenshots/app/b/): in progress, done, lost (B stalls and is punished)
 //
@@ -120,6 +120,8 @@ if (!REAL) {
   });
   await shoot("02-how-it-works", { settle: 1500 });
   await shoot("02-how-it-works-full", { full: true, settle: 5500 });
+  await goto("/help");
+  await shoot("02-help-full", { full: true, settle: 800 });
 }
 
 // --- the app, empty and with a validation error
@@ -150,7 +152,7 @@ if (!REAL) {
 await until(id1, (s) => s.outcome, "done");
 await shoot("07-swap-done");
 await shoot("07-swap-done-full", { full: true, settle: 200 });
-await goto("/app");
+await goto("/app/activity");
 await shoot("08-app-with-swap");
 
 // --- story 2: Z stalls, the swap is undone
@@ -163,7 +165,7 @@ await until(id2, (s) => has(s, "cancel_broadcast", "cancel_seen"), "cancel");
 await shoot("09-swap-cancelling");
 await until(id2, (s) => s.outcome, "refunded");
 await shoot("10-swap-refunded");
-await goto("/app");
+await goto("/app/activity");
 await shoot("11-app-refunded");
 
 // --- story 3: B stalls after locking, Z is paid after the deadline
@@ -190,7 +192,7 @@ if (!REAL) {
   await shoot("05-swap-in-progress");
   await until(b1, (s) => s.outcome, "B done");
   await shoot("07-swap-done");
-  await goto("/app");
+  await goto("/app/activity");
   await shoot("08-app-with-swap");
   await reset();
   const b3 = await start();
