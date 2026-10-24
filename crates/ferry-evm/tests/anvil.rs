@@ -17,7 +17,7 @@ use ferry_dleq::{PallasPoint, PallasScalar};
 use ferry_evm::bindings::{FerryLock, MockUSDC, MockWETH};
 use ferry_evm::{
     point_address_sec1, scalar_address, sign_ready, swap_id, Error, EvmClient, Revealed,
-    SwapEventKind, SwapState, SwapWatcher, Terms, TokenInfo,
+    SwapEventKind, SwapState, SwapWatcher, Terms, TokenInfo, TxStatus,
 };
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
@@ -291,6 +291,84 @@ async fn weth_above_u64_on_anvil() {
     assert_eq!(events[0].kind, SwapEventKind::Locked(t.clone()));
     let revealed = events[1].revealed_share(&t).unwrap().unwrap();
     assert!(zs.matches_revealed(&revealed));
+}
+
+/// Withdrawals (ferryd's "Send to my wallet"): a token transfer and a plain ETH send are signed
+/// without being broadcast (their hash is final), land once sent, and cost at most what was
+/// reserved; sending the same bytes again is refused, never paid twice; two signed at the same
+/// nonce can't both land; a transfer the token would refuse is caught by the simulation.
+#[tokio::test]
+async fn signed_transfers_on_anvil() {
+    let Some(net) = start(2).await else { return };
+    let b = net.client(B);
+    let dest = PrivateKeySigner::random().address();
+
+    let t = b
+        .sign_transfer(&net.keys[B], Some(net.usdc), dest, U256::from(1_000u64))
+        .await
+        .unwrap();
+    assert_eq!(b.tx_status(t.hash).await.unwrap(), TxStatus::Unknown);
+    assert_eq!(net.balance(&b, dest).await, 0, "signed, not sent");
+    assert_eq!(b.send_raw(&t.raw).await.unwrap(), Ok(t.hash));
+    assert!(matches!(
+        b.tx_status(t.hash).await.unwrap(),
+        TxStatus::Mined { ok: true, .. }
+    ));
+    assert_eq!(net.balance(&b, dest).await, 1_000);
+    let cost = b.tx_cost(t.hash).await.unwrap().unwrap();
+    assert!(
+        cost > U256::ZERO && cost <= t.max_cost(),
+        "{cost} vs {}",
+        t.max_cost()
+    );
+    assert!(
+        b.send_raw(&t.raw).await.unwrap().is_err(),
+        "the same bytes again"
+    );
+    assert_eq!(net.balance(&b, dest).await, 1_000, "paid once");
+    assert_eq!(b.nonce(false).await.unwrap(), t.nonce + 1);
+
+    let eth = U256::from(10u64).pow(U256::from(15u64));
+    let e = b
+        .sign_transfer(&net.keys[B], None, dest, eth)
+        .await
+        .unwrap();
+    // The same transfer signed twice is the same transaction (deterministic signatures).
+    let same = b
+        .sign_transfer(&net.keys[B], None, dest, eth)
+        .await
+        .unwrap();
+    assert_eq!(same.hash, e.hash);
+    // Another one before the first is sent takes the same nonce: only one can land.
+    let again = b
+        .sign_transfer(&net.keys[B], None, dest, eth + U256::from(1u64))
+        .await
+        .unwrap();
+    assert_eq!(e.nonce, again.nonce, "nothing pending yet: the same nonce");
+    assert_eq!(b.send_raw(&e.raw).await.unwrap(), Ok(e.hash));
+    assert!(b.send_raw(&again.raw).await.unwrap().is_err());
+    assert_eq!(b.tx_status(again.hash).await.unwrap(), TxStatus::Unknown);
+    assert!(
+        b.nonce(false).await.unwrap() > again.nonce,
+        "its nonce is used"
+    );
+    let dest_client = EvmClient::connect_http(&net.url, net.lock, PrivateKeySigner::random())
+        .unwrap()
+        .at(net.lock);
+    let paid = dest_client.provider().get_balance(dest).await.unwrap();
+    assert_eq!(paid, eth);
+
+    assert!(matches!(
+        b.sign_transfer(&net.keys[B], Some(net.usdc), dest, U256::from(100 * AMOUNT))
+            .await,
+        Err(Error::WouldRevert(_))
+    ));
+    assert!(
+        b.sign_transfer(&net.keys[Z], None, dest, eth)
+            .await
+            .is_err(),
+        "another account's key"
+    );
 }
 
 async fn happy_claim_with_relayer(net: &Net, b: &EvmClient, z: &EvmClient, relayer: &EvmClient) {
