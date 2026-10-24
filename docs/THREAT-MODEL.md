@@ -457,18 +457,32 @@ anything; it is never half started.
   records which notes a lock spends before it is broadcast. Change only becomes spendable after it
   confirms, and Ferry re-reads the balance right after each send. A wallet spends whole notes, so
   when several locks are still to be sent, Ferry counts that each may take up to one note more
-  than it needs, and turns a new swap down if the notes can't cover every lock at once. A node
-  whose ZEC sits in one big note therefore takes one swap at a time until the change of its last
-  lock confirms; splitting the ZEC into a few notes lets it take more.
+  than it needs, and that every note spent adds 5,000 zatoshi to its fee (ZIP-317), and turns a
+  new swap down if the notes can't cover every lock at once. A test simulates the wallet picking
+  notes in any order and checks every admitted set of locks gets funded. A node whose ZEC sits in
+  one big note therefore takes one swap at a time until the change of its last lock confirms;
+  splitting the ZEC into a few notes lets it take more.
 - **Bitcoin and Litecoin.** Locks are funded one at a time, and the wallet locks the coins a
   funded lock picked until that lock is broadcast, so nothing else it funds (another swap, a
   withdrawal) can pick them. The node forgets these locks when it restarts, so Ferry locks them
-  again before it funds anything; a swap called off before its lock went out gives its coins back.
+  again before it funds anything. Ferry takes the wallet to be its own (each daemon has its own
+  wallet in `infra/deploy` and `infra/node`): when it starts, and before it funds a lock, every
+  locked coin no unbroadcast lock needs goes back, so a swap called off before its lock went out,
+  or a funding cut short by a crash, leaves no coin stuck.
 - **Base.** The node's account sends one transaction at a time, so its nonces follow each other,
   and a lock's approval and the lock itself go out together, so two swaps can't use each other's
   approval.
 - **Withdrawals** keep working while swaps run, from the free funds only, and are still recorded
   before they are broadcast.
+
+**One swap's slow work doesn't hold up another's deadline.** The daemon goes over its swaps in
+rounds. Each round first does every swap's deadline steps (call off, refund, punish, redeem,
+claim), then every swap's look at the Zcash chain, and only then the slow work (funding a lock, building and proving a ZEC lock or sweep, an
+EVM lock waiting for its receipts), one swap at a time, doing the deadline steps again every 20
+seconds in between. A Zcash call that takes a minute or more (a stuck wallet server) puts the
+round's other Zcash work off to the next round, so a hung server costs one wait per round rather
+than one per swap. A redeem or refund that comes due while other work runs is checked against its
+window again just before it is first sent, so one that is now too late is never sent.
 
 **Swaps that are abandoned.** Anyone can propose a swap and walk away, and with a cap that could
 fill every slot. Ferry keeps its limit of 6 proposals a minute, still calls off a swap where
@@ -494,7 +508,13 @@ identity to go on, and adding one would cost privacy.
   adds little, but it is a timing signal.
 - On the public demo, ZEC a private swap has bought waits in the node's wallet between its two
   swaps, and the node counts it as free; the demo server turns down direct sales on that pair until
-  the private swap is done.
+  the private swap is done, and buys there too when that node is also a listed partner.
+- **On Base, one stuck transaction holds up the others.** The node's account sends its
+  transactions in nonce order. If one (say a lock) sits unmined, for example because its fee was
+  too low when gas prices jumped, every later transaction of that account, refunds and claims
+  included, waits behind it; Ferry does not yet replace a stuck transaction with a higher fee.
+  The deadline windows (hours on Base mainnet) leave room for the operator to step in, and a
+  watchtower, which sends from its own account, is not held up.
 
 ## How we checked
 
