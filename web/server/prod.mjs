@@ -66,6 +66,13 @@
 //   DEMO_QUOTES_PER_MIN [30] firm-quote requests (POST /api/quotes) per client IP per minute
 //   DEMO_QUOTES_PER_MIN_TOTAL [600] firm-quote requests per minute in all (makers hear far less:
 //                           quotes are cached per maker and bucket)
+//   FERRY_READ_TIMEOUT_MS [10000]   how long a read through /daemon/... or /router/... (GET, HEAD) may
+//                           take, and an event stream to start; past it the browser gets 504 {"error",
+//                           "code": "timeout"} and the request to the daemon is closed, so one daemon
+//                           that hangs can't hold up the page. A stream that has started has no limit
+//   FERRY_START_TIMEOUT_MS [120000] the same for a POST (a swap start): longer than ferryd's own longest
+//                           wait in a start (its partner's Accept, 60 s), so it never cuts a start the
+//                           daemon would finish. upstream.mjs says why both are what they are
 //   FERRY_ROUTER_URL [unset] the user's ferry-route (private swaps: coin A -> shielded ZEC -> coin C),
 //                           with FERRY_ROUTER_TOKEN / FERRY_ROUTER_TOKEN_FILE; proxied at /router/...
 //                           (routes.mjs). GET /api/pairs says which routes it runs ("routes"), so a
@@ -123,6 +130,7 @@ import { buildRoute, publicRoute, routeBlocks, routerLink } from "./routes.mjs";
 import { ONE_CLICK_PUBKEY, ONE_CLICK_URL, nearDesk, nearRoutes, oneClick, ownDaemons, pairOfStatus, requestJson } from "./near.mjs";
 import { originAllowed, ownProblem, receiveFields, withdrawBody } from "./own.mjs";
 import { sseTransform } from "./sse.mjs";
+import { READ_MS, ROUTER_TIMEOUT_TEXT, START_MS, TIMEOUT_TEXT, deadline, limitFor } from "./upstream.mjs";
 
 const env = process.env;
 const PORT = Number(env.PORT ?? 5300);
@@ -143,6 +151,8 @@ const SWAPS_PER_HOUR = Number(env.DEMO_SWAPS_PER_HOUR ?? 12);
 const FAULTS = env.DEMO_FAULTS === "1";
 const SSE_PER_IP = Number(env.DEMO_SSE_PER_IP ?? 8);
 const SSE_TOTAL = Number(env.DEMO_SSE_TOTAL ?? 200);
+// how long the proxies wait for a daemon or the router (upstream.mjs)
+const LIMITS = { read: Number(env.FERRY_READ_TIMEOUT_MS) || READ_MS, start: Number(env.FERRY_START_TIMEOUT_MS) || START_MS };
 // a bad FERRY_MAKERS stops the server here, with the reason
 const MAKERS = makerDirectory(parseMakers(env.FERRY_MAKERS, MAKER_URL));
 const QUOTES = quoteDesk(MAKERS);
@@ -767,7 +777,11 @@ async function proxy(key, path, search, req, res) {
       if (!res.writableEnded) res.destroy();
     });
   });
+  // a daemon that doesn't answer in time: 504, and the request to it is closed (upstream.mjs). A swap
+  // start that timed out keeps its place in the limits: the daemon may have taken it.
+  deadline(upstream, res, { ms: limitFor(req.method, LIMITS), answer: (r) => json(r, 504, { error: TIMEOUT_TEXT, code: "timeout" }) });
   upstream.on("error", () => {
+    if (upstream.ferryTimedOut) return;
     req.ferryRefused?.();
     if (!res.headersSent) json(res, 502, { error: "Can't reach the daemon. Is it running?" });
     else res.destroy();
@@ -885,7 +899,9 @@ async function routerProxy(path, search, req, res) {
       if (!res.writableEnded) res.destroy();
     });
   });
+  deadline(upstream, res, { ms: limitFor(req.method, LIMITS), answer: (r) => json(r, 504, { error: ROUTER_TIMEOUT_TEXT, code: "timeout" }) });
   upstream.on("error", () => {
+    if (upstream.ferryTimedOut) return;
     req.ferryRefused?.();
     if (!res.headersSent) json(res, 502, { error: "Can't reach the private swap service. Is ferry-route running?" });
     else res.destroy();
@@ -1052,7 +1068,7 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`ferry-ui on http://${HOST}:${PORT}  dist ${DIST}`);
+  console.log(`ferry-ui on http://${HOST}:${server.address().port}  dist ${DIST}`);
   console.log(`  Z ${DAEMONS.z.url.origin}${MAIN_SELL === false ? " (no sell starts)" : ""}  B ${DAEMONS.b.url.origin}${MAIN_BUY === false ? " (no buy starts)" : ""}${EXTRA.map((d) => `  ${d.key.toUpperCase()} ${d.url}`).join("")}  makers ${MAKERS.makers.map((m) => `${m.name} (${m.pair})`).join(", ") || "none"}`);
   if (ROUTER) console.log(`  router ${ROUTER.url} (private swaps)`);
   console.log(
@@ -1062,6 +1078,7 @@ server.listen(PORT, HOST, () => {
   );
   if (NEAR) console.log(`  NEAR Intents ${env.FERRY_NEAR_URL || ONE_CLICK_URL}: quotes${NEAR_RUN ? ", swaps (FERRY_NEAR=1: your own node only)" : " only (FERRY_NEAR=1 runs swaps)"}${NEAR_JWT() ? ", with a JWT" : ""}`);
   console.log(`  demo: max ${zec(DEMO_MAX_ZAT)} ZEC, ${RATE_PER_HOUR} swaps/IP/hour, ${SWAPS_PER_HOUR} swaps/hour in all, ${SSE_PER_IP} streams/IP, ${SSE_TOTAL} streams in all, faults ${FAULTS ? "on" : "off"}${PUBLIC_ORIGIN ? `, origin ${PUBLIC_ORIGIN}` : ""}`);
+  console.log(`  daemons answer within ${LIMITS.read / 1000} s (reads, a stream's start) and ${LIMITS.start / 1000} s (swap starts), or the page gets 504`);
 });
 
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => server.close(() => process.exit(0)));
