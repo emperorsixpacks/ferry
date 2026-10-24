@@ -210,8 +210,8 @@ export function mockOneClick({ speed = 1, onDeliver = () => {}, now = Date.now }
     set(e, "KNOWN_DEPOSIT_TX", base);
     const refund = fault === "refund" || got < BigInt(q.minAmountIn);
     if (fault === "refund") fault = null;
-    later(e, 1500, () => set(e, refund && got < BigInt(q.minAmountIn) ? "INCOMPLETE_DEPOSIT" : "PROCESSING", { ...base, intentHashes: [base58(randomBytes(32))], nearTxHashes: [base58(randomBytes(32))] }));
-    later(e, 5000, () => {
+    later(e, 3000, () => set(e, refund && got < BigInt(q.minAmountIn) ? "INCOMPLETE_DEPOSIT" : "PROCESSING", { ...base, intentHashes: [base58(randomBytes(32))], nearTxHashes: [base58(randomBytes(32))] }));
+    later(e, 10_000, () => {
       if (refund) {
         set(e, "REFUNDED", { ...e.details, refundedAmount: got.toString(), refundedAmountFormatted: fmt(got, from.decimals), refundReason: got < BigInt(q.minAmountIn) ? "PARTIAL_DEPOSIT" : "PRICE_CHANGED" });
         onDeliver({ asset: r.originAsset, address: r.refundTo, amount: got, refund: true });

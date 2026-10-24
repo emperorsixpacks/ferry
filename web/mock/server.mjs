@@ -19,7 +19,8 @@
 // MOCK_ROUTE_PORT (unset: none) also serves a mock ferry-route there, for private swaps: a route
 // runs two of these swaps one after the other (mock/router.mjs).
 //
-// MOCK_NEAR_PORT (unset: none) also serves a mock of NEAR Intents' 1Click API there (mock/oneclick.mjs).
+// MOCK_NEAR_PORT (unset: none) also serves a mock of NEAR Intents' 1Click API there (mock/oneclick.mjs;
+// MOCK_NEAR_SPEED, default MOCK_SPEED, paces its part).
 // Z takes payout_to (features: "payout"; MOCK_PAYOUT=0 leaves it out, as an older ferryd): its
 // redeem then pays into a 1Click deposit address, and the mock 1Click sees the deposit. What the
 // mock 1Click delivers to a party's own address (GET /api/addresses) is credited to it in BTC.
@@ -476,7 +477,7 @@ const PAYOUT = process.env.MOCK_PAYOUT !== "0";
 const NEAR_PORT = process.env.MOCK_NEAR_PORT ? Number(process.env.MOCK_NEAR_PORT) : null;
 const near = NEAR_PORT
   ? mockOneClick({
-      speed: SPEED,
+      speed: Number(process.env.MOCK_NEAR_SPEED ?? SPEED) || SPEED,
       onDeliver: ({ asset, address, amount }) => {
         if (asset !== "nep141:btc.omft.near") return;
         for (const role of ["Z", "B"]) if (parties[role].address === address) credit(role, "btc_sat", Number(amount));
