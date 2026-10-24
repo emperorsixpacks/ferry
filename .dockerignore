@@ -1,0 +1,13 @@
+# Docker build context for infra/deploy images (context = repo root).
+.git
+**/target
+**/node_modules
+vendor
+.demo
+.e2e-real
+.film-real
+.testnet
+web/dist
+web/screenshots
+docs/evidence
+web/film

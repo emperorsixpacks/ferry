@@ -1,0 +1,17 @@
+# TLS for the public demo (certificates from Let's Encrypt, kept in the caddy_data volume).
+{
+	email {$ACME_EMAIL:}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+	# The UI streams swap updates over SSE: never buffer.
+	reverse_proxy web:8080 {
+		flush_interval -1
+	}
+}

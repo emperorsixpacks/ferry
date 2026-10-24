@@ -1,0 +1,22 @@
+# The Ferry UI: static build served by web/server/prod.mjs (plain Node), which also proxies
+# /daemon/{z,b} to the daemons with server-side tokens. Build context: the repository root.
+#   docker build -f infra/deploy/Dockerfile.web -t ferry-web .
+ARG NODE_IMAGE=node:22-bookworm-slim
+
+FROM ${NODE_IMAGE} AS build
+RUN corepack enable && corepack prepare pnpm@10.26.0 --activate
+WORKDIR /web
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+COPY web/ ./
+RUN pnpm build
+
+FROM ${NODE_IMAGE}
+ENV NODE_ENV=production PORT=8080
+WORKDIR /app
+COPY --from=build /web/dist ./dist
+COPY web/server ./server
+USER node
+EXPOSE 8080
+CMD ["node", "server/prod.mjs"]

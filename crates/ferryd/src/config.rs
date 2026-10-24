@@ -43,9 +43,14 @@ pub struct Cli {
     /// Peer protocol listener (/peer/*). A maker exposes this one to takers.
     #[arg(long, default_value = "127.0.0.1:7111")]
     pub listen: SocketAddr,
-    /// Control API listener (/api/*, for the UI). Must be a loopback address.
+    /// Control API listener (/api/*, for the UI). Must be a loopback address unless
+    /// --api-allow-remote is given.
     #[arg(long, default_value = "127.0.0.1:7101")]
     pub api_listen: SocketAddr,
+    /// Allow a non-loopback --api-listen, for a private container network where the UI server
+    /// runs in another container. The bearer token is still required on every request.
+    #[arg(long)]
+    pub api_allow_remote: bool,
     /// Bearer token required on /api/*. Default: a random token, written to <data-dir>/api-token.
     #[arg(long)]
     pub api_token: Option<String>,

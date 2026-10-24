@@ -76,8 +76,11 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run<L: ZecLeg + 'static>(cli: Cli, leg: L) -> anyhow::Result<()> {
     let (peer_addr, api_addr) = (cli.listen, cli.api_listen);
-    if !api_addr.ip().is_loopback() {
-        bail!("--api-listen must be a loopback address (the control API moves funds)");
+    if !api_addr.ip().is_loopback() && !cli.api_allow_remote {
+        bail!(
+            "--api-listen must be a loopback address (the control API moves funds); \
+             use --api-allow-remote only on a private network"
+        );
     }
     let token_file = cli.data_dir.join("api-token");
     let daemon = Daemon::new(cli, leg).await?;

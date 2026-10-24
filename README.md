@@ -57,6 +57,12 @@ infra/demo.sh help              # the three demo stories (swap, refund, punish) 
 infra/demo.sh down
 ```
 
+## Deploying
+
+The public testnet demo (Bitcoin signet + Zcash testnet, TLS via Caddy) runs on one Linux host
+with Docker Compose. From a clone: `infra/deploy/deploy.sh <ssh-host>`. Requirements, funding,
+backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
+
 ## Layout
 
 | | |

@@ -1,0 +1,58 @@
+# ferryd with its Zcash toolchain: zcash-devtool (pinned, with Ferry's patch) and ferry-zec-signer.
+# Build context: the repository root (see .dockerignore).
+#   docker build -f infra/deploy/Dockerfile.ferryd -t ferry-ferryd .
+
+# zcash-devtool revision ferry-zec is tested against (its wallet DB and CLI output are unstable
+# interfaces, so it is pinned; librustzcash itself is pinned inside its Cargo.toml).
+ARG ZCASH_DEVTOOL_REV=b532d4cd760d30213c961fe0638ee6b6e1bf8e30
+ARG RUST_IMAGE=rust:1.92-bookworm
+
+FROM ${RUST_IMAGE} AS devtool
+ARG ZCASH_DEVTOOL_REV
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+WORKDIR /src
+RUN git clone https://github.com/zcash/zcash-devtool.git zcash-devtool \
+    && git -C zcash-devtool checkout --quiet "${ZCASH_DEVTOOL_REV}"
+COPY infra/patches/zcash-devtool-ferry.patch /src/
+RUN cd zcash-devtool && git apply --verbose /src/zcash-devtool-ferry.patch
+# regtest_support only adds the local-consensus network option; test/main work as usual.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/src/zcash-devtool/target \
+    cd zcash-devtool && cargo build --release --locked --features regtest_support \
+    && cp target/release/zcash-devtool /usr/local/bin/
+
+FROM ${RUST_IMAGE} AS signer
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+WORKDIR /src
+COPY tools/ferry-zec-signer /src/ferry-zec-signer
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/src/ferry-zec-signer/target \
+    cd ferry-zec-signer && cargo build --release --locked \
+    && cp target/release/ferry-zec-signer /usr/local/bin/
+
+FROM ${RUST_IMAGE} AS ferryd
+WORKDIR /src
+COPY Cargo.toml Cargo.lock /src/
+COPY crates /src/crates
+COPY third_party /src/third_party
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p ferryd \
+    && cp target/release/ferryd /usr/local/bin/
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin ferry \
+    && mkdir -p /data && chown ferry:ferry /data
+COPY --from=devtool /usr/local/bin/zcash-devtool /usr/local/bin/
+COPY --from=signer /usr/local/bin/ferry-zec-signer /usr/local/bin/
+COPY --from=ferryd /usr/local/bin/ferryd /usr/local/bin/
+USER ferry
+WORKDIR /data
+VOLUME ["/data"]
+ENTRYPOINT ["ferryd"]
+CMD ["--help"]
