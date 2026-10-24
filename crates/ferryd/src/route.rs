@@ -29,7 +29,8 @@ use crate::daemon::ApiError;
 
 /// What `GET /api/status` lists in `features`. The router starts a leg only on a daemon that
 /// lists `route`, and passes `payout_to` only to one that lists `payout` (an older ferryd would
-/// silently ignore the fields above, and pay our own wallet).
+/// silently ignore the fields above, and pay our own wallet). `withdraw`: `POST /api/withdraw`
+/// and `GET /api/withdrawals` (crate::withdraw).
 pub const FEATURES: &[&str] = &["route", PAYOUT_FEATURE, crate::withdraw::WITHDRAW_FEATURE];
 
 /// `POST /api/swaps` takes `payout_to` (in `GET /api/status` `features`), and, in a Bitcoin or
