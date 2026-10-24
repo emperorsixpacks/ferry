@@ -168,12 +168,16 @@ await ready(desk, "Sell ZEC");
 await text(desk, "Your swaps will show up here");
 const panel = desk.locator("[data-recent]");
 check((await panel.getByRole("link", { name: /View all/ }).getAttribute("href")) === "/app/activity", 'the "Recent activity" panel sits beside the card, empty, with "View all" to /app/activity');
-const beside = await desk.evaluate(() => {
-  const card = document.querySelector("form").getBoundingClientRect();
-  const side = document.querySelector("[data-recent]").getBoundingClientRect();
-  return side.left > card.right && Math.abs(side.top - card.top) < 80;
-});
-check(beside, "at 1440 the panel is to the right of the card");
+// beside the card, from the top of its panels to the bottom of its button
+const aligned = () =>
+  desk.evaluate(() => {
+    const card = document.querySelector("form").getBoundingClientRect();
+    const button = document.querySelector("form button[type=submit]").getBoundingClientRect();
+    const side = document.querySelector("[data-recent]").getBoundingClientRect();
+    return side.left > card.right && Math.abs(side.top - card.top) < 2 && Math.abs(side.bottom - button.bottom) < 2;
+  });
+await desk.waitForFunction(() => document.querySelector("[data-recent]").style.height !== "", null, { timeout: 10_000 });
+check(await aligned(), "at 1440 the panel is to the right of the card, as tall as the card down to its button");
 await settle();
 await shot(desk, "00-empty-1440");
 await phone.goto(DEV + "/app");
@@ -200,7 +204,17 @@ check(own.length === 4 && dimmed === 7, `ZEC and the 3 coins this server swaps o
 check(/NEAR Intents brings your coin in, then it goes privately through shielded ZEC/.test(await desk.locator("#tokens-near").locator("..").locator("..").textContent()), "the NEAR section says how a NEAR asset goes to a coin");
 await settle();
 await shot(desk, "01-picker-sell-1440");
-await desk.keyboard.press("Escape");
+// any coin can be picked: one that can't go to BTC here, and one this server doesn't swap at all
+await desk.getByRole("listbox", { name: "Tokens" }).getByRole("option", { name: /^LTC/ }).click();
+await desk.waitForFunction(() => document.querySelector("[data-off-reason]")?.textContent === "Private swaps can't start from LTC on this server.", null, { timeout: 10_000 });
+check(/^You sell LTC/.test(await sellPill(desk).getAttribute("aria-label")), "picking LTC on the Sell pill puts it there, and the card says why it can't go to BTC here");
+await sellPill(desk).click();
+await desk.getByRole("listbox", { name: "Not available here" }).getByRole("option", { name: /^WETH.*Arbitrum/ }).click();
+await desk.waitForFunction(() => document.querySelector("[data-off-reason]")?.textContent === "Private swaps can't start from WETH on this server.", null, { timeout: 10_000 });
+check(/^You sell WETH/.test(await sellPill(desk).getAttribute("aria-label")), "a coin this server doesn't swap at all can be picked too, and the card says why");
+await sellPill(desk).click();
+await desk.getByRole("listbox", { name: "Tokens" }).getByRole("option", { name: /^ZEC/ }).click();
+await ready(desk, "Sell ZEC");
 await sellPill(phone).click();
 await phone.getByRole("listbox", { name: "Tokens" }).waitFor();
 await settle();
@@ -488,6 +502,9 @@ const rows = await desk.locator("[data-recent] li a").evaluateAll((els) => els.m
 check(rows.length === 7, `"Recent activity" lists the latest 7 of ${8} swaps`);
 check(["/app/combo/", "/app/near/", "/app/route/", "/app/swap/"].every((h) => rows.some(([href]) => href.startsWith(h))), "its rows open every kind of progress page");
 check(rows[0][0] === `/app/combo/${c3}` && /Private swap/.test(rows[0][1]) && /via NEAR Intents/.test(rows[0][1]), `newest first: the SOL → USDT swap (${rows[0][1].slice(0, 60)})`);
+await ready(desk, "Sell ZEC");
+check(await aligned(), "full, the panel still ends level with the card's button");
+check(await desk.locator("[data-recent-list]").evaluate((ul) => ul.scrollHeight > ul.clientHeight), "... and its list scrolls inside it");
 await settle();
 await shot(desk, "12-recent-1440");
 await phone.locator("[data-recent]").evaluate((el) => el.scrollIntoView({ block: "start" }));

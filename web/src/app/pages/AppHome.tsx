@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { ArrowRight, ArrowsLeftRight, GearSix } from "@phosphor-icons/react";
 import { counterBalance, pairChain, startSwap, type Role, type RouteView, type Status, type SwapView } from "@/api";
 import { CHAIN_NAMES, amountIn, coin, zec } from "@/format";
@@ -67,6 +67,9 @@ export function AppHome() {
   const blocked = moving || comboLive?.state === "route" ? "Finish your private swap first." : live ? "Finish the swap in progress first." : null;
 
   const { pick, path } = sel;
+  const column = useRef<HTMLDivElement>(null);
+  const panel = useRef<HTMLElement>(null);
+  const panelHeight = useAlignedHeight(column, panel);
   let card = null;
   if (pick && path) {
     const props: CardProps = { pick, path, ctx, onPick: sel.pickSide, onFlip: sel.flip, blocked, optOut: sel.optOut };
@@ -84,7 +87,7 @@ export function AppHome() {
   return (
     <Layout>
       <div className="mx-auto flex w-full max-w-[480px] flex-col gap-8 lg:max-w-[960px] lg:flex-row lg:items-start lg:gap-10">
-        <div className="w-full min-w-0 lg:w-[480px] lg:shrink-0">
+        <div ref={column} className="w-full min-w-0 lg:w-[480px] lg:shrink-0">
           <div className="lg:hidden">
             {moving ? (
               <RouteBanner route={moving} />
@@ -101,21 +104,54 @@ export function AppHome() {
           {card ?? <OffCard loading />}
         </div>
         <aside className="w-full min-w-0 lg:flex-1 lg:pt-12">
-          <RecentActivity />
+          <RecentActivity sectionRef={panel} height={panelHeight} />
         </aside>
       </div>
     </Layout>
   );
 }
 
+// On a wide screen the panel ends level with the card's main button: its height, from the panel's
+// top to that button's bottom, kept as the card changes (null: the panel's own height, on a phone).
+function useAlignedHeight(column: RefObject<HTMLElement>, panel: RefObject<HTMLElement>): number | null {
+  const [height, setHeight] = useState<number | null>(null);
+  useEffect(() => {
+    const el = column.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const wide = window.matchMedia("(min-width: 1024px)");
+    const measure = () => {
+      const button = el.querySelector("form button[type=submit]");
+      const top = panel.current?.getBoundingClientRect().top;
+      if (!wide.matches || !button || top == null) return setHeight(null);
+      const h = Math.round(button.getBoundingClientRect().bottom - top);
+      setHeight(h > 160 ? h : null);
+    };
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    wide.addEventListener("change", measure);
+    measure();
+    return () => {
+      ro.disconnect();
+      wide.removeEventListener("change", measure);
+    };
+  }, [column, panel]);
+  return height;
+}
+
 // "Recent activity": the latest few of the person's swaps, every kind, each row opening its
-// progress page; the rest on /app/activity.
-function RecentActivity() {
+// progress page; the rest on /app/activity. Beside the card, at the card's height (its list scrolls).
+function RecentActivity({ sectionRef, height }: { sectionRef: RefObject<HTMLElement>; height: number | null }) {
   const rows = useActivityRows();
   const shown = rows.slice(0, 7);
   return (
-    <section aria-labelledby="recent-title" className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(24,24,27,0.04)]" data-recent>
-      <div className="flex items-center justify-between gap-3 px-5 pt-4 pb-3">
+    <section
+      ref={sectionRef}
+      aria-labelledby="recent-title"
+      style={height ? { height } : undefined}
+      className="flex flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(24,24,27,0.04)]"
+      data-recent
+    >
+      <div className="flex shrink-0 items-center justify-between gap-3 px-5 pt-4 pb-3">
         <h2 id="recent-title" className="text-[15px] font-semibold tracking-tight text-slate-900">
           Recent activity
         </h2>
@@ -125,7 +161,7 @@ function RecentActivity() {
         </Link>
       </div>
       {shown.length === 0 ? (
-        <div className="border-t border-slate-100 px-6 pt-8 pb-10 text-center">
+        <div className="flex flex-1 flex-col items-center justify-center border-t border-slate-100 px-6 pt-8 pb-10 text-center">
           <span className="mx-auto flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-100 text-slate-500">
             <ArrowsLeftRight size={18} weight="bold" aria-hidden />
           </span>
@@ -133,7 +169,7 @@ function RecentActivity() {
           <p className="mt-1 text-[13px] text-slate-500">Each one opens its progress, step by step.</p>
         </div>
       ) : (
-        <ul className="divide-y divide-slate-100 border-t border-slate-100">
+        <ul className="min-h-0 flex-1 divide-y divide-slate-100 overflow-y-auto overscroll-contain border-t border-slate-100" data-recent-list>
           {shown.map((r) => (
             <li key={r.key}>{r.row}</li>
           ))}
