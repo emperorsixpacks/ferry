@@ -167,10 +167,6 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             return Ok(());
         }
         let tip = self.rpc.block_count().await?;
-        if st.refused_height == Some(tip) {
-            return Ok(());
-        }
-        let floors = self.rpc.fee_floors().await?;
         let cancel = txs.txid(Spend::Cancel);
         let deadline = match spend {
             Spend::Redeem => Deadline::Redeem {
@@ -183,6 +179,13 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             },
             _ => Deadline::Liveness,
         };
+        // A bump the node refused is not tried again within the same block, unless time is short:
+        // a refusal can come from a floor that moved between reading it and sending, and the next
+        // tick reads it again. (The reason is written to the timeline once either way.)
+        if st.refused_height == Some(tip) && deadline.blocks_left() > self.cli.bump_urgent_blocks {
+            return Ok(());
+        }
+        let floors = self.rpc.fee_floors().await?;
         let target = deadline.blocks_left().clamp(1, 1008) as u16;
         // No estimate (a node without data, a fresh one) is not an error: the floors still apply.
         let estimate = self.rpc.estimate_fee_rate_kvb(target).await.unwrap_or(None);
@@ -344,10 +347,17 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     rec,
                     st,
                     "not_ours",
-                    format!("{name} cannot be bumped: its output is not one this wallet can spend"),
+                    format!(
+                        "{name} cannot be bumped: the wallet could not sign for its output (it is \
+                         not one this wallet owns, or the wallet is locked)"
+                    ),
                 );
                 return Ok(());
             }
+            // The node could not be asked: nothing was refused, so try again at the next tick.
+            Err(ChildError::Rpc(e)) => return Err(e.into()),
+            // Refused by our own checks (a cap, dust, a locked coin, a larger signature): the same
+            // answer until something changes, so wait for the next block.
             Err(e) => {
                 st.refused_height = Some(tip);
                 return Err(e.into());

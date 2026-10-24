@@ -1676,9 +1676,7 @@ async fn bump_stuck_redeem_is_packaged_replaced_and_mined() {
     raise_mempool_floor(&w.rpc, 60).await;
 
     let id = w.start_swap(100_000_000).await;
-    let (z, _) = w
-        .run_until(&id, 400, 40, |z, _| !bumps(z).is_empty())
-        .await;
+    let (z, _) = w.run_until(&id, 400, 40, |z, _| !bumps(z).is_empty()).await;
     let first = bumps(&z)[0];
     println!("first bump: {}", first["label"]);
     assert!(
@@ -1728,9 +1726,10 @@ async fn bump_stuck_redeem_is_packaged_replaced_and_mined() {
     }
     assert!(all.len() >= 2, "{}", kinds(&z));
     assert!(
-        all[1..]
-            .iter()
-            .all(|e| e["label"].as_str().unwrap().contains("replaced the previous child")),
+        all[1..].iter().all(|e| e["label"]
+            .as_str()
+            .unwrap()
+            .contains("replaced the previous child")),
         "after the package every bump replaces the child: {}",
         kinds(&z)
     );
@@ -1849,7 +1848,11 @@ async fn bump_stuck_punish_is_packaged() {
     w.mine().await;
     let deadline = Instant::now() + Duration::from_secs(10);
     while !matches!(state(&w.swap(&w.b.url, &id).await), "BtcLocked" | "ZecSeen") {
-        assert!(Instant::now() < deadline, "B never reached BtcLocked\n{}", w.b.logs());
+        assert!(
+            Instant::now() < deadline,
+            "B never reached BtcLocked\n{}",
+            w.b.logs()
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let (code, body) = w
@@ -1866,7 +1869,9 @@ async fn bump_stuck_punish_is_packaged() {
     // Z cancels at T1 (the floor is low); wait for the cancel to be mined, then mine to one
     // block short of T2 confirmations.
     let (z, _) = w
-        .run_until(&id, 300, 60, |z, _| z["deadlines"]["cancel_height"].is_u64())
+        .run_until(&id, 300, 60, |z, _| {
+            z["deadlines"]["cancel_height"].is_u64()
+        })
         .await;
     let cancel_height = z["deadlines"]["cancel_height"].as_u64().unwrap();
     loop {
@@ -1994,11 +1999,12 @@ async fn bump_off_and_the_kill_file_stop_all_bumping() {
     assert!(bumps(&z).is_empty(), "{}", kinds(&z));
     // Removing the file lets it bump at the next tick, without a restart.
     std::fs::remove_file(w._dir.path().join("zoe").join("bump-off")).unwrap();
-    let (z, _) = w
-        .run_until(&id, 300, 40, |z, _| !bumps(z).is_empty())
-        .await;
+    let (z, _) = w.run_until(&id, 300, 40, |z, _| !bumps(z).is_empty()).await;
     assert!(
-        bumps(&z)[0]["label"].as_str().unwrap().contains("tx_redeem"),
+        bumps(&z)[0]["label"]
+            .as_str()
+            .unwrap()
+            .contains("tx_redeem"),
         "{}",
         kinds(&z)
     );

@@ -904,6 +904,54 @@ mod tests {
             }
         }
 
+        /// The properties below are only worth something if the generated inputs reach every kind
+        /// of decision: count them, with a fixed seed, and require each at least once.
+        #[test]
+        fn the_generated_inputs_reach_every_kind_of_decision() {
+            use proptest::strategy::{Strategy, ValueTree};
+            use proptest::test_runner::TestRunner;
+            let mut runner = TestRunner::deterministic();
+            let strategy = input();
+            let mut seen = std::collections::BTreeMap::<String, usize>::new();
+            for _ in 0..4_000 {
+                let i = strategy.new_tree(&mut runner).unwrap().current();
+                let kind = match decide(&i) {
+                    Hold(r) => format!("hold {r:?}"),
+                    Exhausted(r) => format!("exhausted {r:?}"),
+                    Bump(p) => {
+                        let mode = match p.mode {
+                            SubmitMode::Send => "send",
+                            SubmitMode::Replace(_) => "replace",
+                            SubmitMode::Package => "package",
+                        };
+                        format!("bump {mode}{}", if p.capped { " capped" } else { "" })
+                    }
+                };
+                *seen.entry(kind).or_default() += 1;
+            }
+            println!("{seen:#?}");
+            for kind in [
+                "hold Confirmed",
+                "hold AtTarget",
+                "hold RateLimited",
+                "hold SoftCap",
+                "hold NeedsPackage",
+                "exhausted NoRoom",
+                "exhausted ParentBelowMinRelay",
+                "bump send",
+                "bump replace",
+                "bump package",
+                "bump send capped",
+                "bump replace capped",
+                "bump package capped",
+            ] {
+                assert!(
+                    seen.contains_key(kind),
+                    "never reached: {kind}; saw {seen:?}"
+                );
+            }
+        }
+
         proptest! {
             #![proptest_config(ProptestConfig { cases: 4_000, ..ProptestConfig::default() })]
 

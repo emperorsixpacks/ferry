@@ -68,7 +68,7 @@ pub enum ChildError {
     UnsupportedInput(String),
     #[error("the child must pay to a spendable output script")]
     BadPayTo,
-    #[error("the wallet could not sign the child: the parent output is not one of its own")]
+    #[error("the wallet could not sign the child: the parent output is not one of its own, or the wallet is locked")]
     NotSigned,
     #[error("the wallet changed the child ({0})")]
     Altered(&'static str),

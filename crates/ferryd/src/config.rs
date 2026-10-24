@@ -623,7 +623,15 @@ mod tests {
     #[test]
     fn fee_bumping_is_off_unless_asked_for() {
         let cli = |extra: &[&str]| {
-            let base = ["ferryd", "--role", "z", "--name", "n", "--data-dir", "/nonexistent"];
+            let base = [
+                "ferryd",
+                "--role",
+                "z",
+                "--name",
+                "n",
+                "--data-dir",
+                "/nonexistent",
+            ];
             Cli::try_parse_from(base.iter().chain(extra))
         };
         let off = cli(&[]).unwrap();
@@ -637,7 +645,12 @@ mod tests {
         // The soft cap is a percentage of the payout: 1 to 100, never 0 and never more.
         assert!(cli(&["--bump-soft-cap-percent", "0"]).is_err());
         assert!(cli(&["--bump-soft-cap-percent", "101"]).is_err());
-        assert_eq!(cli(&["--bump-soft-cap-percent", "100"]).unwrap().bump_soft_cap_percent, 100);
+        assert_eq!(
+            cli(&["--bump-soft-cap-percent", "100"])
+                .unwrap()
+                .bump_soft_cap_percent,
+            100
+        );
         assert!(cli(&["--bump-min-interval-blocks", "0"]).is_err());
     }
 
