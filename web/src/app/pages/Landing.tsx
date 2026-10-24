@@ -169,7 +169,7 @@ const promises = [
 function Promises() {
   return (
     <section className="border-t border-slate-100 bg-slate-50/60">
-      <div className="mx-auto grid max-w-6xl gap-5 px-4 py-20 sm:px-6 md:grid-cols-3 lg:py-24">
+      <div className="mx-auto grid max-w-6xl gap-5 px-4 py-14 sm:py-20 sm:px-6 md:grid-cols-3 lg:py-24">
         {promises.map((p) => (
           <div key={p.title} className="rounded-3xl border border-slate-200/80 bg-white p-6 sm:p-7">
             <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-slate-100 text-slate-800" aria-hidden>
@@ -200,7 +200,7 @@ function Steps() {
         ];
   return (
     <section id="how" className="scroll-mt-20 border-t border-slate-100">
-      <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6 lg:py-24">
+      <div className="mx-auto max-w-6xl px-4 py-14 sm:py-20 sm:px-6 lg:py-24">
         <h2 className="text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">How it works</h2>
         <ol className="mt-10 grid gap-8 md:grid-cols-3 md:gap-10">
           {steps.map((s, i) => (
@@ -225,7 +225,7 @@ function Steps() {
 function Questions() {
   return (
     <section className="border-t border-slate-100 bg-slate-50/60">
-      <div className="mx-auto grid max-w-6xl gap-10 px-4 py-20 sm:px-6 lg:grid-cols-[1fr_1.6fr] lg:py-24">
+      <div className="mx-auto grid max-w-6xl gap-10 px-4 py-14 sm:py-20 sm:px-6 lg:grid-cols-[1fr_1.6fr] lg:py-24">
         <div>
           <h2 className="text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">Questions</h2>
           <p className="mt-3 text-slate-600">The short answers. There are more in Help.</p>

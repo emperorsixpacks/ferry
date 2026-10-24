@@ -154,7 +154,7 @@ function Trust() {
           <Box key={t} label={t}>
             <p className="text-slate-600">{d}</p>
             {warn ? (
-              <p className="mt-3 inline-flex items-center gap-1.5 font-mono text-[10px] tracking-widest text-amber-700 uppercase">
+              <p className="mt-3 inline-flex items-center gap-1.5 font-mono text-[10px] tracking-widest text-slate-700 uppercase">
                 <Warning size={12} weight="fill" />
                 {warn}
               </p>
@@ -451,7 +451,7 @@ function Limits() {
     <div className="space-y-2">
       {LIMITS.map(([t, d]) => (
         <div key={t} className="flex gap-4 rounded border border-slate-200 bg-white p-4">
-          <Warning size={18} weight="duotone" className="mt-0.5 shrink-0 text-amber-600" />
+          <Warning size={18} weight="duotone" className="mt-0.5 shrink-0 text-slate-700" />
           <div className="space-y-1">
             <p className="font-semibold text-slate-900">{t}</p>
             <p className="text-slate-600">{d}</p>
