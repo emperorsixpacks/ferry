@@ -34,7 +34,7 @@ const env = {
 const procs = [
   spawn(process.execPath, ["mock/server.mjs"], { env, stdio: "ignore" }),
   spawn("pnpm", ["exec", "vite", "--port", String(VITE), "--strictPort"], { env: { ...env, PORT: String(VITE) }, stdio: "ignore" }),
-  spawn(process.execPath, ["server/prod.mjs"], { env: { ...env, PORT: String(PROD), HOST: "127.0.0.1", DEMO_MAX_ZAT: "200000000", DEMO_QUOTES_PER_MIN: "20" }, stdio: "inherit" }),
+  spawn(process.execPath, ["server/prod.mjs"], { env: { ...env, PORT: String(PROD), HOST: "127.0.0.1", DEMO_MAX_ZAT: "200000000", DEMO_QUOTES_PER_MIN: "20", DEMO_RATE_PER_HOUR: "6" }, stdio: "inherit" }),
 ];
 const cleanup = () => procs.forEach((p) => p.kill("SIGTERM"));
 process.on("exit", cleanup);
@@ -200,7 +200,8 @@ await shot(phone, "05-bram-selected-390", { fullPage: true });
 await reset();
 await sleep(400);
 const list = (await (await fetch(PRD + "/api/makers")).json()).makers;
-check(list.length === 5, "prod /api/makers lists the 5 allowlisted makers");
+check(list.length === 8, "prod /api/makers lists the 8 allowlisted makers");
+check(list.filter((m) => m.role === "B").length === 4 && list.filter((m) => m.role === "Z").length === 3, "4 of them buy ZEC (role B), 3 sell it (role Z), Plover is offline");
 check(list.every((m) => !("url" in m) && !("error" in m)), "prod /api/makers exposes no URLs or error details");
 const heron = list.find((m) => m.name === "Heron OTC");
 check(heron.max_zat === 200000000 && heron.liquidity_zat === 200000000, "demo limit clamps a maker's range and liquidity");
@@ -243,6 +244,28 @@ const sv3 = await (await fetch(`http://127.0.0.1:${Z}/api/swaps/${firmStart.id}`
 check(sv3.amounts.btc_sat === Math.round(0.7 * kq.rate_sat_per_zec), `...at the quote's rate (btc_sat ${sv3.amounts.btc_sat})`);
 r = await post(PRD, "/daemon/z/api/swaps", { maker: "Kestrel", zec_zat: 70_000_000, quote: kq.quote_id });
 check(r.status === 400, "one quote, one swap: the same quote is refused again");
+
+// buying ZEC through the production server: the main B daemon takes from a Z maker, behind the
+// same guards as a sell (maker allowlist, demo cap, one live swap)
+await reset();
+await sleep(400);
+const pairs = await (await fetch(PRD + "/api/pairs")).json();
+check(pairs.main?.sell === true && pairs.main?.buy === true && Array.isArray(pairs.buy), `prod /api/pairs says the main pair sells and buys (${JSON.stringify(pairs)})`);
+[qs, qb] = await quotes({ pair: "btc", direction: "buy", zec_zat: 70_000_000 });
+check(qs === 200 && qb.quotes.map((q) => q.maker).join() === "Sandpiper,Zoe", `buying, firm quotes come from the partners who sell ZEC, cheapest first (${qb.quotes.map((q) => q.maker)})`);
+r = await post(PRD, "/daemon/b/api/swaps", { maker: `http://127.0.0.1:${Z}/m/sandpiper`, zec_zat: 50_000_000 });
+check(r.status === 400, "buying: a raw maker URL is refused too");
+r = await post(PRD, "/daemon/b/api/swaps", { maker: "Sandpiper", zec_zat: 300_000_000 });
+check(r.status === 400 && /limited/.test((await r.json()).error), "buying: the demo's per-swap cap applies");
+r = await post(PRD, "/daemon/b/api/swaps", { maker: "Kestrel", zec_zat: 50_000_000 });
+check(r.status === 400 && /role B/.test((await r.json()).error), "buying from a partner who only buys ZEC is refused");
+r = await post(PRD, "/daemon/b/api/swaps", { maker: "Sandpiper", zec_zat: 50_000_000 });
+const buy = await r.json();
+check(r.status === 201, `a buy starts on B through the guard (${r.status} ${buy.error ?? ""})`);
+const bv = await (await fetch(`http://127.0.0.1:${B}/api/swaps/${buy.id}`)).json();
+check(bv.role === "B" && bv.taker === true && bv.amounts.btc_sat === Math.round(0.5 * 413800), `...as B, the taker, at Sandpiper's rate (${bv.amounts.btc_sat})`);
+r = await post(PRD, "/daemon/z/api/swaps", { maker: "Kestrel", zec_zat: 50_000_000 });
+check(r.status === 409, "one live swap per pair: a sell waits for the buy");
 
 await reset();
 await sleep(400);
