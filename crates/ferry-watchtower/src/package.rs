@@ -594,6 +594,11 @@ mod tests {
             let back: Package = serde_json::from_value(json).unwrap();
             let armed = back.validate(ltc).unwrap();
             assert_eq!(armed.lock_address, s.lock_address());
+            let mut rec = crate::store::Record::new("l".into(), back.clone());
+            rec.outcome = Some(crate::Outcome::Refunded);
+            let advice = rec.view(&armed).advice.unwrap();
+            assert!(advice.contains("LTC") || advice.contains("ZEC"), "{advice}");
+            assert!(!advice.contains("BTC"), "{advice}");
             // A Bitcoin tower refuses it, and a Litecoin tower refuses a Bitcoin package.
             assert!(p
                 .validate(REGTEST)

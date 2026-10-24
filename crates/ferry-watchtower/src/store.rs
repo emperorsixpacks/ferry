@@ -104,7 +104,10 @@ impl Record {
             label: self.package.label.clone(),
             status: self.status,
             outcome: self.outcome,
-            advice: self.outcome.map(|o| o.advice(role).to_string()),
+            // The advice is worded for Bitcoin; a Litecoin package gets its own ticker.
+            advice: self
+                .outcome
+                .map(|o| o.advice(role).replace("BTC", self.package.coin.ticker())),
             note: self.note.clone(),
             lock_outpoint: armed.lock_outpoint,
             cancel_txid: armed.cancel_txid(),
