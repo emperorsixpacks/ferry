@@ -36,7 +36,9 @@
 // (pending until the next block of its chain, then confirmed). POST /api/_mock/fail-next-withdraw
 // makes the next one fail after it was sent (the network drops it; the coins come back).
 // MOCK_USDC_PORT (unset: none) serves one more Ferry node, for USDC on Base Sepolia (an EVM daemon's
-// status and addresses), that holds coins and runs no swaps: for the wallet's EVM side.
+// status and addresses), that holds coins and runs no swaps: for the wallet's EVM side. Its POST
+// /api/_mock/credit {asset: "token" | "eth", amount} lands a deposit in its account, as a transfer
+// from the person's browser wallet (Pay with MetaMask) would.
 
 import http from "node:http";
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
@@ -1017,6 +1019,10 @@ if (USDC_PORT) {
       if (req.method === "POST" && path === "/api/_mock/fail-next-withdraw") {
         usdc.failNext();
         return send(res, 200, { ok: true });
+      }
+      if (req.method === "POST" && path === "/api/_mock/credit") {
+        const body = await readBody(req);
+        return usdc.credit(body?.asset, body?.amount) ? send(res, 200, usdc.status().balances) : send(res, 400, { error: 'asset "token" or "eth", amount in base units' });
       }
       const r = await usdc.route(req, path, readBody, () => sentTx("zec"));
       if (r) return send(res, r[0], r[1]);
