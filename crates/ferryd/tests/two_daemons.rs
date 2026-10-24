@@ -506,9 +506,10 @@ async fn happy_swap(maker: Role) {
     );
 
     // Restart Z mid-swap (taker or maker), once its ZEC is locked: it must resume from its
-    // swap file.
+    // swap file. A poll can miss the short RedeemSigReceived window when B pushes its adaptor
+    // the moment it may (B as taker), so a Z that already redeemed is restarted all the same.
     w.run_until(&id, 700, 20, |z, _| {
-        state(z) == "ZecLocked" || state(z) == "RedeemSigReceived"
+        matches!(state(z), "ZecLocked" | "RedeemSigReceived" | "BtcRedeemed")
     })
     .await;
     w.z.kill();
@@ -725,11 +726,17 @@ async fn punish_swap(maker: Role) {
     // Slow ZEC confirmations keep B in BtcLocked/ZecSeen long enough to stall it there.
     let w = World::start_as(6, maker, &[]).await;
     let id = w.start_swap(50_000_000).await;
+    // CancelSigned with tx_lock in the mempool: B broadcasts it from its loop once the state has
+    // moved (no handler moves funds), so the block below must not be mined before.
     let deadline = Instant::now() + Duration::from_secs(20);
-    while state(&w.swap(&w.b.url, &id).await) != "CancelSigned" {
+    loop {
+        let b = w.swap(&w.b.url, &id).await;
+        if state(&b) == "CancelSigned" && kinds(&b).contains("btc_lock_broadcast") {
+            break;
+        }
         assert!(
             Instant::now() < deadline,
-            "B never reached CancelSigned\n{}",
+            "B never broadcast its lock in CancelSigned\n{}",
             w.b.logs()
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
