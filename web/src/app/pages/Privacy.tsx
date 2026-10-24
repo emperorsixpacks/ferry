@@ -344,7 +344,7 @@ const COLS: Col[] = [
             "Both outer swaps are public on their own chains. On Base, swap 2 is a call to Ferry's contract, with the USDC amount.",
             "The USDC is paid to your node's Base account, the one it uses for every swap there, and that account's own history (where its gas came from, say) is public.",
             "What could still hint: the amounts in and out sit near the two coins' price ratio (testable to within a percent or two), and both times are public. A quiet chain has few candidates. Two partners who compare notes could link the swaps.",
-            "What helps: a random pause (5 to 30 minutes, or 1 to 6 hours), an option to keep back a random sliver of ZEC so the amounts differ, and a different partner for each swap. Coming next, not yet built: standard amounts, which split a route into fixed sizes.",
+            "What helps: standard amounts, on by default: a route is split into fixed sizes (0.1, 0.25, 0.5, 1 ZEC and up), each its own swap at its own random time, so its legs look like the many single swaps of those sizes. Partners take turns per part. On Base every part pays the same account, so there the parts can be added back up.",
           ]}
         />
         <Sources links={[["Threat model: routes", SRC.routes]]} />
@@ -633,7 +633,7 @@ function NearMark({ size = 16, light = false }: { size?: number; light?: boolean
 const LIMITS: [string, string][] = [
   [
     "Amounts and timing",
-    "Every public chain shows its own amounts and times. In a route, the amount in and the amount out sit near the two coins' price ratio, minutes to hours apart, and on a quiet chain an analyst can test the few candidates. The random pause helps; standard amounts, coming next, will split a route into fixed sizes.",
+    "Every public chain shows its own amounts and times. In a route, the amount in and the amount out sit near the two coins' price ratio, minutes to hours apart, and on a quiet chain an analyst can test the few candidates. Standard amounts (fixed sizes at random times) blur this; on an EVM chain, where every part pays the same account, the parts can still be added back up.",
   ],
   ["Your swap partner", "It learns the amounts and the deadlines, and your IP address, because the two Ferry nodes talk directly. Use Tor or a VPN if that matters."],
   ["Partners who compare notes", "A route uses a different partner for each swap, but nobody can prove two names aren't one operator. Two partners who share notes can link your swaps."],
