@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ArrowDown, ArrowsLeftRight, ShieldCheck } from "@phosphor-icons/react";
 import { startSwap, type Status, type SwapView } from "@/api";
 import { zec } from "@/format";
@@ -62,6 +62,12 @@ export function AppHome() {
 function SwapForm({ status, bt, busySwap }: { status: Status | null; bt: BlockTimes; busySwap?: SwapView }) {
   const { role } = useLocal();
   const [amount, setAmount] = useState("1.00");
+  const [touched, setTouched] = useState(false);
+  // a host can cap swaps below the default amount (the public demo does): start at the cap
+  useEffect(() => {
+    const max = status?.offer.max_zat;
+    if (!touched && max != null && max < 1e8) setAmount(zec(max));
+  }, [status?.offer.max_zat, touched]);
   const [busy, setBusy] = useState(false);
   const [fail, setFail] = useState<string | null>(null);
   const offer = status?.offer;
@@ -101,7 +107,10 @@ function SwapForm({ status, bt, busySwap }: { status: Status | null; bt: BlockTi
         inputMode="decimal"
         autoComplete="off"
         value={amount}
-        onChange={(e) => setAmount(e.target.value)}
+        onChange={(e) => {
+          setTouched(true);
+          setAmount(e.target.value);
+        }}
         aria-invalid={!!problem}
         className="w-full bg-transparent font-mono text-2xl font-medium text-slate-900 outline-none"
       />
