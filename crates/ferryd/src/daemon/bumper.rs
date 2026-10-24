@@ -45,6 +45,14 @@ pub(super) fn live_spend(swap: &Swap) -> Option<Spend> {
     }
 }
 
+/// Whether the spend is urgent: a redeem or refund with at most `window` blocks left before its
+/// deadline. A punish has no deadline and never is, whatever the window. Worked out here from the
+/// spend itself, apart from the planner's answer, for the fee cap and the retry gate: an urgency
+/// mistake in the planner then meets a cap that did not make it.
+fn is_urgent(spend: Spend, blocks_left: u32, window: u32) -> bool {
+    matches!(spend, Spend::Redeem | Spend::Refund) && blocks_left <= window
+}
+
 fn spend_name(spend: Spend) -> &'static str {
     match spend {
         Spend::Cancel => "tx_cancel",
@@ -211,10 +219,11 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             },
             _ => Deadline::Liveness,
         };
+        let urgent = is_urgent(spend, deadline.blocks_left(), self.cli.bump_urgent_blocks);
         // A bump the node refused is not tried again within the same block, unless time is short:
         // a refusal can come from a floor that moved between reading it and sending, and the next
         // tick reads it again. (The reason is written to the timeline once either way.)
-        if st.refused_height == Some(tip) && deadline.blocks_left() > self.cli.bump_urgent_blocks {
+        if st.refused_height == Some(tip) && !urgent {
             return Ok(());
         }
         let floors = self.rpc.fee_floors().await?;
@@ -353,13 +362,14 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             );
             return Ok(());
         }
-        // The guards besides the planner's own arithmetic: the child's fee may not pass the cap
-        // (the soft cap, or the payout less dust when time is short), and its rate may not pass
-        // the ceiling. A child pays for its parent too, so its own rate is about 2.5x the wanted
-        // package rate for a parent of its size, and more for a parent that has unconfirmed
-        // ancestors to carry; the ceiling is therefore the larger of three times the wanted rate,
-        // twice the last child's rate, and the planned child's own rate with a margin. The node
-        // enforces the same ceiling as maxfeerate.
+        // What the child may pay: the cap (the soft cap, or the payout less dust when time is
+        // short), from the urgency worked out above rather than the planner's. That is the one
+        // limit on what a bump costs. The fee-rate ceiling, which the node enforces too as
+        // maxfeerate, is not a second one: it always admits the planned child. A child pays for
+        // its parent too, so its own rate is about 2.5x the wanted package rate for a parent of
+        // its size, and more for a parent that has unconfirmed ancestors to carry; the ceiling is
+        // the larger of three times the wanted rate, twice the last child's rate, and the
+        // planned child's own rate with a margin.
         let inc = floors.incremental.max(1);
         let planned_rate = rate_of(plan.child_fee, child_vsize);
         let ceiling = plan
@@ -373,7 +383,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     .saturating_add(inc),
             );
         let limits = ChildLimits {
-            max_fee: Amount::from_sat(bump::cap(&bump_params, plan.urgent)),
+            max_fee: Amount::from_sat(bump::cap(&bump_params, urgent)),
             max_fee_rate: ceiling,
         };
         let built = match build_child(
@@ -397,6 +407,13 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     format!("{name} cannot be bumped: its output is not one this wallet can spend"),
                 );
                 return Ok(());
+            }
+            // The node answered with a refusal (a locked wallet: -13): the same answer until
+            // something changes, so try again at the next block, and say why once.
+            Err(ChildError::Rpc(e @ RpcError::Rpc { .. })) => {
+                let why = refusal_text(&e);
+                let what = format!("would not sign the fee bump of {name} ({why})");
+                return self.refused(rec, st, tip, &what, &why);
             }
             // The node could not be asked: nothing was refused, so try again at the next tick.
             Err(ChildError::Rpc(e)) => return Err(e.into()),
@@ -434,10 +451,11 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         }
 
         let child_txid = built.tx.compute_txid();
-        if package && self.rpc.output_confirmed(&parent_txid, 0).await? {
-            // The parent was mined since this tick began. A package whose parent is already in a
-            // block fails as a whole (the parent is "already known"), and there is nothing left
-            // to lift: the next tick sees the parent confirmed and stops.
+        if package && self.rpc.tx_mined(&parent_txid, 0).await? {
+            // The parent was mined since this tick began, alone or with our earlier child (which
+            // spent its output, so gettxout alone would miss it). A package whose parent is
+            // already in a block fails as a whole (the parent is "already known"), and there is
+            // nothing left to lift: the next tick sees the parent confirmed and stops.
             return Ok(());
         }
         // What the node says to the real send. An answer from the node that refuses it is a
@@ -595,6 +613,32 @@ mod tests {
         }
         assert!(!bump_on(BumpMode::On, Network::Bitcoin, dir.path()));
         assert!(!bump_on(BumpMode::Off, Network::Bitcoin, dir.path()));
+    }
+
+    /// The cap and the retry gate work urgency out from the spend, not from the planner: a
+    /// penalty is never urgent, whatever the window (the flag allows 0 to 5; this must not rely
+    /// on it).
+    #[test]
+    fn only_a_redeem_or_refund_near_its_deadline_is_urgent() {
+        for window in [0, 2, 5, 6, 7, 40] {
+            for left in [0, 1, 2, 5, 6, 7, 100] {
+                assert!(
+                    !is_urgent(Spend::Punish, left, window),
+                    "punish {left} {window}"
+                );
+                assert!(
+                    !is_urgent(Spend::Cancel, left, window),
+                    "cancel {left} {window}"
+                );
+                for spend in [Spend::Redeem, Spend::Refund] {
+                    assert_eq!(
+                        is_urgent(spend, left, window),
+                        left <= window,
+                        "{spend:?} {left} {window}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

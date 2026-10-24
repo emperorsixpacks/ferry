@@ -240,8 +240,9 @@ This is a known critique of this design, so here it is exactly:
   deadline nears. It needs no anchor and no coins besides the payout, and nobody else can attach
   anything to those transactions, because nobody else can spend the output. The child's fee is
   capped: 10% of the payout while more than two blocks are left, the payout less dust after that
-  (a penalty has no deadline and always stays at the 10%), plus a ceiling on its fee rate that
-  the node enforces too (`maxfeerate`). The call-off is not
+  (a penalty has no deadline and always stays at the 10%). The cap is applied twice: where the
+  bump is planned, and again where the child is built, from the spend and the blocks left rather
+  than from the plan. The call-off is not
   bumped, on purpose: it only delays the swap, and a call-off that could be bumped would let B
   outbid Z's claim in the race at the first deadline. `--bump off`, or a file named `bump-off` in
   the data directory, stops all bumping at once. And ferryd **refuses to start** with `--bump on`

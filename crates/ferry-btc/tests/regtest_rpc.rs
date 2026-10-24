@@ -1056,9 +1056,11 @@ async fn package_with_a_parent_that_is_already_confirmed() {
         .unwrap() as u32;
     // Not sent yet: not in a block.
     assert!(!rpc.output_confirmed(&parent_txid, vout).await.unwrap());
+    assert!(!rpc.tx_mined(&parent_txid, vout).await.unwrap());
     rpc.broadcast(&parent.tx).await.unwrap();
     // In the mempool only: gettxout without the mempool does not see it.
     assert!(!rpc.output_confirmed(&parent_txid, vout).await.unwrap());
+    assert!(!rpc.tx_mined(&parent_txid, vout).await.unwrap());
 
     let limits = ChildLimits {
         max_fee: Amount::from_sat(1_000_000),
@@ -1082,6 +1084,7 @@ async fn package_with_a_parent_that_is_already_confirmed() {
     rpc.generate_to_address(1, &miner).await.unwrap();
     assert_eq!(rpc.confirmations(&parent_txid).await.unwrap(), Some(1));
     assert!(rpc.output_confirmed(&parent_txid, vout).await.unwrap());
+    assert!(rpc.tx_mined(&parent_txid, vout).await.unwrap());
 
     // The package, now.
     let tested = rpc
@@ -1112,4 +1115,103 @@ async fn package_with_a_parent_that_is_already_confirmed() {
     assert_eq!(rpc.confirmations(&child_txid).await.unwrap(), Some(1));
     // Once the child is mined too, the output is spent: no longer an unspent confirmed output.
     assert!(!rpc.output_confirmed(&parent_txid, vout).await.unwrap());
+    // The parent is still in a block, which is what the bumper asks before it sends a package.
+    assert!(rpc.tx_mined(&parent_txid, vout).await.unwrap());
+
+    // A parent mined in the same block as our child, the case the bumper meets when the bump
+    // worked: gettxout has nothing (the output is spent), and the parent is in a block.
+    let parent = rpc
+        .fund_payment(&own, Amount::from_sat(1_500_000), 2)
+        .await
+        .unwrap();
+    let parent_txid = parent.tx.compute_txid();
+    let vout = parent
+        .tx
+        .output
+        .iter()
+        .position(|o| o.script_pubkey == own.script_pubkey())
+        .unwrap() as u32;
+    rpc.broadcast(&parent.tx).await.unwrap();
+    let child = build_child(
+        &rpc,
+        &parent.tx,
+        vout,
+        &dest,
+        Amount::from_sat(5_000),
+        coin,
+        &limits,
+    )
+    .await
+    .unwrap();
+    rpc.broadcast_capped(&child.tx, limits.max_fee_rate)
+        .await
+        .unwrap();
+    assert!(!rpc.tx_mined(&parent_txid, vout).await.unwrap());
+    rpc.generate_to_address(1, &miner).await.unwrap();
+    assert_eq!(
+        rpc.confirmations(&child.tx.compute_txid()).await.unwrap(),
+        Some(1)
+    );
+    assert!(!rpc.output_confirmed(&parent_txid, vout).await.unwrap());
+    assert!(rpc.tx_mined(&parent_txid, vout).await.unwrap());
+}
+
+/// A locked wallet refuses to sign a child with the node's own error (-13). The bumper takes
+/// that as a refusal to wait out until the next block, not as a node it could not reach.
+#[tokio::test]
+#[ignore = "needs a regtest node (spikes/btc/scripts/regtest.sh or infra/ltc/regtest.sh)"]
+async fn a_locked_wallet_refuses_to_sign_a_child() {
+    use ferry_btc::child::{build_child, ChildError, ChildLimits};
+    use ferry_btc::rpc::RpcError;
+
+    let coin = coin();
+    let suffix = BtcKey::random().xonly().to_string();
+    let rpc = BitcoinRpc::new(url(coin), "ferry", "ferry")
+        .with_wallet(format!("ferry-btc-it-sign-{}", &suffix[..8]))
+        .with_coin(coin);
+    rpc.ensure_wallet().await.expect("node up?");
+    let net = Network::Regtest;
+    let miner = rpc.new_address(net).await.unwrap();
+    rpc.generate_to_address(101, &miner).await.unwrap();
+    let own = rpc.new_address(net).await.unwrap();
+    let parent = rpc
+        .fund_payment(&own, Amount::from_sat(1_500_000), 2)
+        .await
+        .unwrap();
+    let vout = parent
+        .tx
+        .output
+        .iter()
+        .position(|o| o.script_pubkey == own.script_pubkey())
+        .unwrap() as u32;
+
+    // A second wallet made with a passphrase: encrypted, and locked from the start.
+    let name = format!("ferry-btc-it-locked-{}", &suffix[..8]);
+    let _: Value = rpc
+        .call("createwallet", json!([name, false, false, "regtest-only"]))
+        .await
+        .unwrap();
+    let locked = BitcoinRpc::new(url(coin), "ferry", "ferry")
+        .with_wallet(name)
+        .with_coin(coin);
+    let limits = ChildLimits {
+        max_fee: Amount::from_sat(1_000_000),
+        max_fee_rate: 1_000_000,
+    };
+    let dest = rpc.new_address(net).await.unwrap().script_pubkey();
+    let err = build_child(
+        &locked,
+        &parent.tx,
+        vout,
+        &dest,
+        Amount::from_sat(5_000),
+        coin,
+        &limits,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, ChildError::Rpc(RpcError::Rpc { code: -13, .. })),
+        "{err:?}"
+    );
 }

@@ -21,6 +21,8 @@ What passed
 -----------
 Sections 0 to 15 ran in one pass on commit c4ad169, the last commit of the code (the commit
 after it only adds this file); section 16 ran on the same commit. No failure in that pass.
+Section 18 (2026-10-23) ran sections 1 to 14 again after a second review's fixes, on the commit
+that adds it, each on a fresh node: no failure, and the same fees as here.
  0  unit and property tests with no node: ferry-btc 31, ferryd 117 (the bump planner has 17 unit
     tests and 6 property tests of 4000 cases: no plan lowers a fee, exceeds the cap or leaves
     dust; replacements obey the incremental fee and the higher-rate rule; urgency only
@@ -656,3 +658,296 @@ $ git diff -U0 60e478c..HEAD -- crates/ferry-btc/src/tx.rs | grep -E '^-[^-]'
 -use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 (the only removed line is an import that gained VarInt; SwapTxs::new, spend_tx and every sighash are unchanged, and
  the golden test in crates/ferry-btc/src/tx.rs pins their output)
+
+
+==================================================================
+18. 2026-10-23: sections 1 to 14 again, after the second review's fixes
+==================================================================
+A second review of c1ab771..471434f found nothing that blocks a merge and four low issues;
+three are fixed on the commit that adds this section:
+ - the guard before a package asks tx_mined (gettxout, else the parent's confirmations), so a
+   parent mined in the same block as our earlier child counts as mined (gettxout alone has
+   nothing then: the child spent the output);
+ - the fee cap and the once-per-block retry gate work urgency out from the spend (is_urgent: a
+   redeem or refund with at most --bump-urgent-blocks left, never a punish), not from the
+   planner's answer;
+ - a node's answer to building or signing the child (a locked wallet: -13) is a refusal tried
+   at the next block, not an unreachable node tried every second.
+New tests: tx_mined on a parent mined alone and one mined in the same block as its child
+(section 4), a locked wallet's -13 on Bitcoin and on Litecoin (sections 4 and 13), and
+is_urgent for windows 0 to 40 (unit). No node: ferry-btc 31, ferryd 118, bump_gate 2.
+Each section below ran on a fresh node, removed after it (script: one docker run per section,
+then cargo test; compile lines left out).
+
+
+==================================================================
+1. Bitcoin Core 28.1, default node: the building blocks
+==================================================================
+$ docker run -d --name ferry-bump-btc-a -p 127.0.0.1:28443:18443 bitcoin/bitcoin:28.1 -regtest -server -printtoconsole -rpcuser=ferry -rpcpassword=ferry -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -fallbackfee=0.0002 -txindex=1 
+ferry-bump-btc-a up on 127.0.0.1:28443
+$ env FERRY_BTC_RPC=http://127.0.0.1:28443 cargo test -p ferry-btc --test regtest_rpc child_bump_primitives -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test child_bump_primitives ... btc: floors FeeFloors { min_relay: 1000, mempool_min: 1000, incremental: 1000 }
+btc: one satoshi short of the replacement rule: [AcceptResult { txid: 808e1a9829728fef77092d96ce5647e80f5cbd6c4c088c4220da07d42b166b38, allowed: false, vsize: None, fee: None, reject_reason: Some("insufficient fee") }]
+btc: child bump primitives verified (floors FeeFloors { min_relay: 1000, mempool_min: 1000, incremental: 1000 })
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.79s
+
+exit=0
+
+==================================================================
+2. A parent below the node's STATIC minrelaytxfee cannot be rescued by a package
+==================================================================
+$ docker run -d --name ferry-bump-btc-b -p 127.0.0.1:28444:18443 bitcoin/bitcoin:28.1 -regtest -server -printtoconsole -rpcuser=ferry -rpcpassword=ferry -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -fallbackfee=0.0002 -txindex=1 -minrelaytxfee=0.0003
+ferry-bump-btc-b up on 127.0.0.1:28444
+$ env FERRY_BTC_RPC=http://127.0.0.1:28444 cargo test -p ferry-btc --test regtest_rpc package_cannot_rescue -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test package_cannot_rescue_a_parent_below_the_static_relay_fee ... parent alone: [AcceptResult { txid: e3a7c8047b42ef2833fa2d551d01cf7f37a185a18544e1aae3dd2127c1598d74, allowed: false, vsize: None, fee: None, reject_reason: Some("min relay fee not met") }]
+package: PackageResult { success: false, message: "transaction failed", errors: [(e3a7c8047b42ef2833fa2d551d01cf7f37a185a18544e1aae3dd2127c1598d74, "min relay fee not met, 2000 < 3330"), (61ae60d889837ecf159940b96e9c127b781d63c4e491280d3ad1b34aeacdc853, "bad-txns-inputs-missingorspent")], replaced: [] }
+a package does not lift a parent over the static relay fee: PackageResult { success: false, message: "transaction failed", errors: [(e3a7c8047b42ef2833fa2d551d01cf7f37a185a18544e1aae3dd2127c1598d74, "min relay fee not met, 2000 < 3330"), (61ae60d889837ecf159940b96e9c127b781d63c4e491280d3ad1b34aeacdc853, "bad-txns-inputs-missingorspent")], replaced: [] }
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.80s
+
+exit=0
+
+==================================================================
+3. A parent below the mempool's DYNAMIC floor is rescued by a package
+==================================================================
+$ docker run -d --name ferry-bump-btc-c -p 127.0.0.1:28445:18443 bitcoin/bitcoin:28.1 -regtest -server -printtoconsole -rpcuser=ferry -rpcpassword=ferry -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -fallbackfee=0.0002 -txindex=1 -maxmempool=5
+ferry-bump-btc-c up on 127.0.0.1:28445
+$ env FERRY_BTC_RPC=http://127.0.0.1:28445 cargo test -p ferry-btc --test regtest_rpc package_rescues -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test package_rescues_a_parent_below_the_mempool_floor ... btc: 32 fillers raised the floor to FeeFloors { min_relay: 1000, mempool_min: 61000, incremental: 1000 }
+btc: parent alone: [AcceptResult { txid: e37bbd5db538f267359fa89afc9795d048c46f220fc4d0bade47b25713cbbb29, allowed: false, vsize: None, fee: None, reject_reason: Some("mempool min fee not met") }]
+btc: testmempoolaccept on the package (recorded, not asserted): [AcceptResult { txid: e37bbd5db538f267359fa89afc9795d048c46f220fc4d0bade47b25713cbbb29, allowed: false, vsize: None, fee: None, reject_reason: Some("mempool min fee not met") }, AcceptResult { txid: 9c32dc886ea826f85cb3db546e9fea0f3495d2800d6b6a4bc109e9e4191321a0, allowed: false, vsize: None, fee: None, reject_reason: None }]
+btc: package: PackageResult { success: true, message: "success", errors: [], replaced: [] }
+btc: parent below the mempool floor rescued by a package, child replaced, both mined
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 9.56s
+
+exit=0
+
+==================================================================
+4. A parent mined in the meantime, alone or with its child (tx_mined), and a locked wallet (-13)
+==================================================================
+$ docker run -d --name ferry-bump-btc-a -p 127.0.0.1:28443:18443 bitcoin/bitcoin:28.1 -regtest -server -printtoconsole -rpcuser=ferry -rpcpassword=ferry -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -fallbackfee=0.0002 -txindex=1 
+ferry-bump-btc-a up on 127.0.0.1:28443
+$ env FERRY_BTC_RPC=http://127.0.0.1:28443 cargo test -p ferry-btc --test regtest_rpc package_with_a_parent_that_is_already_confirmed -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test package_with_a_parent_that_is_already_confirmed ... testmempoolaccept [confirmed parent, child]: Ok([AcceptResult { txid: 48e0932dbda5ffacf3a7dcb95fd834152e6d3455e20b159e5a63ca3ac8c3b5ce, allowed: false, vsize: None, fee: None, reject_reason: Some("txn-already-known") }, AcceptResult { txid: beca577f87fb5d97c956767bc39b69fa8a29baf185c8df4cc9c3d1404d584fbf, allowed: false, vsize: None, fee: None, reject_reason: None }])
+submitpackage [confirmed parent, child]: Ok(PackageResult { success: false, message: "transaction failed", errors: [(48e0932dbda5ffacf3a7dcb95fd834152e6d3455e20b159e5a63ca3ac8c3b5ce, "txn-already-known")], replaced: [] })
+the child is in the mempool after the package: true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.84s
+
+exit=0
+$ env FERRY_BTC_RPC=http://127.0.0.1:28443 cargo test -p ferry-btc --test regtest_rpc a_locked_wallet_refuses_to_sign_a_child -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test a_locked_wallet_refuses_to_sign_a_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 1.56s
+
+exit=0
+
+==================================================================
+5. The race at T1 against a counterparty who plays to win (R4)
+==================================================================
+$ docker run -d --name ferry-bump-btc-d -p 127.0.0.1:28446:18443 bitcoin/bitcoin:28.1 -regtest -server -printtoconsole -rpcuser=ferry -rpcpassword=ferry -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -fallbackfee=0.0002 -txindex=1 -maxmempool=5 -blockmintxfee=0.0010 -mintxfee=0.0011
+ferry-bump-btc-d up on 127.0.0.1:28446
+$ env FERRY_BTC_RPC=http://127.0.0.1:28446 cargo test -p ferry-btc --test regtest_rpc t1_race -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test t1_race_a_bumped_redeem_cannot_be_displaced_by_the_fixed_fee_cancel ... cancel before T1: rpc sendrawtransaction error -26: non-BIP68-final
+cancel against the bumped redeem: [AcceptResult { txid: 747e9bd836c8d956e67cb5aa4ed54a47dfb7d7987f72565248cc0d49ffee8c4e, allowed: false, vsize: None, fee: None, reject_reason: Some("insufficient fee") }]
+32 fillers: floors FeeFloors { min_relay: 1000, mempool_min: 151002, incremental: 1000 }
+cancel over the raised floor: [AcceptResult { txid: 747e9bd836c8d956e67cb5aa4ed54a47dfb7d7987f72565248cc0d49ffee8c4e, allowed: false, vsize: None, fee: None, reject_reason: Some("mempool min fee not met") }]
+package: PackageResult { success: true, message: "success", errors: [], replaced: [] }
+T1 race: the fixed-fee cancel never displaced the bumped redeem
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 9.38s
+
+exit=0
+
+==================================================================
+6. Two real ferryd processes, R1: stuck redeem packaged, replaced, restart, completes
+==================================================================
+$ docker run -d --name ferry-bump-btc-d -p 127.0.0.1:28446:18443 bitcoin/bitcoin:28.1 -regtest -server -printtoconsole -rpcuser=ferry -rpcpassword=ferry -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -fallbackfee=0.0002 -txindex=1 -maxmempool=5 -blockmintxfee=0.0010 -mintxfee=0.0011
+ferry-bump-btc-d up on 127.0.0.1:28446
+$ env FERRY_TEST_PORTS=28100-28199 FERRY_BTC_RPC=http://127.0.0.1:28446 cargo test -p ferryd --test two_daemons bump_stuck_redeem -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test bump_stuck_redeem_is_packaged_replaced_and_mined ... 32 fillers: floors FeeFloors { min_relay: 1000, mempool_min: 61000, incremental: 1000 }
+first bump: "Raised the fee of tx_redeem: sent it with a child as a package, because the node's mempool had dropped it, the child paying 14251 sat out of its own payout and taking the pair to 73.2 sat/vB (wanted 73.2; 12 blocks before its deadline)"
+swap_complete: Swap complete. 0.00382916 BTC is in Z's wallet: tx_redeem paid 0.00408 BTC, and the fee bump took 0.00025084 BTC
+bump: "Raised the fee of tx_redeem: sent it with a child as a package, because the node's mempool had dropped it, the child paying 14251 sat out of its own payout and taking the pair to 73.2 sat/vB (wanted 73.2; 12 blocks before its deadline)"
+bump: "Raised the fee of tx_redeem: replaced the previous child, the child paying 18313 sat out of its own payout and taking the pair to 91.5 sat/vB (wanted 91.5; 3 blocks before its deadline)"
+bump: "Raised the fee of tx_redeem: replaced the previous child, the child paying 25084 sat out of its own payout and taking the pair to 122.0 sat/vB (wanted 122.0; 1 block before its deadline)"
+Z: propose_sent,dleq_verified,cancel_sigs_sent,cancel_sig_received,btc_lock_seen,zec_lock_broadcast,redeem_adaptor_received,btc_redeem_broadcast,fee_bump,fee_bump,fee_bump,swap_complete
+B: propose_received,dleq_verified,accept_sent,lock_template_sent,refund_adaptor_verified,btc_lock_broadcast,zec_note_seen,zec_confirmed,redeem_adaptor_sent,secret_extracted,sweep_delayed,zec_sweep_broadcast,swap_complete
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 22.49s
+
+exit=0
+
+==================================================================
+7. R2: stuck refund (B) inside its window
+==================================================================
+$ docker run -d --name ferry-bump-btc-c -p 127.0.0.1:28445:18443 bitcoin/bitcoin:28.1 -regtest -server -printtoconsole -rpcuser=ferry -rpcpassword=ferry -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -fallbackfee=0.0002 -txindex=1 -maxmempool=5
+ferry-bump-btc-c up on 127.0.0.1:28445
+$ env FERRY_TEST_PORTS=28100-28199 FERRY_BTC_RPC=http://127.0.0.1:28445 cargo test -p ferryd --test two_daemons bump_stuck_refund -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test bump_stuck_refund_is_packaged_inside_its_window ... 32 fillers: floors FeeFloors { min_relay: 1000, mempool_min: 61000, incremental: 1000 }
+bump: "Raised the fee of tx_refund: sent it with a child as a package, because the node's mempool had dropped it, the child paying 17911 sat out of its own payout and taking the pair to 73.2 sat/vB (wanted 73.2; 8 blocks before its deadline)"
+Z: propose_sent,dleq_verified,cancel_sigs_sent,cancel_sig_received,btc_lock_seen,zec_lock_broadcast,fault_injected,cancel_seen,fault_cleared,secret_extracted,sweep_delayed,zec_reclaim_broadcast,reclaimed
+B: propose_received,dleq_verified,accept_sent,lock_template_sent,refund_adaptor_verified,btc_lock_broadcast,zec_note_seen,zec_confirmed,redeem_adaptor_sent,cancel_broadcast,refund_broadcast,fee_bump,refunded
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 23.13s
+
+exit=0
+
+==================================================================
+8. R2: stuck punish (Z)
+==================================================================
+$ docker run -d --name ferry-bump-btc-c -p 127.0.0.1:28445:18443 bitcoin/bitcoin:28.1 -regtest -server -printtoconsole -rpcuser=ferry -rpcpassword=ferry -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -fallbackfee=0.0002 -txindex=1 -maxmempool=5
+ferry-bump-btc-c up on 127.0.0.1:28445
+$ env FERRY_TEST_PORTS=28100-28199 FERRY_BTC_RPC=http://127.0.0.1:28445 cargo test -p ferryd --test two_daemons bump_stuck_punish -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test bump_stuck_punish_is_packaged ... 32 fillers: floors FeeFloors { min_relay: 1000, mempool_min: 61000, incremental: 1000 }
+bump: "Raised the fee of tx_punish: sent it with a child as a package, because the node's mempool had dropped it, the child paying 16154 sat out of its own payout and taking the pair to 73.2 sat/vB (wanted 73.2; 6 blocks before its deadline)"
+Z: propose_sent,dleq_verified,cancel_sigs_sent,cancel_sig_received,btc_lock_seen,zec_lock_broadcast,cancel_broadcast,punish_broadcast,fee_bump,punished
+B: propose_received,dleq_verified,accept_sent,lock_template_sent,refund_adaptor_verified,btc_lock_broadcast,fault_injected,zec_note_seen,cancel_seen,punish_seen
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 24.67s
+
+exit=0
+
+==================================================================
+9. R3 as far as built: a third-party payout is not bumped
+==================================================================
+$ docker run -d --name ferry-bump-btc-c -p 127.0.0.1:28445:18443 bitcoin/bitcoin:28.1 -regtest -server -printtoconsole -rpcuser=ferry -rpcpassword=ferry -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -fallbackfee=0.0002 -txindex=1 -maxmempool=5
+ferry-bump-btc-c up on 127.0.0.1:28445
+$ env FERRY_TEST_PORTS=28100-28199 FERRY_BTC_RPC=http://127.0.0.1:28445 cargo test -p ferryd --test two_daemons bump_leaves -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test bump_leaves_a_third_party_payout_alone ... 32 fillers: floors FeeFloors { min_relay: 1000, mempool_min: 61000, incremental: 1000 }
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 18.54s
+
+exit=0
+
+==================================================================
+10. A presigned fee below the node's static relay fee is reported, not attempted
+==================================================================
+$ docker run -d --name ferry-bump-btc-b -p 127.0.0.1:28444:18443 bitcoin/bitcoin:28.1 -regtest -server -printtoconsole -rpcuser=ferry -rpcpassword=ferry -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -fallbackfee=0.0002 -txindex=1 -minrelaytxfee=0.0003
+ferry-bump-btc-b up on 127.0.0.1:28444
+$ env FERRY_TEST_PORTS=28100-28199 FERRY_BTC_RPC=http://127.0.0.1:28444 cargo test -p ferryd --test two_daemons bump_says_so -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test bump_says_so_when_the_presigned_fee_is_below_the_static_relay_fee ... note: "tx_redeem cannot be bumped: the node does not hold it and its presigned fee is below the node's minimum relay fee, which no child can lift it over"
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 7.83s
+
+exit=0
+
+==================================================================
+11. Kill switch: --bump off (default) and the bump-off file
+==================================================================
+$ docker run -d --name ferry-bump-btc-c -p 127.0.0.1:28445:18443 bitcoin/bitcoin:28.1 -regtest -server -printtoconsole -rpcuser=ferry -rpcpassword=ferry -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -fallbackfee=0.0002 -txindex=1 -maxmempool=5
+ferry-bump-btc-c up on 127.0.0.1:28445
+$ env FERRY_TEST_PORTS=28100-28199 FERRY_BTC_RPC=http://127.0.0.1:28445 cargo test -p ferryd --test two_daemons bump_off -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test bump_off_and_the_kill_file_stop_all_bumping ... 32 fillers: floors FeeFloors { min_relay: 1000, mempool_min: 61000, incremental: 1000 }
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 25.03s
+
+exit=0
+
+==================================================================
+12. No regression: the existing swap stories (bump off by default) on a default node
+==================================================================
+$ docker run -d --name ferry-bump-btc-a -p 127.0.0.1:28443:18443 bitcoin/bitcoin:28.1 -regtest -server -printtoconsole -rpcuser=ferry -rpcpassword=ferry -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -fallbackfee=0.0002 -txindex=1 
+ferry-bump-btc-a up on 127.0.0.1:28443
+$ env FERRY_TEST_PORTS=28100-28199 FERRY_BTC_RPC=http://127.0.0.1:28443 cargo test -p ferryd --test two_daemons -- --ignored --test-threads=1 --skip bump
+
+running 13 tests
+test buy_zec_happy_swap_with_a_z_maker ... ok
+test buy_zec_punish_when_the_b_taker_stalls ... ok
+test buy_zec_refund_when_the_z_maker_stalls ... ok
+test dust_note_does_not_stop_z_locking ... ok
+test finished_swaps_settle_without_tx_descriptions ... ok
+test happy_swap_over_http_with_restart ... ok
+test punish_swap_when_b_stalls ... ok
+test refund_swap_when_z_stalls ... ok
+test route_leg_buys_zec_into_another_wallet ... ok
+test silent_taker_times_out_and_peer_input_is_bounded ... ok
+test taker_refuses_out_of_policy_terms ... ok
+test two_swaps_at_once_and_a_third_is_busy ... ok
+test withdraw_to_own_wallet ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 120.11s
+
+exit=0
+
+==================================================================
+13. Litecoin Core 0.21.5.6, default settings (replacement OFF): the building blocks, and a locked wallet
+==================================================================
+$ docker run -d --name ferry-bump-ltc -p 127.0.0.1:28447:19443 uphold/litecoin-core:0.21@sha256:46ebcaa617f66f3f35be4d7c2fe46bb07f037fd9f4482c4e1d1b044997d30b1c -regtest -server -txindex -printtoconsole -rpcuser=ferry -rpcpassword=ferry -rpcport=19443 -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -fallbackfee=0.0002 
+ferry-bump-ltc up on 127.0.0.1:28447
+$ env FERRY_CHAIN=ltc FERRY_BTC_RPC=http://127.0.0.1:28447 cargo test -p ferry-btc --test regtest_rpc child_bump_primitives -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test child_bump_primitives ... ltc: floors FeeFloors { min_relay: 1000, mempool_min: 1000, incremental: 1000 }
+ltc: one satoshi short of the replacement rule: [AcceptResult { txid: 043361eb78fdd3dc6dca5c39cb4abcfbcf33ffbddc1c1abad85665a25037f000, allowed: false, vsize: None, fee: None, reject_reason: Some("txn-mempool-conflict") }]
+ltc: this node does not replace: rpc sendrawtransaction error -26: txn-mempool-conflict
+ltc: replacement is off on this node; the rest of the replacement checks are skipped
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 1.44s
+
+exit=0
+$ env FERRY_CHAIN=ltc FERRY_BTC_RPC=http://127.0.0.1:28447 cargo test -p ferry-btc --test regtest_rpc a_locked_wallet_refuses_to_sign_a_child -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test a_locked_wallet_refuses_to_sign_a_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 3.57s
+
+exit=0
+
+==================================================================
+14. Litecoin Core 0.21.5.6 with -mempoolreplacement=1: the building blocks
+==================================================================
+$ docker run -d --name ferry-bump-ltc -p 127.0.0.1:28447:19443 uphold/litecoin-core:0.21@sha256:46ebcaa617f66f3f35be4d7c2fe46bb07f037fd9f4482c4e1d1b044997d30b1c -regtest -server -txindex -printtoconsole -rpcuser=ferry -rpcpassword=ferry -rpcport=19443 -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 -fallbackfee=0.0002 -mempoolreplacement=1
+ferry-bump-ltc up on 127.0.0.1:28447
+$ env FERRY_CHAIN=ltc FERRY_BTC_RPC=http://127.0.0.1:28447 cargo test -p ferry-btc --test regtest_rpc child_bump_primitives -- --ignored --nocapture --test-threads=1
+
+running 1 test
+test child_bump_primitives ... ltc: floors FeeFloors { min_relay: 1000, mempool_min: 1000, incremental: 1000 }
+ltc: one satoshi short of the replacement rule: [AcceptResult { txid: 13834624e3bd92c779142f697382d6e406a4d958a5df8b0198ebbd783818cbe0, allowed: false, vsize: None, fee: None, reject_reason: Some("insufficient fee") }]
+ltc: child bump primitives verified (floors FeeFloors { min_relay: 1000, mempool_min: 1000, incremental: 1000 })
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 1.51s
+
+exit=0
+
+FAILED SECTIONS: 0

@@ -940,6 +940,17 @@ impl BitcoinRpc {
         Ok(!v.is_null())
     }
 
+    /// Whether `txid` is in a block: output `vout` is an unspent output of the confirmed chain,
+    /// or the transaction has confirmations ([`Self::confirmations`]: the watch wallet, then the
+    /// node). `gettxout` alone misses a transaction whose output a block has spent too, as a
+    /// parent mined together with its child is.
+    pub async fn tx_mined(&self, txid: &Txid, vout: u32) -> Result<bool, RpcError> {
+        if self.output_confirmed(txid, vout).await? {
+            return Ok(true);
+        }
+        Ok(self.confirmations(txid).await?.is_some_and(|c| c >= 1))
+    }
+
     /// `txid` in the node's mempool (`getmempoolentry`); None if it is not there (confirmed,
     /// evicted, replaced or never seen).
     pub async fn mempool_entry(&self, txid: &Txid) -> Result<Option<MempoolEntry>, RpcError> {

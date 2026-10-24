@@ -676,8 +676,18 @@ mod tests {
         assert!(cli(&["--bump-min-interval-blocks", "0"]).is_err());
         // The urgent window is 0 to 5 blocks: a longer one would make a spend urgent from the
         // start, and a window that long is no emergency.
-        assert_eq!(cli(&["--bump-urgent-blocks", "0"]).unwrap().bump_urgent_blocks, 0);
-        assert_eq!(cli(&["--bump-urgent-blocks", "5"]).unwrap().bump_urgent_blocks, 5);
+        assert_eq!(
+            cli(&["--bump-urgent-blocks", "0"])
+                .unwrap()
+                .bump_urgent_blocks,
+            0
+        );
+        assert_eq!(
+            cli(&["--bump-urgent-blocks", "5"])
+                .unwrap()
+                .bump_urgent_blocks,
+            5
+        );
         assert!(cli(&["--bump-urgent-blocks", "6"]).is_err());
         assert!(cli(&["--bump-urgent-blocks", "-1"]).is_err());
     }
@@ -702,8 +712,18 @@ mod tests {
         for chain in ["btc", "ltc"] {
             let on = cli(&["--chain", chain, "--network", "bitcoin", "--bump", "on"]);
             let err = on.check_bump().unwrap_err();
-            assert!(err.contains("not allowed") && err.contains("mainnet"), "{err}");
-            assert!(err.contains(if chain == "btc" { "Bitcoin" } else { "Litecoin" }), "{err}");
+            assert!(
+                err.contains("not allowed") && err.contains("mainnet"),
+                "{err}"
+            );
+            assert!(
+                err.contains(if chain == "btc" {
+                    "Bitcoin"
+                } else {
+                    "Litecoin"
+                }),
+                "{err}"
+            );
             // Off is the default and is fine on mainnet.
             for extra in [
                 &["--chain", chain, "--network", "bitcoin"][..],
