@@ -26,7 +26,7 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
       },
       {
         q: "How do I make a swap?",
-        a: "To sell ZEC, enter how much, pick the coin you want, and press Sell ZEC. To buy ZEC, press the arrow between the two boxes first, then pick the coin you pay with, enter how much ZEC you want, and press Buy ZEC. Ferry finds the partner with the best rate for your amount. Then wait a few minutes. You can close the page; your Ferry node finishes the swap.",
+        a: "To sell ZEC, enter how much, pick the coin you want, and press Sell ZEC. To buy ZEC, press the arrow between the two boxes first, then pick the coin you pay with, enter how much ZEC you want, and press Buy ZEC. Ferry finds the partner with the best rate for your amount. Then wait while both chains confirm it; the card says about how long. You can close the page; your Ferry node finishes the swap.",
       },
       {
         q: "What is my Ferry node?",
@@ -93,7 +93,7 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
       {
         q: "How long does it take?",
         landing: true,
-        a: "A few minutes on the test networks. On the main networks it follows their block times: about half an hour with Bitcoin, around 15 minutes with Litecoin, under 10 with USDC or ETH. The swap's page shows its own estimate.",
+        a: "It follows the two chains' confirmations, mostly Zcash's. On the main networks: about 15 to 20 minutes with USDC or ETH on Base, 45 to 60 with Bitcoin. On the test networks: about 2 to 10 minutes on Base Sepolia, 10 to 20 with Litecoin, 20 to 40 with Bitcoin signet. The swap card shows the estimate for your network.",
       },
       {
         q: "What does it cost?",

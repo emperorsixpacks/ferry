@@ -1,7 +1,7 @@
 // node --test server/paths.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { aboutText, defaultPick, familyOf, nearToken, pickOn, resolvePath, stepWords } from "./paths.mjs";
+import { aboutText, defaultPick, familyOf, ferryMinutes, nearToken, netKind, pickOn, resolvePath, stepWords, swapNet } from "./paths.mjs";
 
 const SOL = "nep141:sol.omft.near";
 const USDT_TRON = "nep141:tron-d28a265909efecdcee7c5028585214ea0b96f015.omft.near";
@@ -23,6 +23,7 @@ const full = {
   ready: true,
   sell: ["btc"],
   buy: ["btc"],
+  nets: { btc: "main", ltc: "main", "usdc-base": "main" },
   routes: { from: ["btc", "usdc-base"], to: ["btc", "ltc", "usdc-base"] },
   near: { tokens, runs: { sell: true, buy: true }, reason: null, vias: { sell: ["btc"], buy: ["btc"] }, compose: { to: ["btc", "ltc"], from: ["btc"], runs: true } },
 };
@@ -38,7 +39,7 @@ test("ZEC and a Ferry coin: one swap, either way", () => {
   assert.equal(s.dir, "sell");
   assert.equal(s.pair, "btc");
   assert.equal(stepWords(s.steps), "Ferry");
-  assert.equal(s.time, "about 30 min");
+  assert.equal(s.time, "about 45–60 min");
   assert.match(s.privacy, /nothing on either chain links the two sides/);
   const b = resolvePath("btc", "zec", full);
   assert.equal(b.kind, "buy");
@@ -50,7 +51,45 @@ test("ZEC and a Ferry coin: one swap, either way", () => {
   assert.equal(l.available, false);
   assert.equal(l.reason, "Selling ZEC for LTC isn't available on this server.");
   assert.equal(resolvePath("ltc", "zec", full).reason, "Buying ZEC with LTC isn't available on this server.");
-  assert.equal(resolvePath("zec", "usdc-base", full).time, "about 10 min");
+  assert.equal(resolvePath("zec", "usdc-base", full).time, "about 15–20 min");
+});
+
+test("a swap's time is a range for its coin and network, and none while the network is unknown", () => {
+  const on = (nets) => ({ ...full, sell: ["btc", "ltc", "usdc-base", "weth-ethereum"], buy: ["btc", "usdc-base"], nets });
+  const time = (sell, buy, nets) => resolvePath(sell, buy, on(nets)).time;
+  // main networks: mostly 10 Zcash confirmations, and Bitcoin's own
+  assert.equal(time("zec", "usdc-base", { "usdc-base": "main" }), "about 15–20 min");
+  assert.equal(time("usdc-base", "zec", { "usdc-base": "main" }), "about 15–20 min");
+  assert.equal(time("zec", "weth-ethereum", { "weth-ethereum": "main" }), "about 25–35 min");
+  assert.equal(time("zec", "btc", { btc: "main" }), "about 45–60 min");
+  assert.equal(time("zec", "ltc", { ltc: "main" }), "about 30–45 min");
+  // test networks: Base Sepolia as measured, signet and Litecoin testnet from their block times
+  assert.equal(time("zec", "usdc-base", { "usdc-base": "test" }), "about 2–10 min");
+  assert.equal(time("zec", "btc", { btc: "test" }), "about 20–40 min");
+  assert.equal(time("zec", "ltc", { ltc: "test" }), "about 10–20 min");
+  assert.equal(time("btc", "zec", { btc: "local" }), "about 1–5 min");
+  // not known yet: no time rather than a guess
+  assert.equal(time("zec", "btc", {}), "");
+  assert.deepEqual(resolvePath("zec", "btc", on({})).minutes, [0, 0]);
+  // a mainnet range never starts below a test network's
+  for (const p of ["btc", "ltc", "usdc-base", "weth-ethereum"]) {
+    const [m, t, l] = ["main", "test", "local"].map((n) => ferryMinutes(p, n));
+    assert.ok(m[0] > t[0] && t[0] >= l[0] && m[0] <= m[1] && t[0] <= t[1], p);
+  }
+  assert.deepEqual(ferryMinutes("usdc-arbitrum"), [15, 20], "main by default");
+});
+
+test("the kind of network a daemon reports", () => {
+  for (const n of ["bitcoin", "main", "litecoin", "base", "ethereum", "arbitrum", "optimism"]) assert.equal(netKind(n), "main", n);
+  for (const n of ["signet", "testnet", "test", "testnet4", "base-sepolia", "sepolia", "evm-59144"]) assert.equal(netKind(n), "test", n);
+  for (const n of ["regtest", "anvil"]) assert.equal(netKind(n), "local", n);
+  assert.equal(netKind(undefined), null);
+  // the slower of a swap's two chains
+  assert.equal(swapNet("base", "main"), "main");
+  assert.equal(swapNet("anvil", "test"), "test");
+  assert.equal(swapNet("anvil", "regtest"), "local");
+  assert.equal(swapNet("base-sepolia", undefined), "test");
+  assert.equal(swapNet(undefined, undefined), null);
 });
 
 test("the same coin on both sides is refused plainly", () => {
@@ -75,7 +114,7 @@ test("ZEC and a NEAR Intents asset: Ferry, then NEAR Intents (or the other way)"
   assert.equal(s.button, "Sell ZEC for SOL");
   assert.equal(s.asset, SOL);
   assert.equal(stepWords(s.steps), "Ferry → BTC → NEAR Intents");
-  assert.equal(s.time, "about 35 min");
+  assert.equal(s.time, "about 50–65 min");
   assert.match(s.privacy, /never goes to NEAR Intents.*public, and you trust NEAR Intents/);
   const b = resolvePath(sol, "zec", full);
   assert.equal(b.kind, "near-buy");
