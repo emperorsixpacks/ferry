@@ -15,7 +15,9 @@
 //                           [{"name","url","pair"}] or "name|url|pair, ..." (see makers.mjs). URLs are
 //                           peer URLs as reachable from this server and from Z's daemon. GET
 //                           /api/makers lists their live offers (fetched here, cached 10 s); a swap
-//                           start names a maker by index or name, never by URL
+//                           start names a maker by index or name, never by URL. POST /api/quotes
+//                           asks them for firm quotes for an amount's bucket (quotes.mjs); a swap
+//                           start may name one ({"maker", "zec_zat", "quote": id})
 //   FERRY_Z_TOKEN / FERRY_Z_TOKEN_FILE, FERRY_B_TOKEN / FERRY_B_TOKEN_FILE
 //                                              the daemons' API tokens (<data-dir>/api-token); a file is
 //                                              re-read every 30 s, so a restarted daemon is picked up
@@ -35,6 +37,9 @@
 //   DEMO_SSE_PER_IP [8]     open /api/events streams per client IP (each holds a stream to ferryd;
 //                           one /inspect tab uses 3, an /app tab 1)
 //   DEMO_SSE_TOTAL [200]    open /api/events streams in all
+//   DEMO_QUOTES_PER_MIN [30] firm-quote requests (POST /api/quotes) per client IP per minute
+//   DEMO_QUOTES_PER_MIN_TOTAL [600] firm-quote requests per minute in all (makers hear far less:
+//                           quotes are cached per maker and bucket)
 //
 // The daemons see no browser Origin header: this server strips it after its own PUBLIC_ORIGIN
 // check, so ferryd's --ui-origin allowlist doesn't need to know the public domain.
@@ -43,6 +48,7 @@ import { createReadStream, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makerDirectory, parseMakers } from "./makers.mjs";
+import { quoteDesk, rateLimit } from "./quotes.mjs";
 import { envName, pairDaemons } from "./pairs.mjs";
 
 const env = process.env;
@@ -61,6 +67,9 @@ const SSE_PER_IP = Number(env.DEMO_SSE_PER_IP ?? 8);
 const SSE_TOTAL = Number(env.DEMO_SSE_TOTAL ?? 200);
 // a bad FERRY_MAKERS stops the server here, with the reason
 const MAKERS = makerDirectory(parseMakers(env.FERRY_MAKERS, MAKER_URL));
+const QUOTES = quoteDesk(MAKERS);
+const quotesPerIp = rateLimit(Number(env.DEMO_QUOTES_PER_MIN ?? 30));
+const quotesInAll = rateLimit(Number(env.DEMO_QUOTES_PER_MIN_TOTAL ?? 600));
 
 // ------------------------------------------------------------------------------------------------
 // daemons and their tokens
@@ -247,6 +256,16 @@ async function guard(key, path, req, res) {
       json(res, 400, { error: "Unknown maker. Pick one from the list." });
       return false;
     }
+    // a firm quote, named by id: the signed quote this server got from that maker itself
+    const quote = body?.quote == null ? null : QUOTES.find(MAKERS.makers.indexOf(maker), body.quote);
+    if (body?.quote != null && !quote) {
+      json(res, 400, { error: "That firm price has expired. Get a new one." });
+      return false;
+    }
+    if (quote && (zat < quote.min_zat || zat > quote.max_zat)) {
+      json(res, 400, { error: "The amount is outside that firm price's range. Get a new one." });
+      return false;
+    }
     // the maker (B) finishes a moment after Z, and refuses a new swap until it has; another pair's
     // maker isn't behind this server, so only its Z is asked
     let lists;
@@ -272,6 +291,7 @@ async function guard(key, path, req, res) {
     }
     const at = Date.now();
     recentAll.push(at);
+    if (quote) QUOTES.take(quote);
     // a start the daemon refuses gives both slots back
     req.ferryRefused = () => {
       const i = recentAll.indexOf(at);
@@ -279,6 +299,8 @@ async function guard(key, path, req, res) {
       const mine = rates.get(clientIp(req));
       if (mine?.length) mine.pop();
     };
+    // the signed quote is forwarded as the maker sent it (its integers exact)
+    if (quote) return `{"maker":${JSON.stringify(maker.url)},"zec_zat":${zat},"quote":${quote.json}}`;
     return JSON.stringify({ maker: maker.url, zec_zat: zat });
   }
 
@@ -453,6 +475,32 @@ async function serveMakers(req, res) {
 }
 
 // ------------------------------------------------------------------------------------------------
+// firm quotes: POST /api/quotes {pair, direction, zec_zat}. The amount is rounded up to a bucket
+// before anything leaves this server, and is never logged (quotes.mjs). The demo's own limit applies
+// to the amount and to each quote's range.
+
+async function serveQuotes(req, res) {
+  if (req.method !== "POST") return json(res, 405, { error: "Method not allowed" });
+  if (PUBLIC_ORIGIN && req.headers.origin && req.headers.origin !== PUBLIC_ORIGIN) return deny(res, "This origin may not use the Ferry demo");
+  let body;
+  try {
+    body = JSON.parse(await readBody(req, 1024));
+  } catch {
+    return json(res, 400, { error: 'Send a JSON body like {"pair": "btc", "direction": "sell", "zec_zat": 10000000}' });
+  }
+  const zat = Number(body?.zec_zat);
+  if (Number.isSafeInteger(zat) && zat > DEMO_MAX_ZAT) return json(res, 400, { error: `The public demo is limited to ${zec(DEMO_MAX_ZAT)} ZEC per swap` });
+  const wait = quotesPerIp(clientIp(req)) || quotesInAll("all");
+  if (wait) return json(res, 429, { error: "Too many price requests. Try again in a minute." }, { "retry-after": String(wait) });
+  const r = await QUOTES.request(body);
+  for (const q of r.body.quotes ?? []) {
+    q.max_zat = Math.min(q.max_zat, DEMO_MAX_ZAT);
+    if (DEMO_MIN_ZAT) q.min_zat = Math.max(q.min_zat, DEMO_MIN_ZAT);
+  }
+  json(res, r.status, r.body);
+}
+
+// ------------------------------------------------------------------------------------------------
 // static files
 
 const TYPES = {
@@ -512,6 +560,13 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === "/healthz") return json(res, 200, { ok: true });
   if (url.pathname === "/api/pairs") return json(res, 200, { pairs: PAIRS.map((p) => p.id) });
+  if (url.pathname === "/api/quotes") {
+    serveQuotes(req, res).catch((e) => {
+      console.error("ferry-ui quotes:", e?.message ?? "failed");
+      if (!res.headersSent) json(res, 500, { error: "Internal error" });
+    });
+    return;
+  }
   if (url.pathname === "/api/makers") {
     serveMakers(req, res).catch((e) => {
       console.error("ferry-ui makers:", e);

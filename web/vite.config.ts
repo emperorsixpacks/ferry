@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 import { makerDirectory, parseMakers } from "./server/makers.mjs";
+import { quoteDesk } from "./server/quotes.mjs";
 import { envName, pairDaemons } from "./server/pairs.mjs";
 
 // The UI talks to two ferryd daemons. In dev and preview they are proxied under /daemon/z and
@@ -46,9 +47,11 @@ const proxy = Object.fromEntries(Object.entries(TARGETS).map(([key, url]) => [`^
 // The maker directory, as server/prod.mjs serves it: FERRY_MAKERS (or the one maker at
 // FERRY_MAKER_URL), GET /api/makers, and swap starts that name a maker are rewritten to its
 // allowlisted URL here, so the browser never sends one. The maker URL is handed to the daemon,
-// so it must be reachable from the daemon, not from the browser.
+// so it must be reachable from the daemon, not from the browser. POST /api/quotes asks the makers
+// for firm quotes (server/quotes.mjs), and a swap start may name one by id.
 function makers(): Plugin {
   const dir = makerDirectory(parseMakers(process.env.FERRY_MAKERS, process.env.FERRY_MAKER_URL ?? B_URL));
+  const desk = quoteDesk(dir);
   const send = (res: Parameters<Connect.NextHandleFunction>[1], code: number, body: unknown) => {
     res.statusCode = code;
     res.setHeader("content-type", "application/json");
@@ -65,12 +68,29 @@ function makers(): Plugin {
       );
       return;
     }
+    if (url === "/api/quotes" && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        let body: unknown;
+        try {
+          body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+        } catch {
+          return send(res, 400, { error: 'Send a JSON body like {"pair": "btc", "direction": "sell", "zec_zat": 10000000}' });
+        }
+        desk.request(body).then(
+          (r) => send(res, r.status, r.body),
+          () => send(res, 500, { error: "quotes failed" }),
+        );
+      });
+      return;
+    }
     const m = url?.match(/^\/daemon\/([a-z-]+)\/api\/swaps$/);
     if (!m || !TARGETS[m[1]] || req.method !== "POST") return next();
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", async () => {
-      let body: { maker?: unknown; zec_zat?: unknown };
+      let body: { maker?: unknown; zec_zat?: unknown; quote?: unknown };
       try {
         body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
       } catch {
@@ -78,6 +98,10 @@ function makers(): Plugin {
       }
       const maker = dir.resolve(body.maker);
       if (!maker) return send(res, 400, { error: "Unknown maker. Pick one from the list." });
+      // a firm quote, named by id: the signed quote this server got from that maker itself
+      const quote = body.quote == null ? null : desk.find(dir.makers.indexOf(maker), body.quote);
+      if (body.quote != null && !quote) return send(res, 400, { error: "That firm price has expired. Get a new one." });
+      if (quote) desk.take(quote);
       const headers: Record<string, string> = { "content-type": "application/json" };
       const token = TOKENS[m[1]];
       if (token) headers.authorization = `Bearer ${token}`;
@@ -86,7 +110,9 @@ function makers(): Plugin {
         const up = await fetch(TARGETS[m[1]] + "/api/swaps", {
           method: "POST",
           headers,
-          body: JSON.stringify({ maker: maker.url, zec_zat: body.zec_zat }),
+          body: quote
+            ? `{"maker":${JSON.stringify(maker.url)},"zec_zat":${JSON.stringify(body.zec_zat)},"quote":${quote.json}}`
+            : JSON.stringify({ maker: maker.url, zec_zat: body.zec_zat }),
           signal: AbortSignal.timeout(30_000),
         });
         res.statusCode = up.status;

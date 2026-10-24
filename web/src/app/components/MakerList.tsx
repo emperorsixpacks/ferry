@@ -4,6 +4,7 @@ import { coin, zec } from "@/format";
 import { btcText } from "@/swap/shared";
 import { cn } from "../lib/utils";
 import { ago, capacity, fits, quoteOf, selectable, swappable } from "../lib/makers";
+import { secondsLeft, type FirmQuote } from "../lib/quotes";
 import { arrowKeys } from "./ui/sheet";
 
 // The swap partners this server lists for the coin on screen, in the swap settings: "Best rate"
@@ -20,6 +21,7 @@ export function PartnerList({
   fetchedAt,
   now,
   error,
+  firm = [],
 }: {
   makers: Maker[] | null | undefined;
   role: Role;
@@ -33,6 +35,8 @@ export function PartnerList({
   fetchedAt: number;
   now: number;
   error: string | null;
+  // firm prices for the amount (lib/quotes), shown in place of a partner's indicative rate
+  firm?: FirmQuote[];
 }) {
   const mine = (makers ?? []).filter(swappable);
   if (makers === undefined) return <p className="px-5 py-6 text-sm text-slate-500">Looking for partners…</p>;
@@ -43,19 +47,22 @@ export function PartnerList({
       {mine.length === 0 ? (
         <p className="px-3 py-4 text-sm text-slate-500">No partners swap ZEC for {coin().ticker} on this server yet.</p>
       ) : (
-        mine.map((m) => <PartnerRow key={m.name} m={m} role={role} zat={zat} active={m.name === pick} onPick={onPick} age={m.rate_age_s != null ? m.rate_age_s + (now - fetchedAt) / 1000 : null} />)
+        mine.map((m) => (
+          <PartnerRow key={m.name} m={m} role={role} zat={zat} active={m.name === pick} onPick={onPick} age={m.rate_age_s != null ? m.rate_age_s + (now - fetchedAt) / 1000 : null} firm={firm.find((q) => q.maker === m.name)} now={now} />
+        ))
       )}
       {error ? <p className="px-3 text-xs text-rose-700">{error}</p> : null}
     </div>
   );
 }
 
-function PartnerRow({ m, role, zat, active, onPick, age }: { m: Maker; role: Role; zat: number; active: boolean; onPick: (name: string) => void; age: number | null }) {
+function PartnerRow({ m, role, zat, active, onPick, age, firm, now }: { m: Maker; role: Role; zat: number; active: boolean; onPick: (name: string) => void; age: number | null; firm?: FirmQuote; now: number }) {
   const q = quoteOf(m);
   const takes = selectable(m, role);
   const fitsAmount = !q || zat <= 0 || fits(q, zat);
   const can = takes && fitsAmount;
-  const rate = m.rate_sat_per_zec == null ? null : `${btcText(m.rate_sat_per_zec)} ${coin().ticker}`;
+  const shown = firm && can ? firm.rate_sat_per_zec : m.rate_sat_per_zec;
+  const rate = shown == null ? null : `${btcText(shown)} ${coin().ticker}`;
   const fixed = m.rate_source === "fixed" || (m.online && m.rate_updated_at == null);
   let meta: string;
   if (!m.online) meta = "Offline";
@@ -64,6 +71,8 @@ function PartnerRow({ m, role, zat, active, onPick, age }: { m: Maker; role: Rol
   else if (!takes) meta = "Swaps the same side as you";
   else if (q && !fitsAmount) meta = zat < q.min ? `Takes at least ${zec(q.min)} ZEC` : `Takes up to ${zec(capacity(q))} ZEC right now`;
   else meta = q ? `Takes ${zec(q.min)}–${zec(capacity(q))} ZEC` : "Taking swaps";
+  // a firm price covers the amount on screen: its countdown says more than the partner's range
+  if (firm && can) meta = `Firm price for ${secondsLeft(firm, now)} s`;
   return <Option active={active} can={can} onClick={() => can && onPick(m.name)} title={m.name} rate={rate} meta={meta} dot={m.online && !m.paused ? "bg-emerald-500" : "bg-slate-300"} />;
 }
 

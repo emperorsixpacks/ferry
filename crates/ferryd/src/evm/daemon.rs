@@ -64,6 +64,8 @@ pub struct EvmDaemon<L> {
     pub price: Option<Arc<crate::pricefeed::LiveRate>>,
     /// Each open swap's FerryLock events from earlier polls (memory only; a restart rescans).
     logs: std::sync::Mutex<HashMap<String, LogCache>>,
+    /// Our firm quotes, when making offers (crate::quote).
+    pub quotes: Option<crate::quote::QuoteBook>,
 }
 
 /// A swap's events in the blocks before `next`.
@@ -213,6 +215,12 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             rate_updated_at: None,
             liquidity: None,
             paused: false,
+            quote_key: None,
+        };
+        let quotes = crate::quote::maker_book(&cli)?;
+        let offer = EvmOffer {
+            quote_key: quotes.as_ref().map(|q| q.public_key()),
+            ..offer
         };
         let store = EvmStore::open(&cli.data_dir)?;
         let token_file = cli.data_dir.join("api-token");
@@ -253,6 +261,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             policy,
             proposals: std::sync::Mutex::new(VecDeque::new()),
             logs: std::sync::Mutex::new(HashMap::new()),
+            quotes,
             cli,
         };
         if daemon.offer.making {
@@ -454,8 +463,13 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
 
     // ------------------------------------------------------------------ negotiation
 
-    /// Taker: propose a swap to `maker`.
-    pub async fn create_swap(&self, maker: String, zec_zat: u64) -> Result<String, ApiError> {
+    /// Taker: propose a swap to `maker`, at its offer's rate or at a firm quote it signed.
+    pub async fn create_swap(
+        &self,
+        maker: String,
+        zec_zat: u64,
+        quote: Option<crate::quote::SignedQuote>,
+    ) -> Result<String, ApiError> {
         let maker = maker.trim_end_matches('/').to_string();
         if maker.is_empty() {
             return Err(ApiError(400, "maker URL is required".into()));
@@ -504,6 +518,14 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 zec_str(offer.max_zat)
             ));
         }
+        // Firm quote (crate::quote): signed by this maker's key, for its market, our side and this
+        // amount; its rate replaces the offer's.
+        let mut offer = offer;
+        if let Some(q) = &quote {
+            offer.rate_sat_per_zec =
+                crate::quote::check_for_taker(q, &offer.quote_ref(), self.role, zec_zat)
+                    .map_err(|e| ApiError(400, e.to_string()))?;
+        }
         // Token amounts are u64 base units: refuse a swap above that cap rather than wrap it.
         let Some(token_amount) = offer.token_for(zec_zat) else {
             return bad(format!(
@@ -551,6 +573,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             .json(&EvmProposeRequest {
                 envelope: propose,
                 taker_url: self.cli.public_url(),
+                quote_id: quote.map(|q| q.quote.quote_id),
             })
             .send()
             .await
@@ -760,11 +783,22 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         if !self.offer.terms.same_shape(params) {
             return bad("timing terms differ from the offer");
         }
-        if params.zec_amount < self.offer.min_zat || params.zec_amount > self.offer.max_zat {
-            return bad("amount outside the offer's range");
-        }
-        if !self.rate_matches(params.zec_amount, params.token_amount) {
-            return bad("token amount does not match the offer's rate");
+        // Firm quote (crate::quote): a proposal naming one is held to the quote's rate and range
+        // instead of the offer's, and takes it (one quote, one swap; given back if this fails).
+        let quote = self.claim_quote(
+            req.quote_id.as_deref(),
+            &id,
+            setup.role,
+            params.zec_amount,
+            params.token_amount,
+        )?;
+        if quote.is_none() {
+            if params.zec_amount < self.offer.min_zat || params.zec_amount > self.offer.max_zat {
+                return bad("amount outside the offer's range");
+            }
+            if !self.rate_matches(params.zec_amount, params.token_amount) {
+                return bad("token amount does not match the offer's rate");
+            }
         }
         let (head, now) = self
             .client
@@ -821,6 +855,9 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         self.save(&rec);
         st.swaps.insert(id, rec);
         self.publish(&mut st);
+        if let Some(q) = quote {
+            q.commit();
+        }
         Ok(reply)
     }
 

@@ -743,6 +743,7 @@ mod tests {
             rate_updated_at: None,
             liquidity: None,
             paused: false,
+            quote_key: None,
         }
     }
 

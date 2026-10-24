@@ -15,6 +15,7 @@ import { useLocal } from "../lib/daemon";
 import { capacity, counterFor, liveQuote, quoteOf, useMakers, type Makers, type Quote } from "../lib/makers";
 import { pairName } from "../lib/pairs";
 import { plainSummary } from "../lib/progress";
+import { secondsLeft, useQuotes, withFirm } from "../lib/quotes";
 
 // /app: one swap card. Sell (shielded ZEC) on top, Buy (the coin picked from "Select a token")
 // below, the rate from the best partner, and one Swap button. The partner and the details are
@@ -75,7 +76,9 @@ function SwapCard({ status, busySwap }: { status: Status | null; busySwap?: Swap
 
   const zat = Math.round(Number(amount) * 1e8);
   const valid = amount.trim() !== "" && Number.isFinite(zat) && zat > 0;
-  const { maker, quote, usable, skipped } = liveQuote(makers, status, role, valid ? zat : 0, pick);
+  // a firm price (lib/quotes) when a partner gives one, else the partners' indicative rates
+  const quotes = useQuotes(pair, role, valid ? zat : 0);
+  const { maker, quote, usable, skipped, firm } = withFirm(liveQuote(makers, status, role, valid ? zat : 0, pick), quotes.list, makers.list, pick);
 
   // a host can cap swaps below the default amount (the public demo does): start at the cap
   const cap = makers.list === null ? quote?.max : usable.length ? Math.max(...usable.map((m) => (quoteOf(m) ? capacity(quoteOf(m)!) : 0))) : undefined;
@@ -112,10 +115,12 @@ function SwapCard({ status, busySwap }: { status: Status | null; busySwap?: Swap
     setBusy(true);
     setFail(null);
     try {
-      const { id } = await startSwap(zat, daemon, maker?.name);
+      const { id } = await startSwap(zat, daemon, maker?.name, firm?.quote_id);
       navigate(`/app/swap/${id}`);
     } catch (e) {
-      setFail(plainError((e as Error).message));
+      const msg = (e as Error).message;
+      if (/firm (quote|price)/i.test(msg)) quotes.refresh();
+      setFail(plainError(msg));
     } finally {
       setBusy(false);
     }
@@ -217,7 +222,7 @@ function SwapCard({ status, busySwap }: { status: Status | null; busySwap?: Swap
           </button>
           <Sheet anchored open={settings} onClose={() => setSettings(false)} title="Swap settings">
             <Section title="Swap partner" note="Each partner sets its own rate. None of them can take your coins.">
-              <PartnerList makers={makers.list} role={role} zat={valid ? zat : 0} pick={pick} current={maker?.name ?? null} onPick={setPick} fetchedAt={makers.fetchedAt} now={makers.now} error={makers.error} />
+              <PartnerList makers={makers.list} role={role} zat={valid ? zat : 0} pick={pick} current={maker?.name ?? null} onPick={setPick} fetchedAt={makers.fetchedAt} now={makers.now} error={makers.error} firm={quotes.list} />
             </Section>
             <Section title="Details" last>
               <dl className="space-y-3 px-5 text-sm">
@@ -253,6 +258,7 @@ function SwapCard({ status, busySwap }: { status: Status | null; busySwap?: Swap
               <span className="text-slate-700 tabular-nums">
                 1 ZEC = {btcText(quote.rate)} {ticker}
               </span>
+              {firm ? <span className="tabular-nums"> · firm for {secondsLeft(firm, quotes.now)} s</span> : null}
               {maker ? ` · from ${maker.name}` : null}
             </p>
           ) : makers.list === undefined ? (
@@ -334,6 +340,7 @@ function plainError(raw: string): string {
   if (/reach the daemon|unreachable|connection refused|timed? ?out/i.test(raw)) return "Couldn't reach your partner or your Ferry node. Try again in a moment.";
   if (/not making offers|paused/i.test(raw)) return "That partner just stopped taking swaps. Try again, or pick another one in settings.";
   if (/unknown maker/i.test(raw)) return "That partner isn't listed here any more. Pick another one in settings.";
+  if (/firm (quote|price)/i.test(raw)) return "That firm price ran out before the swap started. Press Swap again for a fresh one.";
   if (/does not have enough shielded/i.test(raw)) return "You don't have enough shielded ZEC for this amount.";
   if (/does not have enough|not enough liquidity|liquidity/i.test(raw)) return "Your partner can't cover this amount right now. Try a smaller one.";
   return raw.replace(/\bdaemon\b/gi, "Ferry node").replace(/\bmaker\b/gi, "partner");
