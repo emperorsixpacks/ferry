@@ -19,7 +19,46 @@
   --serif: "Inter Variable", "Inter", system-ui, sans-serif;
   --sans: "Inter Variable", "Inter", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, monospace;
+  /* the SealPad parts below */
+  --card: #fff;
+  --card-ring: rgba(24, 24, 24, 0.1);
+  --btn: #18181b;
+  --btn-hover: #27272a;
+  --btn-off: #d1d1d1;
+  --btn-off-ink: #fff;
+  --hairline: #e5e7eb;
+  --hairline-strong: #a1a1aa;
+  --shore: #181818;
+  --shore-ink: #ffffff;
   color-scheme: light;
+}
+
+/* dark mode (the `dark` class on <html>, index.css): the same parts on the app's dark canvas */
+.dark .insp {
+  --ink: #f2f2f4;
+  --ink-2: #9fa2aa;
+  --ink-3: #8a8d96;
+  --rule: #2c2e34;
+  --paper: #16171b;
+  --water: #1a1b20;
+  --land: #212328;
+  --land-edge: #3c3f46;
+  --magenta: #959dd6;
+  --magenta-wash: #1d1f2b;
+  --abort: #f87171;
+  --abort-wash: #2b1519;
+  --on-ink: #16171b;
+  --card: #16171b;
+  --card-ring: rgba(255, 255, 255, 0.09);
+  --btn: #f2f2f4;
+  --btn-hover: #e0e1e4;
+  --btn-off: #2c2e34;
+  --btn-off-ink: #8a8d96;
+  --hairline: #2c2e34;
+  --hairline-strong: #5f626b;
+  --shore: #e0e1e4;
+  --shore-ink: #16171b;
+  color-scheme: dark;
 }
 
 /* headings: SealPad's bold, tight Inter instead of the old italic serif */
@@ -82,15 +121,15 @@
 .insp .party,
 .insp .crossing,
 .insp .observer {
-  background: #fff;
-  box-shadow: 0 0 0 1px rgba(24, 24, 24, 0.1);
+  background: var(--card);
+  box-shadow: 0 0 0 1px var(--card-ring);
   border: 0;
   padding: 20px;
 }
 
 .insp .controls {
-  background: #fff;
-  box-shadow: 0 0 0 1px rgba(24, 24, 24, 0.1);
+  background: var(--card);
+  box-shadow: 0 0 0 1px var(--card-ring);
   border: 0;
   padding: 18px 20px;
   margin-bottom: 24px;
@@ -111,33 +150,33 @@
 }
 
 .insp .btn-primary {
-  background: #18181b;
-  color: #fff;
+  background: var(--btn);
+  color: var(--on-ink);
 }
 
 .insp .btn-primary:hover:not(:disabled) {
-  background: #27272a;
+  background: var(--btn-hover);
 }
 
 .insp .btn-primary:disabled {
-  background: #d1d1d1;
-  color: #fff;
+  background: var(--btn-off);
+  color: var(--btn-off-ink);
 }
 
 .insp .btn-fault {
-  color: #181818;
-  border-color: #e5e7eb;
+  color: var(--ink);
+  border-color: var(--hairline);
 }
 
 .insp .btn-fault:hover:not(:disabled) {
-  border-color: #a1a1aa;
-  color: #18181b;
-  background: #f4f5fa;
+  border-color: var(--hairline-strong);
+  color: var(--btn);
+  background: var(--magenta-wash);
 }
 
 .insp .input-wrap {
   border-radius: 0.69px;
-  border-color: #e5e7eb;
+  border-color: var(--hairline);
 }
 
 .insp .badge {
@@ -149,8 +188,8 @@
 
 /* the chart: a hairline frame instead of the graduated neatline; Zcash as the obsidian shore */
 .insp .chart {
-  background: #fff;
-  border: 1px solid #e5e7eb;
+  background: var(--card);
+  border: 1px solid var(--hairline);
   padding: 0;
 }
 
@@ -159,17 +198,17 @@
 }
 
 .insp .chart .land-zec {
-  fill: #181818;
-  stroke: #181818;
+  fill: var(--shore);
+  stroke: var(--shore);
 }
 
 .insp .chart .shore-zec .chart-label-title,
 .insp .chart .shore-zec .chart-label-sub {
-  fill: #ffffff !important;
+  fill: var(--shore-ink) !important;
 }
 
 .insp .chart .shore-zec .chart-label-land {
-  stroke: #181818;
+  stroke: var(--shore);
 }
 
 .insp .token-hull {
@@ -182,6 +221,6 @@
 }
 
 .insp .magic {
-  border-left-color: #5f69a8;
-  background: #f4f5fa;
+  border-left-color: var(--magenta);
+  background: var(--magenta-wash);
 }
