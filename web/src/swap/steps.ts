@@ -37,7 +37,7 @@ export function phaseOf(v: SwapView): Phase {
   if (v.outcome === "swapped") return "done";
   if (v.outcome === "refunded") return "refunded";
   if (v.outcome === "punished") return v.role === "Z" ? "settled" : "lost";
-  if (find(v, "cancel_broadcast", "cancel_seen", "zec_lock_refused") || ["Cancelled", "ZecReclaiming", "ZecLockRefused"].includes(v.state)) return "unwinding";
+  if (find(v, "cancel_broadcast", "cancel_seen", "zec_lock_refused", "zec_lock_lapsed") || ["Cancelled", "ZecReclaiming", "ZecLockRefused"].includes(v.state)) return "unwinding";
   return "progress";
 }
 

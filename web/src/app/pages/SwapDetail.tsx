@@ -177,7 +177,8 @@ function Outcome({ swap, status }: { swap: SwapView; status: Status | null }) {
   const phase = phaseOf(swap);
   const a = amounts(swap, status);
   const z = swap.role === "Z";
-  const lockedMine = swap.timeline.some((e) => e.kind === (z ? "zec_lock_broadcast" : "btc_lock_broadcast"));
+  const lapsed = swap.timeline.some((e) => e.kind === "zec_lock_lapsed");
+  const lockedMine = !lapsed && swap.timeline.some((e) => e.kind === (z ? "zec_lock_broadcast" : "btc_lock_broadcast"));
   const copy = {
     done: { icon: <CheckCircle size={28} weight="duotone" className="mx-auto text-brand-500" />, title: z ? `You received ${a.btc}` : `You received ${a.zec}`, note: z ? `${a.zec} left your shielded wallet.` : `It's in your shielded wallet. You paid ${a.btc}.` },
     settled: {
@@ -190,7 +191,9 @@ function Outcome({ swap, status }: { swap: SwapView; status: Status | null }) {
       title: lockedMine ? `Your ${z ? a.zec : a.btc} is back in your wallet` : "Nothing left your wallet",
       note: swap.timeline.some((e) => e.kind === "zec_lock_refused")
         ? "Your wallet couldn't send the ZEC from shielded notes only, so the swap was called off before any ZEC moved."
-        : "The swap didn't complete, so it was undone. Nothing changed hands.",
+        : lapsed
+          ? "Your ZEC payment never reached the chain and has expired, so no ZEC moved. The swap was called off."
+          : "The swap didn't complete, so it was undone. Nothing changed hands.",
     },
     lost: {
       icon: <Warning size={28} weight="duotone" className="mx-auto text-rose-600" />,
