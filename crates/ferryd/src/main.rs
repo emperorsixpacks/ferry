@@ -20,8 +20,20 @@ use ferry_core::ZecLeg;
 use crate::config::{Cli, ZecBackend};
 use crate::daemon::Daemon;
 
+/// Files are created owner-only (umask 077): swap records, keys and tokens already are, and this
+/// covers the rest, above all what child processes write (zcash-devtool's wallet folder and its
+/// age identity, which it would otherwise leave readable by other users). Returns the old mask.
+#[cfg(unix)]
+fn owner_only_files() -> u32 {
+    // SAFETY: umask(2) only sets the process's file mode creation mask; it cannot fail.
+    u32::from(unsafe { libc::umask(0o077) })
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // First, before anything writes a file: the mask is the process's, inherited by children.
+    #[cfg(unix)]
+    owner_only_files();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
