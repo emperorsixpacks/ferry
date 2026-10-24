@@ -134,6 +134,10 @@ pub struct Cli {
     /// Our mock shielded balance the first time the mock chain sees us (zatoshi).
     #[arg(long, default_value_t = 0)]
     pub zec_mock_balance: u64,
+    /// Testing: whether the mock Zcash chain describes its transactions to a chain observer,
+    /// like a devtool wallet with a node RPC (true), or not, like one without (false).
+    #[arg(long, hide = true, default_value_t = true, action = clap::ArgAction::Set)]
+    pub zec_mock_describe: bool,
 
     /// zcash-devtool binary (built with `--features regtest_support` for regtest).
     #[arg(long, default_value = "zcash-devtool")]

@@ -1087,6 +1087,49 @@ async fn two_swaps_at_once_and_a_third_is_busy() {
     w.start_swap(100_000_000).await;
 }
 
+/// A finished swap settles (the tick stops looking at it) even when the Zcash backend can't
+/// describe transactions, as a devtool wallet without a node RPC can't (the deploy, the node
+/// installer): it never waits for a sweep line that never comes. Z runs such a mock; B's can.
+#[tokio::test]
+#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+async fn finished_swaps_settle_without_tx_descriptions() {
+    let w = World::start_full(2, Role::B, &[], &["--zec-mock-describe", "false"]).await;
+    let id = w.start_swap(100_000_000).await;
+    let (z, _) = w
+        .run_until(&id, 700, 40, |z, b| {
+            z["outcome"] == "swapped" && b["outcome"] == "swapped"
+        })
+        .await;
+    assert!(
+        z["observer"]["zec"].as_array().unwrap().is_empty(),
+        "Z can't describe ZEC transactions: {}",
+        z["observer"]
+    );
+    // Both settle: Z without B's sweep line, B once it has described its own sweep. Blocks keep
+    // coming meanwhile, so the timeline heights fill in.
+    let settled = |p: &Party| {
+        std::fs::read_to_string(&p.log)
+            .unwrap_or_default()
+            .lines()
+            .any(|l| l.contains("settled") && l.contains(&id))
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !(settled(&w.z) && settled(&w.b)) {
+        assert!(
+            Instant::now() < deadline,
+            "not settled: Z {} B {}\nZ:\n{}",
+            settled(&w.z),
+            settled(&w.b),
+            w.z.logs()
+        );
+        w.mine().await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    // Settled swaps still answer, from what was last published.
+    let v = w.swap(&w.z.url, &id).await;
+    assert_eq!(v["outcome"], "swapped", "{v}");
+}
+
 /// A 1-zat note at the joint address before Z locks must not make Z skip its own ZEC lock.
 #[tokio::test]
 #[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]

@@ -1,6 +1,6 @@
 //! One party's swaps: negotiation, the peer exchange, the chain driver and narration.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -54,8 +54,10 @@ pub struct SseEvent {
 #[derive(Default)]
 pub struct State {
     pub swaps: BTreeMap<String, SwapRecord>,
-    pub status: Option<StatusView>,
     published: HashMap<String, String>,
+    /// Settled swaps already published in their final form: the tick and `publish` skip them
+    /// (a request that touches one takes it out again).
+    quiet: HashSet<String>,
 }
 
 pub struct Daemon<L> {
@@ -85,6 +87,8 @@ pub struct Daemon<L> {
     pub withdrawals: crate::withdraw::Withdrawals,
     /// `--max-swaps`, or the network's default (crate::capacity).
     pub max_swaps: u32,
+    /// What the read endpoints serve without waiting for a round (crate::reads).
+    pub reads: crate::reads::Reads<StatusView>,
     /// Set by the tick for its second pass only: slow work (funding a lock, a ZEC lock or
     /// sweep) runs then, after every swap's deadline actions ([`Self::tick`]).
     slow_ok: AtomicBool,
@@ -239,7 +243,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         let mut state = State::default();
         for rec in store.load_all()? {
             tracing::info!(id = %rec.id, state = %rec.state(), "resuming swap");
-            if !rec.settled() {
+            if !rec.settled(leg.describes_txs(), now_ms()) {
                 watch_swap(&rpc, &rec).await?;
             }
             state.swaps.insert(rec.id.clone(), rec);
@@ -255,6 +259,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             max_swaps,
             slow_ok: AtomicBool::new(false),
             zec_paused: AtomicBool::new(false),
+            reads: Default::default(),
             withdrawals,
             role: cli.role.into(),
             offer: Offer {
@@ -282,8 +287,9 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         // restarts), and every other locked coin goes back, from a swap aborted before its lock
         // went out, or a funding interrupted before it was recorded.
         {
-            let st = daemon.state.lock().await;
+            let mut st = daemon.state.lock().await;
             daemon.reconcile_coins(&st).await;
+            daemon.publish(&mut st);
         }
         tracing::info!(max_swaps, "runs up to {max_swaps} swaps at once");
         Ok(daemon)
@@ -353,10 +359,9 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     async fn refresh_status(&self) {
         match self.status_view().await {
             Ok(status) => {
-                let mut st = self.state.lock().await;
-                if st.status.as_ref() != Some(&status) {
+                if self.reads.status().as_ref() != Some(&status) {
                     let data = serde_json::to_string(&status).expect("status serializes");
-                    st.status = Some(status);
+                    self.reads.set_status(status);
                     let _ = self.events.send(SseEvent {
                         event: "status",
                         data,
@@ -368,17 +373,31 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     }
 
     /// Push `event: swap` for every swap whose view changed.
+    /// Push `event: swap` for every swap whose view changed, and keep the views the read
+    /// endpoints serve (crate::reads). A settled swap no longer changes: once published in its
+    /// final form it goes quiet and isn't serialized again every round.
     fn publish(&self, st: &mut State) {
+        let (describes, now) = (self.leg.describes_txs(), now_ms());
         for rec in st.swaps.values() {
+            if st.quiet.contains(&rec.id) {
+                continue;
+            }
             let data = serde_json::to_string(&view::swap_view(rec)).expect("view serializes");
             if st.published.get(&rec.id) != Some(&data) {
                 st.published.insert(rec.id.clone(), data.clone());
+                self.reads.set_swap(&rec.id, data.clone());
                 let _ = self.events.send(SseEvent {
                     event: "swap",
                     data,
                 });
             }
+            if rec.settled(describes, now) {
+                st.quiet.insert(rec.id.clone());
+                tracing::debug!(id = %rec.id, "settled: the swap is over and no longer watched");
+            }
         }
+        self.reads
+            .set_free_slots(crate::capacity::free_slots(self.max_swaps, self.count(st)));
     }
 
     // ------------------------------------------------------------------ negotiation
@@ -1198,6 +1217,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             }
         }
         self.save(rec);
+        st.quiet.remove(id);
         self.publish(&mut st);
         Ok(Delivery {
             accepted: result.is_ok(),
@@ -1238,6 +1258,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 None,
             );
             self.save(rec);
+            st.quiet.remove(id);
             self.publish(&mut st);
             return Ok(());
         }
@@ -1268,6 +1289,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         };
         rec.log("local", "fault_injected", label, None);
         self.save(rec);
+        st.quiet.remove(id);
         self.publish(&mut st);
         Ok(())
     }
@@ -2048,6 +2070,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         let mut st = self.state.lock().await;
         self.zec_paused.store(false, Relaxed);
         self.deadline_pass(&mut st).await;
+        self.publish(&mut st);
         self.slow_pass(&mut st).await;
         self.publish(&mut st);
     }
@@ -2057,7 +2080,11 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         let slow: Vec<String> = st
             .swaps
             .iter()
-            .filter(|(_, r)| !r.settled() && !r.stalled && r.pending.iter().any(Pending::is_slow))
+            .filter(|(_, r)| {
+                !r.settled(self.leg.describes_txs(), now_ms())
+                    && !r.stalled
+                    && r.pending.iter().any(Pending::is_slow)
+            })
             .map(|(id, _)| id.clone())
             .collect();
         if slow.is_empty() {
@@ -2081,7 +2108,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             let Some(rec) = st.swaps.get_mut(&id) else {
                 continue;
             };
-            if rec.settled() || rec.stalled {
+            if rec.settled(self.leg.describes_txs(), now_ms()) || rec.stalled {
                 continue;
             }
             self.slow_ok.store(true, Relaxed);
@@ -2093,6 +2120,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 tracing::error!(%id, "slow work panicked; the swap is kept and retried next tick");
             }
             self.save(rec);
+            self.publish(st);
         }
     }
 
@@ -2101,10 +2129,13 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         self.slow_ok.store(false, Relaxed);
         let ids: Vec<String> = st.swaps.keys().cloned().collect();
         for id in ids {
+            if st.quiet.contains(&id) {
+                continue;
+            }
             let Some(rec) = st.swaps.get_mut(&id) else {
                 continue;
             };
-            if rec.settled() {
+            if rec.settled(self.leg.describes_txs(), now_ms()) {
                 continue;
             }
             // One swap's failure (even a panic on bad peer data) must not stop the others,
@@ -2121,10 +2152,13 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         // Then every swap's Zcash look, after all the deadline steps above: a slow wallet server
         // (the first look at a joint address waits for the wallet) holds up none of them.
         for id in st.swaps.keys().cloned().collect::<Vec<_>>() {
+            if st.quiet.contains(&id) {
+                continue;
+            }
             let Some(rec) = st.swaps.get_mut(&id) else {
                 continue;
             };
-            if rec.settled() {
+            if rec.settled(self.leg.describes_txs(), now_ms()) {
                 continue;
             }
             match AssertUnwindSafe(self.zec_round(rec)).catch_unwind().await {
@@ -2149,6 +2183,21 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 self.observe(rec, ev);
             } else if let Err(e) = self.process(rec, ev).await {
                 tracing::warn!(id = %rec.id, "chain event rejected: {e}");
+            }
+        }
+        // Z refunded after a send that may have gone out: once our wallet shows the lock can never
+        // land (it expired unmined, and no note is there), the joint address stops being watched.
+        if rec.late_note_possible() && !self.zec_paused.load(Relaxed) {
+            let fvk = rec.swap.session().joint_fvk()?;
+            let amount = rec.swap.session().params.zec_amount;
+            if matches!(self.leg.lock_lapsed(&fvk, amount).await, Ok(true)) {
+                rec.late_note_closed = true;
+                rec.log(
+                    "zec",
+                    "late_note_closed",
+                    "Z's ZEC lock never reached the chain and no longer can, so the joint address is no longer watched",
+                    None,
+                );
             }
         }
         self.fill_heights(rec, true).await

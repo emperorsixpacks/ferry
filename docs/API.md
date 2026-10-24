@@ -545,6 +545,16 @@ the code is new, one slot open while another swap runs long.
   round (docs/THREAT-MODEL.md, "Several swaps at once").
 - **Shown:** `free_slots` in `/peer/offer` and in `/api/status` (`offer.free_slots`), and
   `capacity` and `free` in `/api/status`.
+- **Reads never wait for a round.** `GET /api/status`, `/api/swaps`, `/api/swaps/:id`, the start of
+  `/api/events` and `GET /peer/offer` answer from the views as last published (after each round's
+  deadline pass, after each swap's slow work, and after every request that changes a swap), so a
+  slow node or a long round never holds them up; they are at most a few seconds behind.
+- **Finished swaps settle.** A finished swap with nothing queued stops being looked at once it has
+  shown what it shows: the other side's sweep (only when the Zcash backend can describe
+  transactions; devtool can only with `--zec-node-rpc`) and the block heights of its transactions,
+  or after 6 hours without news, whatever is still missing. Z's watch for a ZEC lock that may land
+  after a refund lasts until its wallet shows the lock can never land (`late_note_closed`), or a
+  week without news.
 
 ### Payout address (`payout_to`)
 
@@ -737,7 +747,9 @@ started with a payout address,
 `redeem_adaptor_withheld` (B, local) when its redeem adaptor (EVM: Ready signature) had not reached Z
 by the time the swap moved on (the lock note spent, or the call-off) and so never will: B hands it
 over only while it waits for Z's redeem with the lock note unspent, whether it pushes it as taker
-or Z reads it from its outbox as maker.
+or Z reads it from its outbox as maker, and `late_note_closed` (Z, zec) when, after a refund that
+followed a ZEC send which may have gone out, Z's wallet shows the lock can never land (it expired
+unmined and no note is there), so the joint address stops being watched for it.
 
 `label` is a full sentence written from the emitting party's point of view, for example
 `"Broadcast tx_lock: 0.0041 BTC to the Taproot lock address"`. The UI shows the newest label from

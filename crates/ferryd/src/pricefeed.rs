@@ -720,14 +720,11 @@ impl<L: ferry_core::ZecLeg + 'static> crate::daemon::Daemon<L> {
     /// `GET /peer/offer`: liquidity from the last status refresh's free balances (what our swaps
     /// in progress don't hold), and how many more swaps we take now (crate::capacity).
     pub async fn offer_now(&self) -> Offer {
-        let (free, slots) = {
-            let st = self.state.lock().await;
-            let slots = crate::capacity::free_slots(self.max_swaps, self.count(&st));
-            (st.status.as_ref().map(|s| s.free.clone()), slots)
-        };
+        // From what was last published (crate::reads): an offer never waits for a round.
+        let free = self.reads.status().map(|s| s.free);
         let mut offer = self.offer_with(free.as_ref());
         if offer.making {
-            offer.free_slots = Some(slots);
+            offer.free_slots = self.reads.free_slots();
         }
         offer
     }

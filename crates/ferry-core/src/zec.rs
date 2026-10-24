@@ -207,4 +207,11 @@ pub trait ZecLeg: Send + Sync {
     ) -> impl Future<Output = Result<Option<String>, Self::Error>> + Send {
         async { Ok(None) }
     }
+
+    /// Whether [`ZecLeg::describe_tx`] can describe transactions at all (devtool needs the
+    /// node's JSON-RPC for it). When it can't, a daemon doesn't wait for a description that
+    /// never comes.
+    fn describes_txs(&self) -> bool {
+        false
+    }
 }
