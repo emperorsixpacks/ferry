@@ -123,9 +123,10 @@ async function call<T>(base: string, path: string, body?: unknown): Promise<T> {
 export const getStatus = (daemon: string) => call<Status>(daemon, "/api/status");
 export const getSwaps = (daemon: string) => call<SwapView[]>(daemon, "/api/swaps");
 // `maker` is a name from GET /api/makers; the UI server maps it to the maker's allowlisted URL
-// (the browser never sends a URL). Left out, the server's first maker.
-export const startSwap = (zec_zat: number, daemon: string = DAEMONS.Z, maker?: string) =>
-  call<{ id: string }>(daemon, "/api/swaps", maker === undefined ? { zec_zat } : { maker, zec_zat });
+// (the browser never sends a URL). Left out, the server's first maker. `quote`: the id of that
+// maker's firm price (POST /api/quotes), which the server forwards as the maker signed it.
+export const startSwap = (zec_zat: number, daemon: string = DAEMONS.Z, maker?: string, quote?: string) =>
+  call<{ id: string }>(daemon, "/api/swaps", maker === undefined ? { zec_zat } : quote === undefined ? { maker, zec_zat } : { maker, zec_zat, quote });
 
 // The other pairs this UI server has a daemon for (GET /api/pairs); none from an older server.
 export async function getPairs(): Promise<PairId[]> {
