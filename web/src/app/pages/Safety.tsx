@@ -379,11 +379,11 @@ function Them() {
 // 05 ------------------------------------------------------------------------------------------
 
 const TXS = [
-  ["Normal swap", "Your ZEC sent to the swap", "03cdaedd", 5],
-  ["Normal swap", "They collect the ZEC", "4ec73022", 2],
-  ["Called off", "Your ZEC sent to the swap", "b5507e92", 2],
-  ["Called off", "You take it back", "88d3d711", 2],
-  ["Penalty", "Your ZEC sent to the swap", "7824cd2b", 2],
+  ["Normal swap", "Your ZEC sent to the swap", "ad59673a", 5],
+  ["Normal swap", "They collect the ZEC", "4d4914e4", 2],
+  ["Called off", "Your ZEC sent to the swap", "90579cad", 2],
+  ["Called off", "You take it back", "46ee4dfa", 2],
+  ["Penalty", "Your ZEC sent to the swap", "1662b575", 2],
 ] as const;
 
 function World() {

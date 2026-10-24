@@ -1,10 +1,15 @@
 # Ferry
 
-**Shielded ZEC ⇄ BTC. No bridge. No custodian. Nothing unshielded.**
+**Shielded ZEC ⇄ BTC, LTC or USDC. No bridge. No custodian. Nothing unshielded.**
 
 Ferry is a trustless atomic swap between shielded Zcash and native Bitcoin. The ZEC moves from
 one Ironwood note to another and never touches a transparent address. The BTC sits in an ordinary
 Taproot output. Nobody holds both sides, and either party can walk away with its own coins.
+
+The same construction also swaps shielded ZEC for **Litecoin** (same Taproot scripts, see
+[docs/LITECOIN.md](docs/LITECOIN.md)) and for **USDC on an EVM chain** through a small `FerryLock`
+contract ([docs/EVM.md](docs/EVM.md)). A keyless **watchtower** can act at the deadlines for a party
+that goes offline, and the app lists several **makers** with live market rates.
 
 Built for the [Zecathon](https://thezecathon.com) **Cross-chain** track: *swaps, bridges and intents
 that reach other chains without unshielding on the way through.*
@@ -58,6 +63,8 @@ cd web && pnpm install && source ../.demo/env && pnpm dev:ui   # the crossing, l
 infra/demo.sh help              # the three demo stories (swap, refund, punish) and curl examples
 infra/demo.sh down
 infra/demo-watchtower.sh run    # a party is killed mid-swap; its watchtower refunds or punishes
+infra/demo-ltc.sh up            # the same demo against litecoind regtest (ZEC/LTC)
+infra/evm-demo.sh test          # ZEC/USDC on anvil: happy, refund and punish
 ```
 
 ## Deploying
@@ -74,6 +81,8 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
 | `crates/ferry-btc` | Taproot lock/cancel scripts, presigned transactions, BIP340 adaptor signatures |
 | `crates/ferry-core` | swap sessions, messages, joint Ironwood key, state machines (no I/O) |
 | `crates/ferryd` | the party daemon: peer protocol, chain watchers, persistence, HTTP/SSE API |
+| `crates/ferry-evm` | FerryLock client (lock, claim, refund, punish), event watching, share extraction |
+| `contracts/` | `FerryLock.sol` (Foundry): the EVM lock, claim with `z`, refund with `b`, punish |
 | `crates/ferry-watchtower` | keyless watchtower: broadcasts an offline party's presigned cancel/refund/punish on time ([docs](docs/WATCHTOWER.md)) |
 | `web/` | the demo UI |
 | `infra/` | one-command local environment |
@@ -85,7 +94,16 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
 - Cross-group DLEQ: proof, verification and negative tests; keys cross-checked against Zcash's RedPallas.
 - Ironwood joint key: a note sent to an `ak = ±(Z_p + B_p)` address swept on regtest with a
   RedPallas signature from the combined key.
-- Two daemons swap end to end over HTTP (happy, refund, punish) against regtest Bitcoin.
+- Two daemons swap end to end over HTTP (happy, refund, punish) against regtest Bitcoin, and
+  against regtest Litecoin (`--chain ltc`).
+- ZEC ⇄ USDC: FerryLock has 34 Foundry tests (5 fuzz, including the scalar check against an
+  independent secp256k1 implementation); two daemons with `--counter evm` run happy, refund and
+  punish against anvil. B's go-ahead is an off-chain EIP-712 signature, so nothing on chain dates
+  the ZEC lock.
+- Watchtower: with the owner offline, it broadcasts cancel then refund (B) or cancel then punish (Z)
+  on regtest; it holds no keys, and every package is validated against the swap's own templates.
+- Makers: ferryd can quote the median of Kraken/CoinGecko plus a spread and pauses when the feed is
+  stale; the app lists the operator's allowlisted makers with rate, age, range and liquidity.
 - **Real shielded ZEC, end to end.** `infra/e2e-real.sh` starts a fresh regtest Bitcoin + Zebra +
   Zaino stack and runs all three stories with real Ironwood notes. In the happy story, a stranger also
   sends small notes to the joint address while B waits to sweep. A fourth story checks that a wallet
@@ -96,11 +114,11 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
 
   | swap | tx | txid | transparent in/out | Sapling | Orchard | Ironwood actions |
   |---|---|---|---|---|---|---|
-  | happy | ZEC lock | `03cdaedd…` | 0 / 0 | 0 | 0 | 5 |
-  | happy | B's sweep | `4ec73022…` | 0 / 0 | 0 | 0 | 2 |
-  | refund | ZEC lock | `b5507e92…` | 0 / 0 | 0 | 0 | 2 |
-  | refund | Z's reclaim | `88d3d711…` | 0 / 0 | 0 | 0 | 2 |
-  | punish | ZEC lock | `7824cd2b…` | 0 / 0 | 0 | 0 | 2 |
+  | happy | ZEC lock | `ad59673a…` | 0 / 0 | 0 | 0 | 5 |
+  | happy | B's sweep | `4d4914e4…` | 0 / 0 | 0 | 0 | 2 |
+  | refund | ZEC lock | `90579cad…` | 0 / 0 | 0 | 0 | 2 |
+  | refund | Z's reclaim | `46ee4dfa…` | 0 / 0 | 0 | 0 | 2 |
+  | punish | ZEC lock | `1662b575…` | 0 / 0 | 0 | 0 | 2 |
 
 - **Nothing unshielded, enforced.** Before sending the lock, `ferry-zec` refuses unless the
   Ironwood balance alone covers it and the wallet's proposal touches only Ironwood. It refuses to
