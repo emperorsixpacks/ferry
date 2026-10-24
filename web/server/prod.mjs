@@ -22,6 +22,9 @@
 //   DEMO_SWAPS_PER_HOUR [12] swap starts across all clients per rolling hour (rotating addresses
 //                           can't get past it, so fees can't drain the wallets)
 //   DEMO_FAULTS [0]         1 allows POST /api/swaps/:id/fault (the inspector's stall buttons)
+//   DEMO_SSE_PER_IP [8]     open /api/events streams per client IP (each holds a stream to ferryd;
+//                           one /inspect tab uses 3, an /app tab 1)
+//   DEMO_SSE_TOTAL [200]    open /api/events streams in all
 //
 // The daemons see no browser Origin header: this server strips it after its own PUBLIC_ORIGIN
 // check, so ferryd's --ui-origin allowlist doesn't need to know the public domain.
@@ -42,6 +45,8 @@ const DEMO_MIN_ZAT = env.DEMO_MIN_ZAT ? Number(env.DEMO_MIN_ZAT) : 0;
 const RATE_PER_HOUR = Number(env.DEMO_RATE_PER_HOUR ?? 3);
 const SWAPS_PER_HOUR = Number(env.DEMO_SWAPS_PER_HOUR ?? 12);
 const FAULTS = env.DEMO_FAULTS === "1";
+const SSE_PER_IP = Number(env.DEMO_SSE_PER_IP ?? 8);
+const SSE_TOTAL = Number(env.DEMO_SSE_TOTAL ?? 200);
 
 // ------------------------------------------------------------------------------------------------
 // daemons and their tokens
@@ -323,16 +328,53 @@ function rewriteEvents(up, res) {
 // ------------------------------------------------------------------------------------------------
 // proxy
 
+// response headers that stay between ferryd and this server
 const HOP = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-connection", "te", "trailer", "host", "origin", "referer", "cookie", "authorization"]);
+
+// request headers that reach ferryd: an allowlist, so nothing the browser sends (Content-Length or
+// Expect on a GET, cookies, forwarding headers) gets to the daemon unexamined
+const FORWARD = ["accept", "last-event-id"];
+
+// open event streams, per IP and in all
+const streams = new Map();
+let streamsOpen = 0;
+
+function openStream(req, res) {
+  const ip = clientIp(req);
+  const mine = streams.get(ip) ?? 0;
+  if (streamsOpen >= SSE_TOTAL) {
+    json(res, 429, { error: "The demo is busy. Try again in a minute." }, { "retry-after": "60" });
+    return false;
+  }
+  if (mine >= SSE_PER_IP) {
+    json(res, 429, { error: "Too many open Ferry tabs from your address. Close one and reload." }, { "retry-after": "60" });
+    return false;
+  }
+  streams.set(ip, mine + 1);
+  streamsOpen++;
+  let closed = false;
+  res.on("close", () => {
+    if (closed) return;
+    closed = true;
+    streamsOpen--;
+    const n = (streams.get(ip) ?? 1) - 1;
+    if (n > 0) streams.set(ip, n);
+    else streams.delete(ip);
+  });
+  return true;
+}
 
 async function proxy(key, path, search, req, res) {
   const d = DAEMONS[key];
   const decision = await guard(key, path, req, res);
   if (decision === false) return;
 
+  if (path === "/api/events" && !openStream(req, res)) return;
+
   const headers = {};
-  for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k) && !k.startsWith("x-forwarded")) headers[k] = v;
+  for (const k of FORWARD) if (typeof req.headers[k] === "string") headers[k] = req.headers[k];
   Object.assign(headers, authHeader(d));
+  // the only bodies that reach ferryd are the ones the guard rebuilt
   let body = null;
   if (typeof decision === "string") {
     body = decision;
@@ -365,9 +407,7 @@ async function proxy(key, path, search, req, res) {
   });
   // a browser that leaves must not keep a stream open to the daemon
   res.on("close", () => upstream.destroy());
-  if (body != null) upstream.end(body);
-  else if (decision === null && req.method === "POST") req.pipe(upstream);
-  else upstream.end();
+  upstream.end(body ?? undefined);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -434,7 +474,7 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`ferry-ui on http://${HOST}:${PORT}  dist ${DIST}`);
   console.log(`  Z ${DAEMONS.z.url.origin}  B ${DAEMONS.b.url.origin}  maker ${MAKER_URL}`);
-  console.log(`  demo: max ${zec(DEMO_MAX_ZAT)} ZEC, ${RATE_PER_HOUR} swaps/IP/hour, ${SWAPS_PER_HOUR} swaps/hour in all, faults ${FAULTS ? "on" : "off"}${PUBLIC_ORIGIN ? `, origin ${PUBLIC_ORIGIN}` : ""}`);
+  console.log(`  demo: max ${zec(DEMO_MAX_ZAT)} ZEC, ${RATE_PER_HOUR} swaps/IP/hour, ${SWAPS_PER_HOUR} swaps/hour in all, ${SSE_PER_IP} streams/IP, ${SSE_TOTAL} streams in all, faults ${FAULTS ? "on" : "off"}${PUBLIC_ORIGIN ? `, origin ${PUBLIC_ORIGIN}` : ""}`);
 });
 
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => server.close(() => process.exit(0)));
