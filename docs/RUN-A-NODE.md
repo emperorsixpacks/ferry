@@ -242,8 +242,10 @@ To remove the node entirely, first send your coins out, take a last backup, then
 
 runs Zcash mainnet and Base mainnet (USDC and WETH), in its own folder (`.ferry-node-mainnet/`),
 its own containers and on port 7866, so it never mixes with your test node. It asks you to type
-`MAINNET` once, caps every swap at **0.02 ZEC**, uses ferryd's mainnet safety margins (a swap can
-take about 5 hours to call off), and needs:
+`MAINNET` once, caps every swap at **0.02 ZEC**, uses ferryd's mainnet safety margins (a swap
+usually takes 15 to 20 minutes; one that is called off unwinds from about 4 h 15 min after it
+started, and if you are buying ZEC your node then has 24 hours to take your coin back, so keep it
+running or start it again within a day), and needs:
 
 - a **Base mainnet RPC** that allows `eth_getLogs` (the default is `https://base-rpc.publicnode.com`;
   `mainnet.base.org` refuses it);

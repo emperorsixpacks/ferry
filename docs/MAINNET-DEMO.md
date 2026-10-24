@@ -12,7 +12,7 @@ offer and start is capped at 0.02 ZEC in the script.
 
 - A Ferry swap works on mainnet: real Ironwood notes on Zcash mainnet, real USDC in a FerryLock
   deployed on Base mainnet (code checked against the build), under ferryd's **Base mainnet policy**
-  (1 h margins, 30 lock confirmations, 10 Zcash confirmations, a claim window of at least 4 h).
+  (2 h margins, 30 lock confirmations, 10 Zcash confirmations, a claim window of at least 2 h).
 - `payout_to` on mainnet: the FerryLock claimer is the 1Click deposit address, so the USDC never
   touches the seller's own Base account.
 - Ferry as the private hop, NEAR Intents as the reach: shielded ZEC becomes an asset on another
@@ -105,7 +105,9 @@ Measured on the fork rehearsal (anvil makes Base's 2 s blocks; the mock Zcash ch
 | B's ZEC sweep (not on your path) | 10-15 s after the claim | 5-20 s delay, then a few Zcash blocks |
 
 Before that, Z's ZEC needs 10 confirmations after you fund it (about 13 min) to be spendable.
-If the swap is called off, it ends at t1, about 5 h 15 min after the start (B refunds, Z reclaims).
+If the swap is called off, it ends at t1, about 4 h 15 min after the start (B refunds, Z reclaims).
+B's refund window then stays open for 24 hours, until about 28 h 15 min after the start; Z may take
+B's USDC from t2, about 30 h 15 min after the start ([the terms](EVM.md#timing-rules-the-daemon-enforces-these-not-the-chain)).
 
 Costs of one 0.01 ZEC sell (prices of 2026-10-20: ZEC about $1,220, ETH about $2,400, Base gas
 0.006 gwei):
@@ -145,7 +147,7 @@ the run (and `sell` shows the same numbers before you confirm).
   another wallet), leftover ETH and USDC with `cast send`.
 - **You trust Circle, Base's sequencer and NEAR Intents.** Circle can freeze USDC (claim, refund
   and punish would revert, simulated first so no key share leaks, funds stuck until it unfreezes);
-  Base's single sequencer must include transactions within the 1 h margins; once the USDC is in the
+  Base's single sequencer must include transactions within the 2 h margins; once the USDC is in the
   deposit address, NEAR Intents and its solvers hold it until they deliver or refund.
 
 What happens when something fails, in order of the flow:
@@ -154,9 +156,9 @@ What happens when something fails, in order of the flow:
 |---|---|---|
 | The real 1Click quote promises less than the minimum you confirmed | the UI server refuses it (`409 price_moved`); no Ferry swap starts | nothing moved |
 | B never locks, or the proposal fails | the Ferry start fails or the swap is aborted after 30 min with nothing locked | nothing moved |
-| B locks but Z never locks ZEC | at t1 (about 5 h 15 min) B refunds its USDC from FerryLock | B's USDC back, minus gas |
+| B locks but Z never locks ZEC | at t1 (about 4 h 15 min) B refunds its USDC from FerryLock | B's USDC back, minus gas |
 | Z locks ZEC but B never signs Ready, or Z never claims | at t1 B refunds and reveals its key share; Z takes its ZEC back from the joint note. The NEAR job ends `failed` (`ferry_refunded`): nothing reached NEAR Intents | ZEC back to Z (minus two small Zcash fees), USDC back to B |
-| B vanishes after locking (no Ready, no refund) | from t2 (about 7 h 15 min) Z punishes: FerryLock pays the USDC to the claimer, which is the 1Click deposit address; Z's ZEC stays locked. The deposit is still within its 24 h deadline, so NEAR Intents converts it or refunds it | ZEC lost to the joint note (as on every Ferry pair, going quiet costs B, and here you are B) |
+| B vanishes after locking (no Ready, no refund) | from t2 (about 30 h 15 min) Z punishes: FerryLock pays the USDC to the claimer, which is the 1Click deposit address; Z's ZEC stays locked. The deposit's 24 h deadline has passed by then, so under NEAR's rules NEAR Intents refunds the USDC to Z's Base account | ZEC lost to the joint note (as on every Ferry pair, going quiet costs B, and here you are B) |
 | Z's claim lands but NEAR Intents can't fill (price moved past 1% slippage, no route) | 1Click refunds the USDC to the quote's refund address: **Z's own Base account** (`refundTo`). The job ends `refunded` | USDC at Z's Base address; the Ferry swap itself completed |
 | The deposit arrives after the quote's deadline | under NEAR's rules a late deposit is refunded, to Z's Base address | as above |
 | The script or the terminal dies | nothing stops: ferryd and the UI server follow the swap and the NEAR job; `infra/mainnet-demo.sh follow` picks it up again | unaffected |

@@ -193,10 +193,16 @@ pub enum PolicyOptIn {
     UnlistedTestnet,
 }
 
-/// OP Stack and Arbitrum mainnets: a single sequencer can delay inclusion, so the margins are an
-/// hour and the claim window four. (Lock confirmations differ with the block time.)
-const SEQUENCER_MARGIN_SECS: u64 = 3_600;
-const SEQUENCER_CLAIM_WINDOW_SECS: u64 = 4 * 3_600;
+/// OP Stack and Arbitrum mainnets: a single sequencer can delay inclusion. Base stopped making
+/// blocks for 33 min in August 2025 and for about 2 h in 2026, so both margins (Δ) are 2 h: a
+/// claim or refund sent just before its cutoff still lands in time through a stall that long.
+/// Never below 1 h. (Lock confirmations differ with the block time.)
+const SEQUENCER_MARGIN_SECS: u64 = 2 * 3_600;
+/// From the proposal to t1 − Δ. A swap needs about 15-20 min of it (10 Zcash confirmations are
+/// most of that), so 2 h leaves room for a slow Zcash. It is also how long the second locker holds
+/// a free price option, which grows with the square root of the window (about 0.48% of the amount
+/// at 2 h against 0.68% at 4 h, at 80% volatility); running out is safe (B refunds at t1).
+const SEQUENCER_CLAIM_WINDOW_SECS: u64 = 2 * 3_600;
 /// Every mainnet: ten Zcash blocks (about 12.5 minutes) before B lets Z claim.
 const MAINNET_ZEC_CONFIRMATIONS: u32 = 10;
 
@@ -211,7 +217,7 @@ impl EvmPolicy {
     /// The minimums for `chain_id` (reasons in docs/EVM.md, "Timing rules"):
     /// - Ethereum: no sequencer, 12 s blocks. 15 min margins, 64 lock confirmations (about two
     ///   epochs, when a block is normally finalized), a claim window of at least 2 h.
-    /// - Base and Optimism (OP Stack, 2 s blocks): 1 h margins, 30 lock confirmations, 4 h.
+    /// - Base and Optimism (OP Stack, 2 s blocks): 2 h margins, 30 lock confirmations, 2 h.
     /// - Arbitrum One (about 0.25 s blocks): Base's margins and claim window, and 240 lock
     ///   confirmations, the same minute as Base's 30.
     /// - Sepolia, Base Sepolia, OP Sepolia, Arbitrum Sepolia: test-network minimums.
@@ -367,9 +373,13 @@ mod tests {
     #[test]
     fn policy_table() {
         assert_eq!(table(ETHEREUM_CHAIN_ID), (900, 64, 10, 7_200));
-        assert_eq!(table(BASE_CHAIN_ID), (3_600, 30, 10, 14_400));
+        assert_eq!(table(BASE_CHAIN_ID), (7_200, 30, 10, 7_200));
         assert_eq!(table(OPTIMISM_CHAIN_ID), table(BASE_CHAIN_ID));
-        assert_eq!(table(ARBITRUM_CHAIN_ID), (3_600, 240, 10, 14_400));
+        assert_eq!(table(ARBITRUM_CHAIN_ID), (7_200, 240, 10, 7_200));
+        // A sequencer chain's margin covers Base's 2 h halt of 2026, and never drops below 1 h.
+        for seq in [BASE_CHAIN_ID, OPTIMISM_CHAIN_ID, ARBITRUM_CHAIN_ID] {
+            assert!(table(seq).0 >= 2 * 3_600, "chain {seq}");
+        }
         for testnet in [
             SEPOLIA_CHAIN_ID,
             BASE_SEPOLIA_CHAIN_ID,
@@ -395,6 +405,75 @@ mod tests {
             let (m, l, z, w) = table(main);
             let (tm, tl, tz, tw) = table(SEPOLIA_CHAIN_ID);
             assert!(m > tm && l > tl && z > tz && w > tw, "chain {main}");
+        }
+    }
+
+    /// `NAME=<digits>` or `NAME:-<digits>` in a shell script, as a number.
+    fn script_value(script: &str, name: &str) -> u64 {
+        let path = format!("{}/../../{script}", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        [format!("{name}="), format!("{name}:-")]
+            .iter()
+            .find_map(|key| {
+                let rest = &text[text.find(key.as_str())? + key.len()..];
+                let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                digits.parse().ok()
+            })
+            .unwrap_or_else(|| panic!("{script}: no number for {name}"))
+    }
+
+    /// The Base mainnet terms `infra/node/ferry --mainnet` and `infra/mainnet-demo.sh` ship, read
+    /// from the scripts, so neither can drift below the policy or away from the times in the docs
+    /// (docs/EVM.md, "Timing rules").
+    #[test]
+    fn shipped_base_mainnet_terms() {
+        let base = EvmPolicy::for_chain(BASE_CHAIN_ID, PolicyOptIn::Listed).unwrap();
+        let shipped = [
+            (
+                script_value("infra/node/ferry", "EVM_T1_SECS"),
+                script_value("infra/node/ferry", "EVM_REFUND_SECS"),
+                script_value("infra/node/ferry", "EVM_DELTA_SECS"),
+                script_value("infra/node/ferry", "EVM_LOCK_CONFS"),
+                script_value("infra/node/ferry", "ZEC_CONFS"),
+            ),
+            (
+                script_value("infra/mainnet-demo.sh", "T1_SECS"),
+                script_value("infra/mainnet-demo.sh", "REFUND_SECS"),
+                script_value("infra/mainnet-demo.sh", "DELTA_SECS"),
+                script_value("infra/mainnet-demo.sh", "LOCK_CONFS"),
+                script_value("infra/mainnet-demo.sh", "ZEC_CONFS"),
+            ),
+        ];
+        let (h, m) = (3_600, 60);
+        for (t1_secs, refund_secs, delta, lock, zec) in shipped {
+            let now = 1_800_000_000;
+            let p = EvmParams {
+                chain_id: BASE_CHAIN_ID,
+                t1: now + t1_secs,
+                t2: now + t1_secs + refund_secs,
+                claim_margin: delta,
+                refund_margin: delta,
+                lock_confirmations: lock as u32,
+                zec_confirmations: zec as u32,
+                ..test_params()
+            };
+            p.check_policy(&base, now).unwrap();
+            // 15 min of slack between the offer and the maker's own check of the proposal
+            p.check_policy(&base, now + 15 * m).unwrap();
+            assert!(p.check_policy(&base, now + 15 * m + 1).is_err());
+            // From the proposal: the last claim at 2 h 15 min, B's refund from 4 h 15 min, its
+            // last refund at 28 h 15 min (a 24 h window), Z's punish from 30 h 15 min.
+            assert_eq!(delta, 2 * h);
+            assert_eq!(p.t1 - delta - now, 2 * h + 15 * m);
+            assert_eq!(p.t1 - now, 4 * h + 15 * m);
+            assert_eq!(p.t2 - p.t1 - delta, 24 * h);
+            assert_eq!(p.t2 - delta - now, 28 * h + 15 * m);
+            assert_eq!(p.t2 - now, 30 * h + 15 * m);
+            // The windows as the daemons and the watchtower apply them.
+            assert!(p.can_claim(p.t1 - delta - 1) && !p.can_claim(p.t1 - delta));
+            assert!(!p.can_refund(p.t1 - 1) && p.can_refund(p.t1));
+            assert!(p.can_refund(p.t2 - delta - 1) && !p.can_refund(p.t2 - delta));
+            assert!(!p.can_punish(p.t2 - 1) && p.can_punish(p.t2));
         }
     }
 
