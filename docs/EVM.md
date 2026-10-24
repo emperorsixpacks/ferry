@@ -94,6 +94,9 @@ The proposal was sound in outline. These are the points where it changed:
    whole amount. Binding the tip to a relayer with a signature from `z` doesn't help, because
    `z` is public by then and anyone can re-sign. So `Terms.maxTip` (with `maxTip ≤ amount`) is
    fixed at lock time and Z checks it. A front-runner can take only the agreed `maxTip`.
+   A Z taker refuses any maker whose `maxTip` is above its own `--evm-max-tip` (0 by default),
+   and a Z maker accepts only its own value. Otherwise a maker could set `maxTip = amount`, watch
+   for Z's claim, resubmit it with the full tip, and also sweep the ZEC with the revealed `z`.
 2. **Swap ids are keyed by the locker.** `id = keccak256(locker, salt)`, so nobody can occupy
    B's id by front-running its lock.
 3. **Ready is an off-chain EIP-712 signature, not an on-chain `ready()` call.** This is the same

@@ -435,6 +435,14 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         {
             return bad("the counterparty uses another chain, FerryLock or token".into());
         }
+        // Whoever sees Z's claim in the mempool can resubmit it with the largest tip the lock
+        // allows, so Z never takes a maker's tip cap above its own --evm-max-tip (0 by default).
+        if self.role == Role::Z && offer.terms.max_tip > self.offer.terms.max_tip {
+            return bad(format!(
+                "the maker allows a claim tip of up to {} token units, above our --evm-max-tip of {}",
+                offer.terms.max_tip, self.offer.terms.max_tip
+            ));
+        }
         if zec_zat < offer.min_zat || zec_zat > offer.max_zat {
             return bad(format!(
                 "Amount must be between {} and {}",
