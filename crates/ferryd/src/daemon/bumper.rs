@@ -15,6 +15,7 @@ use std::path::Path;
 
 use ferry_btc::bitcoin::{Amount, ScriptBuf};
 use ferry_btc::child::{build_child, rate_of, vsize_bound, ChildError, ChildLimits};
+use ferry_btc::rpc::PackageError;
 use ferry_core::{BState, ZState};
 
 use super::*;
@@ -356,49 +357,63 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         // Ask the node first, with the same ceiling it will enforce. A package cannot be asked:
         // Bitcoin Core's testmempoolaccept judges each transaction of it on its own fee, so it
         // refuses exactly the parent that the child is there to lift. submitpackage applies the
-        // package feerate, and carries the same ceiling as maxfeerate.
+        // package feerate, and carries the same ceiling as maxfeerate. A replacement of our
+        // child is asked too; a node that does not replace answers "txn-mempool-conflict" to any
+        // replacement, so that answer is not a verdict and the send decides.
         let package = plan.mode == SubmitMode::Package;
         if !package {
             let verdicts = self
                 .rpc
                 .test_accept(std::slice::from_ref(&built.tx), Some(ceiling))
                 .await?;
-            if let Some(no) = verdicts.iter().find(|v| !v.allowed) {
-                st.refused_height = Some(tip);
+            let replacing = matches!(plan.mode, SubmitMode::Replace(_));
+            let no = verdicts.iter().find(|v| match v.reject_reason.as_deref() {
+                _ if v.allowed => false,
+                Some("txn-mempool-conflict") => !replacing,
+                _ => true,
+            });
+            if let Some(no) = no {
                 let why = no.reject_reason.clone().unwrap_or_default();
-                note_once(
-                    rec,
-                    st,
-                    &format!("refused:{why}"),
-                    format!(
-                        "The node would not take the fee bump of {name} ({why}); trying again at the next block"
-                    ),
-                );
-                return Ok(());
+                let what = format!("would not take the fee bump of {name} ({why})");
+                return self.refused(rec, st, tip, &what, &why);
             }
         }
 
         let child_txid = built.tx.compute_txid();
-        if package {
-            let sent = self
+        // What the node says to the real send. An answer from the node that refuses it is a
+        // refusal, tried again at the next block; a node that cannot be reached is an error.
+        let refusal = if package {
+            match self
                 .rpc
                 .submit_package(&[parent_tx.clone(), built.tx.clone()], Some(ceiling))
-                .await?;
-            if !sent.success {
-                st.refused_height = Some(tip);
-                let why = sent
-                    .errors
-                    .first()
-                    .map(|(_, e)| e.clone())
-                    .unwrap_or(sent.message);
-                note_once(
-                    rec,
-                    st,
-                    &format!("refused:{why}"),
-                    format!("The node would not take {name} with its child as a package ({why}); trying again at the next block"),
-                );
-                return Ok(());
+                .await
+            {
+                Ok(sent) if sent.success => None,
+                Ok(sent) => Some(
+                    sent.errors
+                        .first()
+                        .map(|(_, e)| e.clone())
+                        .unwrap_or(sent.message),
+                ),
+                Err(PackageError::Rpc(e @ RpcError::Rpc { .. })) => Some(e.to_string()),
+                Err(e) => return Err(e.into()),
             }
+        } else {
+            match self.rpc.broadcast_capped(&built.tx, ceiling).await {
+                Ok(_) => None,
+                Err(e @ RpcError::Rpc { .. }) => Some(e.to_string()),
+                Err(e) => return Err(e.into()),
+            }
+        };
+        if let Some(why) = refusal {
+            let what = if package {
+                format!("would not take {name} with its child as a package ({why})")
+            } else {
+                format!("would not take the fee bump of {name} ({why})")
+            };
+            return self.refused(rec, st, tip, &what, &why);
+        }
+        if package {
             // The parent went in through the package: it is announced now, as if sent alone.
             if let Some(r) = rec
                 .rebroadcast
@@ -410,8 +425,6 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     self.narrate_broadcast(rec, parent_tx, parent_txid);
                 }
             }
-        } else {
-            self.rpc.broadcast_capped(&built.tx, ceiling).await?;
         }
 
         let base = parent.mempool.unwrap_or(Ancestry {
@@ -427,24 +440,53 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         st.refused_height = None;
         let how = match plan.mode {
             SubmitMode::Send => "sent a child",
-            SubmitMode::Replace(_) => "replaced its child with a better one",
+            SubmitMode::Replace(_) => "replaced the previous child",
             SubmitMode::Package => {
-                "sent it with a child as a package, as the node's mempool had dropped it"
+                "sent it with a child as a package, because the node's mempool had dropped it"
             }
         };
         rec.log(
             "btc",
             "fee_bump",
             format!(
-                "Raised the fee of {name}: {how} paying {} sat out of its own payout, taking the pair to \
-                 {} sat/vB (wanted {}; {} blocks before its deadline){}",
+                "Raised the fee of {name}: {how}, the child paying {} sat out of its own payout and \
+                 taking the pair to {} sat/vB (wanted {}; {} block{} before its deadline){}",
                 st.child_fee,
                 per_vb(st.package_rate),
                 per_vb(plan.target_rate),
                 plan.blocks_left,
+                if plan.blocks_left == 1 { "" } else { "s" },
                 if plan.capped { ", held at the fee cap" } else { "" },
             ),
             Some(child_txid.to_string()),
+        );
+        Ok(())
+    }
+}
+
+impl<L: ZecLeg + 'static> Daemon<L> {
+    /// The node refused our child: remember the block, write the reason once, and try again at
+    /// the next block.
+    fn refused(
+        &self,
+        rec: &mut SwapRecord,
+        st: &mut BumpState,
+        tip: u64,
+        what: &str,
+        why: &str,
+    ) -> anyhow::Result<()> {
+        st.refused_height = Some(tip);
+        let hint = if why.contains("txn-mempool-conflict") {
+            " (this node does not replace transactions: litecoind needs -mempoolreplacement=1, \
+              so the child stays at the fee it has)"
+        } else {
+            ""
+        };
+        note_once(
+            rec,
+            st,
+            &format!("refused:{why}"),
+            format!("The node {what}{hint}; trying again at the next block"),
         );
         Ok(())
     }

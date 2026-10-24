@@ -1554,3 +1554,452 @@ async fn withdraw_to_own_wallet() {
     let all = w.get(&b, "/api/withdrawals").await;
     assert_eq!(all.as_array().unwrap().len(), 3, "{all}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Fee bumping (`--bump on`). These need a node whose mempool is small and whose miner leaves
+// cheap packages out, so a presigned fee can fall below the mempool floor and a bumped package
+// can stay unmined for a while (start it with the docker command in docs/evidence/
+// btc-fee-bump-regtest-2026-10-22.txt, or any bitcoind with these flags):
+//
+//   bitcoind -regtest -server -rpcuser=ferry -rpcpassword=ferry -fallbackfee=0.0002 -txindex=1 \
+//     -maxmempool=5 -blockmintxfee=0.0010 -mintxfee=0.0011
+//   FERRY_BTC_RPC=http://127.0.0.1:PORT cargo test -p ferryd --test two_daemons bump \
+//     -- --ignored --test-threads=1 --nocapture
+//
+// The wallet pays at least 110 sat/vB (-mintxfee) so its own transactions are mined; the
+// presigned fees (2000 sat, 12 to 18 sat/vB) are not, and a bumped package is mined only from
+// 100 sat/vB.
+// ---------------------------------------------------------------------------------------------
+
+/// Raise the node's mempool floor to at least `sat_per_vb`: fill its 5 MB mempool with ~65 kvB
+/// transactions at that rate, one confirmed coin each. The node evicts the cheapest and its floor
+/// rises above the rate it evicted. The fillers stay in the mempool (a miner asking for 100
+/// sat/vB leaves 60 out), so the floor holds for the length of a test.
+async fn raise_mempool_floor(rpc: &BitcoinRpc, sat_per_vb: u64) {
+    use ferry_btc::bitcoin::{key::Secp256k1, Address};
+    let secp = Secp256k1::new();
+    let mut sent = 0;
+    loop {
+        let floors = rpc.fee_floors().await.unwrap();
+        if floors.mempool_min >= sat_per_vb * 1000 {
+            println!("{sent} fillers: floors {floors:?}");
+            return;
+        }
+        assert!(sent < 120, "the floor never rose: {floors:?}");
+        let coins: Vec<Value> = rpc
+            .wallet_call("listunspent", json!([1, 9_999_999, [], false]))
+            .await
+            .unwrap();
+        let coin = coins
+            .iter()
+            .find(|c| c["spendable"] == json!(true) && c["amount"].as_f64() > Some(1.0))
+            .expect("no confirmed coin left to fill the mempool with");
+        let outputs: Vec<Value> = (0..1500)
+            .map(|_| {
+                let a = Address::p2tr(
+                    &secp,
+                    ferry_btc::BtcKey::random().xonly(),
+                    None,
+                    Network::Regtest,
+                );
+                json!({ a.to_string(): "0.00001" })
+            })
+            .collect();
+        let raw: String = rpc
+            .wallet_call(
+                "createrawtransaction",
+                json!([[{"txid": coin["txid"], "vout": coin["vout"]}], outputs]),
+            )
+            .await
+            .unwrap();
+        let funded: Value = rpc
+            .wallet_call(
+                "fundrawtransaction",
+                json!([raw, {"add_inputs": false, "fee_rate": sat_per_vb, "changePosition": 0}]),
+            )
+            .await
+            .unwrap();
+        let signed: Value = rpc
+            .wallet_call("signrawtransactionwithwallet", json!([funded["hex"]]))
+            .await
+            .unwrap();
+        assert_eq!(signed["complete"], json!(true), "{signed}");
+        // The one that tips the pool over may itself be evicted at once ("mempool full").
+        let r: Result<String, _> = rpc.call("sendrawtransaction", json!([signed["hex"]])).await;
+        if let Err(e) = r {
+            assert!(e.to_string().contains("mempool full"), "{e}");
+        }
+        sent += 1;
+    }
+}
+
+/// The `fee_bump` entries of a swap's timeline, oldest first.
+fn bumps(v: &Value) -> Vec<&Value> {
+    v["timeline"]
+        .as_array()
+        .map(|t| t.iter().filter(|e| e["kind"] == "fee_bump").collect())
+        .unwrap_or_default()
+}
+
+/// What a `fee_bump` entry says its child paid, in sat.
+fn paid(entry: &Value) -> u64 {
+    let label = entry["label"].as_str().unwrap();
+    label
+        .split("the child paying ")
+        .nth(1)
+        .and_then(|s| s.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no fee in {label}"))
+}
+
+/// The swap record Z or B keeps on disk, as JSON.
+fn record_file(w: &World, name: &str, id: &str) -> Value {
+    let path = w
+        ._dir
+        .path()
+        .join(name)
+        .join("swaps")
+        .join(format!("{id}.json"));
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// R1, and the replacement and restart cases (R5): the mempool floor is above Z's presigned
+/// redeem when Z first sends it, so the node refuses it alone. Z's ferryd puts it in with a child
+/// as a package, then replaces the child by a better one as the deadline nears (the miner leaves
+/// the package out until it pays 100 sat/vB), survives a restart in between, and the swap
+/// completes. B has read z from the redeem while it was still in the mempool.
+#[tokio::test]
+#[ignore = "needs a regtest bitcoind with -maxmempool=5 -blockmintxfee=0.0010 -mintxfee=0.0011 (see above)"]
+async fn bump_stuck_redeem_is_packaged_replaced_and_mined() {
+    let mut w = World::start_full(2, Role::B, &[], &["--bump", "on"]).await;
+    w.rpc.generate_to_address(140, &w.miner).await.unwrap();
+    raise_mempool_floor(&w.rpc, 60).await;
+
+    let id = w.start_swap(100_000_000).await;
+    let (z, _) = w
+        .run_until(&id, 400, 40, |z, _| !bumps(z).is_empty())
+        .await;
+    let first = bumps(&z)[0];
+    println!("first bump: {}", first["label"]);
+    assert!(
+        first["label"].as_str().unwrap().contains("as a package"),
+        "{first}"
+    );
+    // The redeem is in the mempool, unconfirmed, and B has already taken z from it there.
+    let redeem_txid: ferry_btc::bitcoin::Txid = entry(&z, "btc_redeem_broadcast")["txid"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(w.rpc.confirmations(&redeem_txid).await.unwrap(), Some(0));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let b = w.swap(&w.b.url, &id).await;
+        if kinds(&b).contains("secret_extracted") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "B never read z from the mempool redeem: {}\n{}",
+            kinds(&b),
+            w.b.logs()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(w.rpc.confirmations(&redeem_txid).await.unwrap(), Some(0));
+
+    // Restart Z in the middle of the bump: the record carries the child, and the next bump
+    // replaces it.
+    let saved = record_file(&w, "zoe", &id);
+    assert_eq!(saved["bump"]["attempts"], 1, "{}", saved["bump"]);
+    w.z.kill();
+    w.z.spawn();
+    w.wait_ready(&w.z.url.clone()).await;
+
+    let (z, b) = w
+        .run_until(&id, 400, 80, |z, b| {
+            z["outcome"] == "swapped" && b["outcome"] == "swapped"
+        })
+        .await;
+    assert_eq!((state(&z), state(&b)), ("BtcRedeemed", "ZecSwept"));
+    let all = bumps(&z);
+    for e in &all {
+        println!("bump: {}", e["label"]);
+    }
+    assert!(all.len() >= 2, "{}", kinds(&z));
+    assert!(
+        all[1..]
+            .iter()
+            .all(|e| e["label"].as_str().unwrap().contains("replaced the previous child")),
+        "after the package every bump replaces the child: {}",
+        kinds(&z)
+    );
+    // Fees only rise, each by at least the node's incremental fee for the child's size
+    // (1 sat/vB x about 111 vB).
+    let fees: Vec<u64> = all.iter().map(|e| paid(e)).collect();
+    assert!(fees.windows(2).all(|p| p[1] >= p[0] + 111), "fees {fees:?}");
+    // The package was mined only once it paid the miner's floor (100 sat/vB), and the redeem and
+    // its last child are in the chain.
+    let last = all.last().unwrap();
+    let last_child: ferry_btc::bitcoin::Txid = last["txid"].as_str().unwrap().parse().unwrap();
+    assert!(w.rpc.confirmations(&redeem_txid).await.unwrap().unwrap() >= 1);
+    assert!(w.rpc.confirmations(&last_child).await.unwrap().unwrap() >= 1);
+    let record = record_file(&w, "zoe", &id);
+    assert_eq!(
+        record["bump"]["attempts"].as_u64().unwrap(),
+        all.len() as u64,
+        "{}",
+        record["bump"]
+    );
+    println!("Z: {}\nB: {}", kinds(&z), kinds(&b));
+}
+
+/// R2, refund: B cancels at T1 while the mempool floor is low, then B is stopped, the cancel is
+/// mined, and the floor rises above the presigned refund. B comes back, finds the cancel
+/// confirmed and sends the refund, which the node refuses alone (below the floor). B's ferryd puts
+/// it in with a child as a package, inside its window, and the refund confirms; Z, which stalled
+/// until the cancel, reads b from the refund and reclaims its ZEC.
+/// Needs a regtest bitcoind started with `-maxmempool=5`.
+#[tokio::test]
+#[ignore = "needs a regtest bitcoind started with -maxmempool=5"]
+async fn bump_stuck_refund_is_packaged_inside_its_window() {
+    let mut w = World::start_full(4, Role::B, &["--bump", "on"], &[]).await;
+    w.rpc.generate_to_address(140, &w.miner).await.unwrap();
+    let id = w.start_swap(50_000_000).await;
+    w.run_until(&id, 700, 20, |z, _| state(z) == "ZecLocked")
+        .await;
+    let (code, body) = w
+        .post(
+            &w.z.url,
+            &format!("/api/swaps/{id}/fault"),
+            json!({"fault": "stall"}),
+        )
+        .await;
+    assert_eq!(code, 200, "{body}");
+
+    // B cancels at T1 (the floor is low, the node takes the presigned 2000 sat). Stop B before
+    // the block that confirms it, mine that block, then raise the floor above the refund.
+    w.run_until(&id, 300, 60, |_, b| kinds(b).contains("cancel_broadcast"))
+        .await;
+    w.b.kill();
+    w.mine().await;
+    raise_mempool_floor(&w.rpc, 60).await;
+    w.b.spawn();
+    w.wait_ready(&w.b.url.clone()).await;
+
+    let (z, b) = w
+        .run_until(&id, 300, 60, |z, b| {
+            z["outcome"] == "refunded" && b["outcome"] == "refunded"
+        })
+        .await;
+    assert_eq!((state(&z), state(&b)), ("ZecReclaimed", "Refunded"));
+    let all = bumps(&b);
+    for e in &all {
+        println!("bump: {}", e["label"]);
+    }
+    assert_eq!(all.len(), 1, "{}", kinds(&b));
+    let label = all[0]["label"].as_str().unwrap();
+    assert!(
+        label.contains("tx_refund") && label.contains("as a package"),
+        "{label}"
+    );
+    // The refund went out through the package, inside the window before T2 - delta.
+    let refund_height = entry(&b, "refund_broadcast")["height"].as_u64().unwrap();
+    let cancel_height = z["deadlines"]["cancel_height"].as_u64().unwrap();
+    assert!(
+        refund_height < cancel_height + u64::from(T2) - 3,
+        "refund at {refund_height}, cancel at {cancel_height}"
+    );
+    let child: ferry_btc::bitcoin::Txid = all[0]["txid"].as_str().unwrap().parse().unwrap();
+    assert!(w.rpc.confirmations(&child).await.unwrap().unwrap() >= 1);
+    let record = record_file(&w, "bram", &id);
+    assert_eq!(record["bump"]["attempts"], 1, "{}", record["bump"]);
+    assert!(
+        z["secrets"]["peer_learned"].as_bool().unwrap()
+            && b["secrets"]["mine_revealed"].as_bool().unwrap()
+    );
+    w.status_until(&w.z.url, |s| {
+        s["balances"]["zec_shielded_zat"] == 500_000_000
+    })
+    .await;
+    println!("Z: {}\nB: {}", kinds(&z), kinds(&b));
+}
+
+/// R2, punish: B stalls, Z cancels at T1 and would punish once the cancel has T2 confirmations.
+/// Z is stopped one block short of that, the floor rises above the presigned punish, and Z comes
+/// back after the last block: the node refuses the punish alone, Z's ferryd packages it with a
+/// child, and Z takes the BTC.
+/// Needs a regtest bitcoind started with `-maxmempool=5`.
+#[tokio::test]
+#[ignore = "needs a regtest bitcoind started with -maxmempool=5"]
+async fn bump_stuck_punish_is_packaged() {
+    let mut w = World::start_full(6, Role::B, &[], &["--bump", "on"]).await;
+    w.rpc.generate_to_address(140, &w.miner).await.unwrap();
+    let id = w.start_swap(50_000_000).await;
+    // B stalls in BtcLocked / ZecSeen, as in punish_swap.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let b = w.swap(&w.b.url, &id).await;
+        if state(&b) == "CancelSigned" && kinds(&b).contains("btc_lock_broadcast") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "B never locked\n{}", w.b.logs());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    w.mine().await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !matches!(state(&w.swap(&w.b.url, &id).await), "BtcLocked" | "ZecSeen") {
+        assert!(Instant::now() < deadline, "B never reached BtcLocked\n{}", w.b.logs());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (code, body) = w
+        .post(
+            &w.b.url,
+            &format!("/api/swaps/{id}/fault"),
+            json!({"fault": "stall"}),
+        )
+        .await;
+    assert_eq!(code, 200, "{body}");
+    w.run_until(&id, 300, 20, |z, _| state(z) == "ZecLocked")
+        .await;
+
+    // Z cancels at T1 (the floor is low); wait for the cancel to be mined, then mine to one
+    // block short of T2 confirmations.
+    let (z, _) = w
+        .run_until(&id, 300, 60, |z, _| z["deadlines"]["cancel_height"].is_u64())
+        .await;
+    let cancel_height = z["deadlines"]["cancel_height"].as_u64().unwrap();
+    loop {
+        let confs = w.rpc.block_count().await.unwrap() - cancel_height + 1;
+        assert!(confs < u64::from(T2), "T2 reached before Z was stopped");
+        if confs == u64::from(T2) - 1 {
+            break;
+        }
+        w.mine().await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(!kinds(&w.swap(&w.z.url, &id).await).contains("punish_broadcast"));
+    w.z.kill();
+    raise_mempool_floor(&w.rpc, 60).await;
+    w.mine().await; // the cancel now has T2 confirmations: the punish is valid
+    w.z.spawn();
+    w.wait_ready(&w.z.url.clone()).await;
+
+    let (z, b) = w
+        .run_until(&id, 300, 60, |z, b| {
+            z["outcome"] == "punished" && b["outcome"] == "punished"
+        })
+        .await;
+    let all = bumps(&z);
+    for e in &all {
+        println!("bump: {}", e["label"]);
+    }
+    assert_eq!(all.len(), 1, "{}", kinds(&z));
+    let label = all[0]["label"].as_str().unwrap();
+    assert!(
+        label.contains("tx_punish") && label.contains("as a package"),
+        "{label}"
+    );
+    entry(&z, "punish_broadcast");
+    entry(&b, "punish_seen");
+    let child: ferry_btc::bitcoin::Txid = all[0]["txid"].as_str().unwrap().parse().unwrap();
+    assert!(w.rpc.confirmations(&child).await.unwrap().unwrap() >= 1);
+    println!("Z: {}\nB: {}", kinds(&z), kinds(&b));
+}
+
+/// R3 as far as it is built: a Z taker that names a third-party `payout_to` has no output of its
+/// own on tx_redeem to bump from, so ferryd says so once and does not bump. (Forwarding the payout
+/// from a child is not built: see docs/THREAT-MODEL.md.) With the floor above the presigned fee
+/// the redeem simply stays out of the mempool.
+/// Needs a regtest bitcoind started with `-maxmempool=5`.
+#[tokio::test]
+#[ignore = "needs a regtest bitcoind started with -maxmempool=5"]
+async fn bump_leaves_a_third_party_payout_alone() {
+    let w = World::start_full(2, Role::B, &[], &["--bump", "on"]).await;
+    w.rpc.generate_to_address(140, &w.miner).await.unwrap();
+    raise_mempool_floor(&w.rpc, 60).await;
+    let payout = w.rpc.new_address(Network::Regtest).await.unwrap();
+    let (code, body) = w
+        .post(
+            &w.taker().url,
+            "/api/swaps",
+            json!({
+                "maker": w.maker().peer_url(),
+                "zec_zat": 100_000_000u64,
+                "payout_to": payout.to_string(),
+            }),
+        )
+        .await;
+    assert_eq!(code, 201, "{body}\n{}", w.z.logs());
+    let id = body["id"].as_str().unwrap().to_string();
+    let (z, _) = w
+        .run_until(&id, 300, 40, |z, _| kinds(z).contains("fee_bump_note"))
+        .await;
+    let note = entry(&z, "fee_bump_note");
+    assert!(
+        note["label"].as_str().unwrap().contains("third-party"),
+        "{note}"
+    );
+    // A few more blocks and ticks: the note is written once and nothing is bumped.
+    for _ in 0..4 {
+        w.mine().await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    let z = w.swap(&w.z.url, &id).await;
+    let notes = z["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "fee_bump_note")
+        .count();
+    assert_eq!(notes, 1, "{}", kinds(&z));
+    assert!(bumps(&z).is_empty(), "{}", kinds(&z));
+    assert_eq!(state(&z), "Redeeming");
+}
+
+/// `--bump off` (the default) never bumps, even when the redeem is stuck below the floor, and the
+/// `bump-off` file stops a running ferryd that has `--bump on`.
+/// Needs a regtest bitcoind started with `-maxmempool=5`.
+#[tokio::test]
+#[ignore = "needs a regtest bitcoind started with -maxmempool=5"]
+async fn bump_off_and_the_kill_file_stop_all_bumping() {
+    // Off by default: the redeem stays out of the mempool and nothing is bumped.
+    let w = World::start_full(2, Role::B, &[], &[]).await;
+    w.rpc.generate_to_address(140, &w.miner).await.unwrap();
+    raise_mempool_floor(&w.rpc, 60).await;
+    let id = w.start_swap(100_000_000).await;
+    w.run_until(&id, 300, 40, |z, _| state(z) == "Redeeming")
+        .await;
+    for _ in 0..4 {
+        w.mine().await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    let z = w.swap(&w.z.url, &id).await;
+    assert_eq!(state(&z), "Redeeming");
+    assert!(bumps(&z).is_empty() && !kinds(&z).contains("fee_bump_note"));
+    drop(w);
+
+    // On, but the kill file is there from the start: the same.
+    let w = World::start_full(2, Role::B, &[], &["--bump", "on"]).await;
+    std::fs::write(w._dir.path().join("zoe").join("bump-off"), "").unwrap();
+    let id = w.start_swap(100_000_000).await;
+    w.run_until(&id, 300, 40, |z, _| state(z) == "Redeeming")
+        .await;
+    for _ in 0..4 {
+        w.mine().await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    let z = w.swap(&w.z.url, &id).await;
+    assert_eq!(state(&z), "Redeeming");
+    assert!(bumps(&z).is_empty(), "{}", kinds(&z));
+    // Removing the file lets it bump at the next tick, without a restart.
+    std::fs::remove_file(w._dir.path().join("zoe").join("bump-off")).unwrap();
+    let (z, _) = w
+        .run_until(&id, 300, 40, |z, _| !bumps(z).is_empty())
+        .await;
+    assert!(
+        bumps(&z)[0]["label"].as_str().unwrap().contains("tx_redeem"),
+        "{}",
+        kinds(&z)
+    );
+}

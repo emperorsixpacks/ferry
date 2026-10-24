@@ -298,6 +298,33 @@ async fn child_bump_primitives() {
         .unwrap();
     println!("{coin}: one satoshi short of the replacement rule: {verdict:?}");
     assert!(!verdict[0].allowed, "{verdict:?}");
+    // Bitcoin Core 28.1, and litecoind started with -mempoolreplacement=1, say "insufficient
+    // fee". Litecoin Core 0.21.5.6 has replacement OFF by default (-mempoolreplacement=0): it
+    // answers "txn-mempool-conflict" to any replacement, so there a child can never be replaced.
+    let replaces = verdict[0].reject_reason.as_deref() == Some("insufficient fee");
+    if !replaces {
+        assert_eq!(coin, Coin::Ltc, "{verdict:?}");
+        assert_eq!(
+            verdict[0].reject_reason.as_deref(),
+            Some("txn-mempool-conflict")
+        );
+        let c2 = build_child(
+            &rpc,
+            &parent.tx,
+            vout,
+            &dest2,
+            Amount::from_sat(need + 1_000),
+            coin,
+            &limits,
+        )
+        .await
+        .unwrap();
+        let err = rpc.broadcast(&c2.tx).await.unwrap_err().to_string();
+        println!("{coin}: this node does not replace: {err}");
+        assert!(err.contains("txn-mempool-conflict"), "{err}");
+        println!("{coin}: replacement is off on this node; the rest of the replacement checks are skipped");
+        return;
+    }
     assert!(rpc.broadcast(&low.tx).await.is_err());
     let c2 = build_child(
         &rpc,
@@ -314,10 +341,12 @@ async fn child_bump_primitives() {
         .test_accept(std::slice::from_ref(&c2.tx), None)
         .await
         .unwrap();
-    assert!(
-        verdict[0].allowed,
-        "exactly the incremental fee: {verdict:?}"
-    );
+    if coin == Coin::Btc {
+        assert!(
+            verdict[0].allowed,
+            "exactly the incremental fee: {verdict:?}"
+        );
+    }
     let c2_txid = rpc.broadcast(&c2.tx).await.unwrap();
     assert_eq!(rpc.mempool_entry(&c1_txid).await.unwrap(), None, "replaced");
     let e = rpc.mempool_entry(&parent_txid).await.unwrap().unwrap();
