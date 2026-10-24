@@ -26,6 +26,11 @@ use serde_json::{json, Value};
 const TOKEN: &str = "evm-it-token";
 const RATE: u64 = 40_000_000; // 40 USDC per ZEC
 const T1_SECS: u64 = 120;
+
+/// The two tests that time a start (it must answer within 2 s, before any block) hold this, and
+/// so does the payout test, so its anvil and two daemons never compete with them for the CPU on
+/// a busy machine (their DLEQ proofs are the slow part of a start).
+static TIMED: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 // anvil's well-known test accounts (its default mnemonic): 0 deploys, 1 is B, 2 is Z
 const KEY_DEPLOYER: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const KEY_B: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
@@ -358,6 +363,7 @@ async fn propose(chain: &Chain, offer: &Value, sid: [u8; 32], zec_zat: u64) -> V
 /// locks from the tick loop, and refunds at t1 when the taker never locks ZEC.
 #[tokio::test]
 async fn slow_lock_maker_answers_at_once_and_still_refunds() {
+    let _timed = TIMED.lock().await;
     let Some(chain) = Chain::start().await else {
         return;
     };
@@ -447,6 +453,7 @@ async fn slow_lock_maker_answers_at_once_and_still_refunds() {
 /// loop), and the swap with a Z maker completes on a chain with 2 s blocks.
 #[tokio::test]
 async fn buy_zec_b_taker_with_a_z_maker() {
+    let _timed = TIMED.lock().await;
     let Some(chain) = Chain::start().await else {
         return;
     };
@@ -814,6 +821,7 @@ const PAYOUT: &str = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
 /// `payout_to` on a B daemon are refused before any maker is contacted.
 #[tokio::test]
 async fn payout_to_claim_lands_at_a_third_address() {
+    let _timed = TIMED.lock().await;
     let Some(chain) = Chain::start().await else {
         return;
     };
