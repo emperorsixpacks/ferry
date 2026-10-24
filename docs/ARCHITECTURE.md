@@ -69,11 +69,12 @@ Z: Negotiated → CancelSigned → BtcLockSeen → ZecLocked → RedeemSigReceiv
                                  (no refund by T2) → Punished(BTC taken) ✔
 ```
 
-## Demo environment
+## Local regtest stack
 
-`infra/up.sh` starts bitcoind regtest, Zebra regtest (Ironwood active from block 1) and Zaino,
-funds a ZEC wallet and a BTC wallet, and starts a block-producer loop. `ferryd` for each party runs
-locally; the web UI talks to both daemons' HTTP APIs.
+`infra/regtest.sh up` starts bitcoind regtest (litecoind with `CHAIN=ltc`), the stand-in Zcash
+chain (`--zec mock`; `ZEC_BACKEND=devtool` runs Zebra regtest with Ironwood active from block 1,
+plus Zaino, instead), starts a ferryd for each party, funds B's wallet and starts a block-producer
+loop. The web UI talks to both daemons' HTTP APIs.
 
 ## EVM counter-chain
 

@@ -101,7 +101,7 @@ leave coins locked that the node doesn't track.
 
 Most of these are the price of having no middleman. Each says what Ferry does about it and what
 is still open. What has actually run, and where, is in [WHAT-IS-REAL.md](WHAT-IS-REAL.md); the
-README's [Known gaps](../README.md#known-gaps) lists them in one line each.
+README's [Known limits](../README.md#known-limits) lists them in one line each.
 
 Z holds the ZEC. B holds the other coin (BTC, LTC, USDC or WETH). B always locks first. When you
 sell ZEC you are Z; when you buy ZEC you are B.
