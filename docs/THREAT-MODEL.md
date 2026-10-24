@@ -509,6 +509,11 @@ identity to go on, and adding one would cost privacy.
 - On the public demo, ZEC a private swap has bought waits in the node's wallet between its two
   swaps, and the node counts it as free; the demo server turns down direct sales on that pair until
   the private swap is done, and buys there too when that node is also a listed partner.
+- **Z's watch for a late ZEC lock is bounded.** After a refund that followed a ZEC send which may
+  have gone out, Z watches the joint address so a lock that lands anyway is reclaimed. It stops
+  once its wallet shows the lock can never land (a lock expires 40 blocks, about 50 minutes, after
+  it is built if it isn't mined), or after a week without news. A wallet server down for longer
+  than that could leave such a note unwatched; the swap record keeps what is needed to reclaim it.
 - **On Base, one stuck transaction holds up the others.** The node's account sends its
   transactions in nonce order. If one (say a lock) sits unmined, for example because its fee was
   too low when gas prices jumped, every later transaction of that account, refunds and claims
