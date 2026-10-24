@@ -7,3 +7,4 @@ node_modules/
 spikes/zec/data/
 web/node_modules/
 web/dist/
+.demo/
