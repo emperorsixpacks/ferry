@@ -43,7 +43,8 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
           <>
             Someone who offers the other coin at a rate they set. Ferry picks the best rate for your amount; to choose another partner, open the settings (the gear above the swap card). A partner can't take
             your coins: the most they can do is not finish, and then your coins come back. Today every partner is run by the Ferry team: one per pair on the public demo, at a
-            fixed test rate, and your own node swaps between its own two wallets until outside partners are listed.
+            fixed test rate, and your own node swaps between its own two wallets until outside partners are listed. Each partner runs a few swaps at once (4 on test networks, 2 on
+            mainnet), as far as its coins go. When every one is full, the swap card says the partner is busy, and how long a swap usually takes: it has room again when one finishes.
           </>
         ),
       },

@@ -443,7 +443,7 @@ function World() {
 const LIMITS = [
   [
     "A partner must be online",
-    "Someone has to hold the other coin and be there to lock and sign. If no partner is online, nothing is locked. Today every partner is ours: one per pair on the public demo, and your own node swaps between its own two wallets until outside partners are listed.",
+    "Someone has to hold the other coin and be there to lock and sign. If no partner is online, nothing is locked. Today every partner is ours: one per pair on the public demo, and your own node swaps between its own two wallets until outside partners are listed. A partner runs a few swaps at once (4 on test networks, 2 on mainnet), as far as its coins go, so one person who walks away no longer blocks it; when every slot is taken, the app says the partner is busy.",
   ],
   [
     "Either side can walk away",

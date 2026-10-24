@@ -116,9 +116,12 @@ Every trustless swap needs someone who holds the other coin and is there to answ
 - **What is still open.** Today the only partners are ours: one per pair on the public demo. No
   outside partner is listed for nodes (`infra/node/makers.txt` is empty), so a node swaps between
   its own two wallets. Outside nodes can't reach the demo's partner yet
-  ([DEPLOY.md](DEPLOY.md#9-firewall)). Each partner takes one swap at a time, so one taker who
-  walks away keeps it busy until the first deadline.
-  <!-- update after many-swaps / safer-settings merge -->
+  ([DEPLOY.md](DEPLOY.md#9-firewall)). Each partner runs several swaps at once (4 on test
+  networks and 2 on mainnet by default, as far as its free funds go), so one taker who walks away
+  no longer keeps it busy. That swap still holds one of its slots, and its coins until the first
+  deadline; if the taker never locked anything, not even the slot once 30 minutes have passed
+  ([Several swaps at once](#several-swaps-at-once)). When every slot is taken, the app says the
+  partner is busy.
 
 ### Either side can walk away, and no chain can fine them
 

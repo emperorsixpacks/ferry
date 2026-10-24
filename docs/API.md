@@ -95,7 +95,8 @@ fetch a URL of its choosing. Buying ZEC is the same call on a B daemon (`/daemon
 (the per-swap cap, both rate limits, the allowlist and firm quotes). Several swaps run on a pair at
 once: the daemons decide how many ([Several swaps at once](#several-swaps-at-once)), and a start
 they can't take reaches the browser as `409 {"error": "Every partner is busy right now. Try again
-in a few minutes.", "code": "busy"}`. While a private swap is moving, a direct sell on the pair it
+once one of their swaps finishes.", "code": "busy"}` (the app adds a swap's usual time for the pair,
+from `web/server/paths.mjs`). While a private swap is moving, a direct sell on the pair it
 sells ZEC on is refused (`409`): the ZEC its first swap bought waits in that daemon's wallet, which
 the daemon counts as free.
 

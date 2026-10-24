@@ -153,9 +153,9 @@ coins, and either side can still walk away with its own.
 - Nothing changes on chain: the ZEC stays shielded and nothing links the two chains.
 
 **Limits.**
-- Firm, within limits: ferryd runs one swap at a time, so a partner gives no prices while it is busy,
-  and if two of its open prices are taken at the same moment the second is refused as busy; the app
-  then falls back. A partner that restarts forgets its open prices and refuses them (it never fills
+- Firm, within limits: a partner gives no prices while it runs as many swaps as it takes at once
+  (`--max-swaps`), and if two of its open prices are taken and its free funds cover only one, the
+  second is refused as busy; the app then falls back. A partner that restarts forgets its open prices and refuses them (it never fills
   one at a different rate).
 - Partners limit requests (20 a minute from one address, 240 in all; 6 open prices per address, 32
   in all), and so does the public demo's server (30 a minute per visitor, 600 in all).
