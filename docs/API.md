@@ -52,7 +52,10 @@ then carry:
   "paused": false }
 ```
 
-All four are optional for a taker: an older maker leaves them out. A maker (any daemon started with
+All four are optional for a taker: an older maker leaves them out. A Bitcoin or Litecoin daemon's
+offer also lists `"features": ["payout"]`: it takes a Propose whose Z names a payout address (see
+[Payout address](#payout-address-payout_to)); an older maker leaves the list out, and a Z taker
+with a `payout_to` won't propose to it. A maker (any daemon started with
 `--maker-offer`) also publishes `"quote_key": "02…"`, the key it signs firm quotes with. In
 `/api/status`, `offer.maker` says whether the daemon was started with `--maker-offer` (paused or
 not); a Z maker's `liquidity` is its spendable shielded ZEC less the lock fee.
@@ -207,10 +210,12 @@ one swap start only.
              "fee_sat": 2000, "t1_blocks": 12, "t2_blocks": 24, "btc_lock_confs": 2, "zec_confs": 3 },
   // fee_sat: the fixed fee of each presigned BTC transaction (the redeem pays one; the refund
   // path pays two: cancel + refund). t1/t2 in BTC blocks; confirmations Z/B wait for.
-  "features": ["route"]
+  "features": ["route", "payout"]
   // What this ferryd supports beyond the base API. "route": POST /api/swaps takes the route
   // fields (see "Route legs"). ferry-route starts a leg only on a daemon that lists it: an older
-  // ferryd would silently ignore those fields.
+  // ferryd would silently ignore those fields. "payout": POST /api/swaps takes payout_to (see
+  // "Payout address"); send it only to a daemon that lists this, since an older one would ignore
+  // it and pay its own wallet.
 }
 ```
 
@@ -288,6 +293,49 @@ An optional `quote` (a firm quote from that maker) fixes the rate: see
 One start at a time: while a `POST /api/swaps` is being handled, another one gets `409 Another
 swap is being started`, and a maker takes no proposal meanwhile.
 
+### Payout address (`payout_to`)
+
+A Z taker (selling ZEC) may name where the counter coin goes when it redeems (EVM: claims),
+instead of its own wallet: for example a NEAR Intents 1Click deposit address on that coin's chain
+([ARCHITECTURE.md](ARCHITECTURE.md#cross-chain-settlement-with-near-intents)).
+
+```json
+{ "maker": "http://127.0.0.1:7112", "zec_zat": 100000000,
+  "payout_to": "bc1q…",          // role Z only; optional (default: our own wallet, as before)
+  "min_counter": 412000 }        // optional, as for a route leg
+```
+
+- **Checked before the maker is contacted**, and never set by a peer. Refusals are
+  `400 {"error": "payout_to: …"}`:
+  - any daemon: 1 to 100 ASCII letters and digits; role B gets `payout_to is for role Z only`;
+  - **Bitcoin/Litecoin**: an address of the daemon's coin and network (`bcrt1…`, `tb1…`, `bc1…`;
+    `rltc1…`, `ltc1…`; base58 too), of a type only its owner can spend: P2TR, P2WPKH, P2WSH,
+    P2PKH or P2SH. A pay-to-anchor output or an unknown witness version is refused. The maker's
+    offer must list `features: ["payout"]` (`payout_to: this maker's ferryd can't pay a payout
+    address …` otherwise);
+  - **EVM**: `0x` and 40 hex digits, all lowercase, all uppercase, or mixed case with a valid
+    EIP-55 checksum (a mistyped checksummed address is refused); not the zero address, the
+    FerryLock contract or the token contract.
+- **Bound at negotiation; nobody can change it afterwards.** Bitcoin/Litecoin: it is sent in Z's
+  Propose (`Setup.redeem_address`, part of the transcript), both sides build tx_redeem to it, and
+  B's redeem adaptor signature commits to that output. The redeem pays it `btc_sat − fee_sat` (the
+  locked amount less the presigned redeem fee), above the output type's dust floor. EVM: it is Z's
+  account in the setup, so FerryLock's terms carry it as `claimer`; Z checks the on-chain terms
+  before locking ZEC, the claim pays `claimer` the amount (less a tip, 0 by default), and Z's own
+  account still sends the claim and pays its gas.
+- **What it does not change.** Z's ZEC always comes back to Z's own wallet on a refund. On
+  Bitcoin/Litecoin tx_punish still pays Z's own address. On EVM FerryLock has one payee for Z,
+  so a punish (B vanished after locking, from t2) pays `payout_to` too.
+- The maker learns the address (it signs the redeem, or locks to the claimer), as it learns Z's
+  own address without one.
+- `SwapView.payout_to` shows it as the chain writes it (lowercase bech32, checksummed hex); the
+  timeline starts with a `payout_to` entry, and `swap_complete` names the address.
+
+**The public demo must never let a visitor choose `payout_to`.** On the demo the server's own
+daemons hold the coins, so a visitor's `payout_to` would pay the operator's coins to the visitor.
+The UI server drops it from browser requests and sets it only to a 1Click deposit address it
+created itself, on a daemon whose status lists `"payout"`.
+
 ### Route legs
 
 `ferry-route` (crates/ferry-route) starts each leg of a route (coin A → shielded ZEC → coin C)
@@ -317,6 +365,9 @@ with these extra fields, all optional:
   starts: `400 The maker asks 0.00412501 BTC for 1.00 ZEC, above your limit of 0.004125 BTC
   (max_counter)` / `… pays …, below your minimum of … (min_counter)`. A limit of the wrong role is
   a `400`.
+
+Leg 2 may also carry `payout_to` (above) when the route request named one, so a route can end on
+NEAR Intents; ferry-route sends it only to a daemon that lists `"payout"`.
 
 A leg's timeline starts with a `route_leg` entry (local) naming the label and, for B, the sweep
 destination. The router's own API (`POST /api/routes`, `GET /api/routes/:id`, `continue`, `stop`,
@@ -357,7 +408,8 @@ route runs and fails is in [PROTOCOL.md](PROTOCOL.md#routes) and
   "watchtower": { "url": "http://…", "status": "pending|armed|refused", "package_id": "hex|null",
                   "note": "Human-readable sentence", "next_try_ms": 0 },  // null without --watchtower
   "route": "r9f3a0c2d4e5b6a71/1",   // the route label it was started with; null for a direct swap
-  "sweep_to": "utest1…"             // B taker: where its sweep pays; null: its own wallet
+  "sweep_to": "utest1…",            // B taker: where its sweep pays; null: its own wallet
+  "payout_to": null                 // Z taker: where its redeem (EVM: claim) pays; null: its own wallet
 }
 ```
 
@@ -421,7 +473,8 @@ free-form. The mock uses: `propose_sent`, `propose_received`, `dleq_verified`, `
 `lock_template_sent`, `cancel_sigs_sent`, `refund_adaptor_verified`, `cancel_sig_received`,
 `btc_lock_seen`, `zec_note_seen`, `zec_confirmed`, `redeem_adaptor_sent`, `redeem_adaptor_received`,
 `cancel_seen`, `punish_seen`, `swap_complete`, `refunded`, `reclaimed`, `punished`. ferryd also
-emits `route_leg` (local) first on a swap started as a route leg,
+emits `route_leg` (local) first on a swap started as a route leg, `payout_to` (local) on a Z swap
+started with a payout address,
 `sweep_delayed` (local) when it schedules the random delay before a ZEC sweep or reclaim,
 `peer_message_ignored` / `peer_message_rejected` for a late or invalid peer message, and
 `redeem_adaptor_withheld` (B, local) when its redeem adaptor (EVM: Ready signature) had not reached Z
@@ -444,7 +497,7 @@ Every non-2xx response has a JSON body `{ "error": "Human-readable sentence" }`.
 `error` verbatim under the controls, so it should say what is wrong. For `POST /api/swaps`:
 
 - `400`: bad body, amount outside the offer's `min_zat`/`max_zat`, insufficient funds, a bad
-  route field, or the maker's price past `max_counter` / `min_counter`
+  route field or `payout_to`, or the maker's price past `max_counter` / `min_counter`
 - `409`: a swap is already in progress or being started; with `"code": "route_label_in_use"`,
   the route label is taken (by a swap, or by a start still in progress)
 - `500 could not save the swap`: the record could not be written; no swap was created (nothing is
