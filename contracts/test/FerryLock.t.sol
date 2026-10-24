@@ -169,10 +169,11 @@ contract ReentrantToken {
     FerryLock public target;
     bytes32 public id;
     uint256 public z;
+    bytes public sig;
     bool public reentered;
 
-    function arm(FerryLock t, bytes32 i, uint256 s) external {
-        (target, id, z) = (t, i, s);
+    function arm(FerryLock t, bytes32 i, uint256 s, bytes calldata g) external {
+        (target, id, z, sig) = (t, i, s, g);
     }
 
     function mint(address to, uint256 a) external {
@@ -192,7 +193,7 @@ contract ReentrantToken {
     function transfer(address to, uint256 a) external returns (bool) {
         if (address(target) != address(0) && !reentered) {
             reentered = true;
-            target.claim(id, z, 0);
+            target.claim(id, z, 0, sig);
         }
         balanceOf[msg.sender] -= a;
         balanceOf[to] += a;
@@ -211,7 +212,8 @@ contract FerryLockTest is Test {
 
     FerryLock lock;
     MockUSDC usdc;
-    address b = makeAddr("B");
+    address b;
+    uint256 bKey;
     address zPayout = makeAddr("Z");
     address relayer = makeAddr("relayer");
     bytes32 constant SALT = keccak256("session-1");
@@ -230,12 +232,12 @@ contract FerryLockTest is Test {
         uint64 t2,
         uint256 maxTip
     );
-    event Ready(bytes32 indexed id);
     event Claimed(bytes32 indexed id, uint256 z, address caller, uint256 tip);
     event Refunded(bytes32 indexed id, uint256 b);
     event Punished(bytes32 indexed id);
 
     function setUp() public {
+        (b, bKey) = makeAddrAndKey("B");
         vm.warp(1_700_000_000);
         lock = new FerryLock();
         usdc = new MockUSDC();
@@ -265,10 +267,31 @@ contract FerryLockTest is Test {
         id = lock.lock(SALT, terms(address(usdc)));
     }
 
-    function lockReady() internal returns (bytes32 id) {
-        id = doLock();
-        vm.prank(b);
-        lock.ready(id);
+    /// B's EIP-712 Ready(id) signature, r || s || v. The digest is computed here (no call into
+    /// the contract), so it can be built as an argument right after vm.expectRevert.
+    function readySig(bytes32 id) internal view returns (bytes memory) {
+        return sign(bKey, digestFor(address(lock), id));
+    }
+
+    function digestFor(address target, bytes32 id) internal view returns (bytes32) {
+        bytes32 domain = keccak256(
+            abi.encode(
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+                ),
+                keccak256("FerryLock"),
+                keccak256("1"),
+                block.chainid,
+                target
+            )
+        );
+        bytes32 structHash = keccak256(abi.encode(keccak256("Ready(bytes32 id)"), id));
+        return keccak256(abi.encodePacked("\x19\x01", domain, structHash));
+    }
+
+    function sign(uint256 key, bytes32 digest) internal pure returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(key, digest);
+        return abi.encodePacked(r, s, v);
     }
 
     function state(bytes32 id) internal view returns (FerryLock.State s) {
@@ -411,74 +434,111 @@ contract FerryLockTest is Test {
         lock.lock(SALT, terms(address(usdc)));
     }
 
-    // ---- ready ----
+    // ---- the EIP-712 Ready(id) signature ----
 
-    function test_ready_onlyRefunderBeforeT1Once() public {
-        bytes32 id = doLock();
-        vm.prank(zPayout);
-        vm.expectRevert(FerryLock.NotRefunder.selector);
-        lock.ready(id);
-
-        vm.warp(t1);
-        vm.prank(b);
-        vm.expectRevert(FerryLock.TooLate.selector);
-        lock.ready(id);
-
-        vm.warp(t1 - 1);
-        vm.prank(b);
-        vm.expectEmit(address(lock));
-        emit Ready(id);
-        lock.ready(id);
-        assertEq(uint8(state(id)), uint8(FerryLock.State.Ready));
-
-        vm.prank(b);
-        vm.expectRevert(
-            abi.encodeWithSelector(FerryLock.WrongState.selector, FerryLock.State.Ready)
+    function test_readyDigest_isEip712() public view {
+        bytes32 id = keccak256("some swap");
+        assertEq(lock.readyDigest(id), digestFor(address(lock), id));
+        assertEq(
+            lock.domainSeparator(),
+            keccak256(
+                abi.encode(
+                    keccak256(
+                        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+                    ),
+                    keccak256("FerryLock"),
+                    keccak256("1"),
+                    block.chainid,
+                    address(lock)
+                )
+            )
         );
-        lock.ready(id);
     }
 
-    function test_ready_unknownSwap() public {
+    function test_claim_withoutValidReadySigReverts() public {
+        bytes32 id = doLock();
+        bytes memory good = readySig(id);
+
+        // Missing, truncated, or signed by someone other than the refunder.
+        vm.expectRevert(FerryLock.NotReady.selector);
+        lock.claim(id, Z_SHARE, 0, "");
+        vm.expectRevert(FerryLock.NotReady.selector);
+        lock.claim(id, Z_SHARE, 0, abi.encodePacked(bytes32(0), bytes32(0)));
+        (, uint256 otherKey) = makeAddrAndKey("not B");
+        vm.expectRevert(FerryLock.NotReady.selector);
+        lock.claim(id, Z_SHARE, 0, sign(otherKey, digestFor(address(lock), id)));
+
+        // B's signature for a different swap id does not transfer.
+        vm.expectRevert(FerryLock.NotReady.selector);
+        lock.claim(id, Z_SHARE, 0, readySig(keccak256("other swap")));
+
+        // The high-s twin of a valid signature is refused (one encoding per signature).
+        (uint8 v, bytes32 r, bytes32 sv) = vm.sign(bKey, digestFor(address(lock), id));
+        bytes memory twin = abi.encodePacked(r, bytes32(N - uint256(sv)), v == 27 ? 28 : 27);
+        vm.expectRevert(FerryLock.NotReady.selector);
+        lock.claim(id, Z_SHARE, 0, twin);
+        // A bad v is refused.
+        bytes memory badV = abi.encodePacked(r, sv, uint8(v + 2));
+        vm.expectRevert(FerryLock.NotReady.selector);
+        lock.claim(id, Z_SHARE, 0, badV);
+
+        lock.claim(id, Z_SHARE, 0, good);
+        assertEq(usdc.balanceOf(zPayout), AMOUNT);
+    }
+
+    /// The domain binds the chain: a signature from one chain is useless on another.
+    function test_readySig_boundToChain() public {
+        bytes32 id = doLock();
+        bytes memory sig = readySig(id);
+        uint256 chain = block.chainid;
+        vm.chainId(chain + 1);
+        vm.expectRevert(FerryLock.NotReady.selector);
+        lock.claim(id, Z_SHARE, 0, sig);
+        vm.chainId(chain);
+        lock.claim(id, Z_SHARE, 0, sig);
+    }
+
+    /// ...and the contract: the same id on another FerryLock needs its own signature.
+    function test_readySig_boundToContract() public {
+        FerryLock other = new FerryLock();
         vm.prank(b);
-        vm.expectRevert(abi.encodeWithSelector(FerryLock.WrongState.selector, FerryLock.State.None));
-        lock.ready(bytes32(uint256(1)));
+        usdc.approve(address(other), type(uint256).max);
+        vm.prank(b);
+        bytes32 id = other.lock(SALT, terms(address(usdc)));
+        assertEq(id, lock.swapId(b, SALT));
+        vm.expectRevert(FerryLock.NotReady.selector);
+        other.claim(id, Z_SHARE, 0, sign(bKey, digestFor(address(lock), id)));
+        other.claim(id, Z_SHARE, 0, sign(bKey, digestFor(address(other), id)));
     }
 
     // ---- claim ----
 
     function test_claim_happy() public {
-        bytes32 id = lockReady();
+        bytes32 id = doLock();
         vm.expectEmit(address(lock));
         emit Claimed(id, Z_SHARE, zPayout, 0);
         vm.prank(zPayout);
-        lock.claim(id, Z_SHARE, 0);
+        lock.claim(id, Z_SHARE, 0, readySig(id));
         assertEq(usdc.balanceOf(zPayout), AMOUNT);
         assertEq(usdc.balanceOf(address(lock)), 0);
         assertEq(uint8(state(id)), uint8(FerryLock.State.Claimed));
     }
 
     function test_claim_justBeforeT1() public {
-        bytes32 id = lockReady();
+        bytes32 id = doLock();
         vm.warp(t1 - 1);
-        lock.claim(id, Z_SHARE, 0);
+        lock.claim(id, Z_SHARE, 0, readySig(id));
         assertEq(usdc.balanceOf(zPayout), AMOUNT);
     }
 
-    function test_claim_beforeReadyReverts() public {
-        bytes32 id = doLock();
-        vm.prank(zPayout);
-        vm.expectRevert(FerryLock.NotReady.selector);
-        lock.claim(id, Z_SHARE, 0);
-    }
-
     function test_claim_wrongScalarReverts() public {
-        bytes32 id = lockReady();
+        bytes32 id = doLock();
         vm.expectRevert(FerryLock.BadScalar.selector);
-        lock.claim(id, B_SHARE, 0);
+        lock.claim(id, B_SHARE, 0, readySig(id));
         vm.expectRevert(FerryLock.BadScalar.selector);
-        lock.claim(id, Z_SHARE + 1, 0);
+        lock.claim(id, Z_SHARE + 1, 0, readySig(id));
         vm.expectRevert(FerryLock.BadScalar.selector);
-        lock.claim(id, 0, 0);
+        lock.claim(id, 0, 0, readySig(id));
     }
 
     /// k + n names the same point as k; only the canonical scalar (the one B can map back to a
@@ -486,61 +546,59 @@ contract FerryLockTest is Test {
     function test_claim_nonCanonicalScalarReverts() public {
         FerryLock.Terms memory t = terms(address(usdc));
         t.zAddr = vm.addr(5);
-        vm.startPrank(b);
+        vm.prank(b);
         bytes32 id = lock.lock(SALT, t);
-        lock.ready(id);
-        vm.stopPrank();
         vm.expectRevert(FerryLock.BadScalar.selector);
-        lock.claim(id, 5 + N, 0);
-        lock.claim(id, 5, 0);
+        lock.claim(id, 5 + N, 0, readySig(id));
+        lock.claim(id, 5, 0, readySig(id));
         assertEq(usdc.balanceOf(zPayout), AMOUNT);
     }
 
     function testFuzz_claim_wrongScalarReverts(uint256 k) public {
         vm.assume(k != Z_SHARE);
-        bytes32 id = lockReady();
+        bytes32 id = doLock();
         vm.expectRevert(FerryLock.BadScalar.selector);
-        lock.claim(id, k, 0);
+        lock.claim(id, k, 0, readySig(id));
     }
 
     function test_claim_atOrAfterT1Reverts() public {
-        bytes32 id = lockReady();
+        bytes32 id = doLock();
         vm.warp(t1);
         vm.expectRevert(FerryLock.TooLate.selector);
-        lock.claim(id, Z_SHARE, 0);
+        lock.claim(id, Z_SHARE, 0, readySig(id));
     }
 
     function test_claim_twiceReverts() public {
-        bytes32 id = lockReady();
-        lock.claim(id, Z_SHARE, 0);
+        bytes32 id = doLock();
+        lock.claim(id, Z_SHARE, 0, readySig(id));
         vm.expectRevert(
             abi.encodeWithSelector(FerryLock.WrongState.selector, FerryLock.State.Claimed)
         );
-        lock.claim(id, Z_SHARE, 0);
+        lock.claim(id, Z_SHARE, 0, readySig(id));
     }
 
     function test_claim_relayerTip() public {
-        bytes32 id = lockReady();
+        bytes32 id = doLock();
         vm.expectEmit(address(lock));
         emit Claimed(id, Z_SHARE, relayer, MAX_TIP);
         vm.prank(relayer);
-        lock.claim(id, Z_SHARE, MAX_TIP);
+        lock.claim(id, Z_SHARE, MAX_TIP, readySig(id));
         assertEq(usdc.balanceOf(relayer), MAX_TIP);
         assertEq(usdc.balanceOf(zPayout), AMOUNT - MAX_TIP);
     }
 
     function test_claim_tipAboveMaxReverts() public {
-        bytes32 id = lockReady();
+        bytes32 id = doLock();
         vm.prank(relayer);
         vm.expectRevert(FerryLock.TipTooHigh.selector);
-        lock.claim(id, Z_SHARE, MAX_TIP + 1);
+        lock.claim(id, Z_SHARE, MAX_TIP + 1, readySig(id));
     }
 
     function testFuzz_claim_tipSplit(uint256 tip) public {
         tip = bound(tip, 0, MAX_TIP);
-        bytes32 id = lockReady();
+        bytes32 id = doLock();
         vm.prank(relayer);
-        lock.claim(id, Z_SHARE, tip);
+        lock.claim(id, Z_SHARE, tip, readySig(id));
         assertEq(usdc.balanceOf(relayer) + usdc.balanceOf(zPayout), AMOUNT);
         assertEq(usdc.balanceOf(relayer), tip);
     }
@@ -583,8 +641,8 @@ contract FerryLockTest is Test {
         assertEq(uint8(state(id)), uint8(FerryLock.State.Refunded));
     }
 
-    function test_refund_afterReadyButUnclaimed() public {
-        bytes32 id = lockReady();
+    function test_refund_unclaimed() public {
+        bytes32 id = doLock();
         vm.warp(t1);
         // Anyone holding b may send it; the tokens only go to the refunder.
         vm.prank(relayer);
@@ -594,8 +652,8 @@ contract FerryLockTest is Test {
     }
 
     function test_refund_afterClaimReverts() public {
-        bytes32 id = lockReady();
-        lock.claim(id, Z_SHARE, 0);
+        bytes32 id = doLock();
+        lock.claim(id, Z_SHARE, 0, readySig(id));
         vm.warp(t1);
         vm.expectRevert(
             abi.encodeWithSelector(FerryLock.WrongState.selector, FerryLock.State.Claimed)
@@ -625,16 +683,16 @@ contract FerryLockTest is Test {
         lock.refund(id, B_SHARE);
     }
 
-    function test_punish_afterReady() public {
-        bytes32 id = lockReady();
+    function test_punish_lastMoment() public {
+        bytes32 id = doLock();
         vm.warp(t2 + 1 days);
         lock.punish(id);
         assertEq(usdc.balanceOf(zPayout), AMOUNT);
     }
 
     function test_punish_afterClaimReverts() public {
-        bytes32 id = lockReady();
-        lock.claim(id, Z_SHARE, 0);
+        bytes32 id = doLock();
+        lock.claim(id, Z_SHARE, 0, readySig(id));
         vm.warp(t2);
         vm.expectRevert(
             abi.encodeWithSelector(FerryLock.WrongState.selector, FerryLock.State.Claimed)
@@ -649,9 +707,7 @@ contract FerryLockTest is Test {
         t.mint(b, AMOUNT);
         vm.prank(b);
         bytes32 id = lock.lock(SALT, terms(address(t)));
-        vm.prank(b);
-        lock.ready(id);
-        lock.claim(id, Z_SHARE, 0);
+        lock.claim(id, Z_SHARE, 0, readySig(id));
         assertEq(t.balanceOf(zPayout), AMOUNT);
     }
 
@@ -660,12 +716,10 @@ contract FerryLockTest is Test {
         t.mint(b, AMOUNT);
         vm.prank(b);
         bytes32 id = lock.lock(SALT, terms(address(t)));
-        vm.prank(b);
-        lock.ready(id);
         vm.expectRevert(FerryLock.TransferFailed.selector);
-        lock.claim(id, Z_SHARE, 0);
-        // The failed claim rolled back: still Ready.
-        assertEq(uint8(state(id)), uint8(FerryLock.State.Ready));
+        lock.claim(id, Z_SHARE, 0, readySig(id));
+        // The failed claim rolled back: still Locked.
+        assertEq(uint8(state(id)), uint8(FerryLock.State.Locked));
     }
 
     function test_reentrancyBlocked() public {
@@ -673,12 +727,10 @@ contract FerryLockTest is Test {
         t.mint(b, AMOUNT);
         vm.prank(b);
         bytes32 id = lock.lock(SALT, terms(address(t)));
-        vm.prank(b);
-        lock.ready(id);
-        t.arm(lock, id, Z_SHARE);
+        t.arm(lock, id, Z_SHARE, readySig(id));
         // The inner claim hits the guard, so the token's transfer (and the claim) fails.
         vm.expectRevert(FerryLock.TransferFailed.selector);
-        lock.claim(id, Z_SHARE, 0);
-        assertEq(uint8(state(id)), uint8(FerryLock.State.Ready));
+        lock.claim(id, Z_SHARE, 0, readySig(id));
+        assertEq(uint8(state(id)), uint8(FerryLock.State.Locked));
     }
 }

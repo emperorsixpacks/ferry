@@ -14,8 +14,8 @@ use ferry_dleq::k256::elliptic_curve::PrimeField;
 use ferry_dleq::{PallasPoint, PallasScalar};
 use ferry_evm::bindings::{FerryLock, MockUSDC};
 use ferry_evm::{
-    point_address_sec1, scalar_address, swap_id, Error, EvmClient, Revealed, SwapEventKind,
-    SwapState, SwapWatcher, Terms,
+    point_address_sec1, scalar_address, sign_ready, swap_id, Error, EvmClient, Revealed,
+    SwapEventKind, SwapState, SwapWatcher, Terms,
 };
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
@@ -161,6 +161,14 @@ async fn ferry_lock_on_anvil() {
     let Some(net) = start().await else { return };
     let (b, z, relayer) = (net.client(B), net.client(Z), net.client(RELAYER));
 
+    // Z checks the code at the agreed address is this build's FerryLock.
+    z.check_deployment().await.unwrap();
+    let not_lock = EvmClient::connect_http(&net.url, net.usdc, net.keys[Z].clone()).unwrap();
+    assert!(matches!(
+        not_lock.check_deployment().await,
+        Err(Error::UnknownContract)
+    ));
+
     // The contract's ecrecover check agrees with ferry-evm's (and k256's) point addresses.
     let lock = FerryLock::new(net.lock, b.provider().clone());
     for _ in 0..16 {
@@ -194,27 +202,45 @@ async fn happy_claim_with_relayer(net: &Net, b: &EvmClient, z: &EvmClient, relay
         Err(Error::TermsMismatch("bAddr"))
     ));
 
-    // Not ready yet: the client refuses before anything is broadcast.
+    // Without B's ready signature (here: one by the wrong key, or for another swap) the client
+    // refuses before anything is broadcast.
     let nonce = relayer
         .provider()
         .get_transaction_count(relayer.address())
         .await
         .unwrap();
+    let chain = b.chain_id().await.unwrap();
+    let forged = sign_ready(&net.keys[Z], chain, net.lock, id);
     assert!(matches!(
-        relayer.claim(id, &zs.secp_be, U256::ZERO).await,
-        Err(Error::WrongState(SwapState::Locked, _))
+        relayer.claim(id, &zs.secp_be, U256::ZERO, &forged).await,
+        Err(Error::WouldRevert(_))
+    ));
+    let other_swap = sign_ready(&net.keys[B], chain, net.lock, B256::repeat_byte(1));
+    assert!(matches!(
+        relayer
+            .claim(id, &zs.secp_be, U256::ZERO, &other_swap)
+            .await,
+        Err(Error::WouldRevert(_))
     ));
 
-    // (Z's ZEC lock reaches N confirmations here.) B lets Z claim.
-    b.ready(id).await.unwrap();
+    // (Z's ZEC lock reaches N confirmations here.) B signs Ready(id) off-chain and hands it to
+    // Z: no transaction, no gas, nothing on chain.
+    let ready = sign_ready(&net.keys[B], chain, net.lock, id);
+    let digest = ferry_evm::ready_digest(chain, net.lock, id);
+    let onchain = FerryLock::new(net.lock, b.provider().clone())
+        .readyDigest(id)
+        .call()
+        .await
+        .unwrap();
+    assert_eq!(onchain, digest, "EIP-712 digest matches the contract");
 
     // Wrong share and too high a tip are both refused without broadcasting.
     assert!(matches!(
-        relayer.claim(id, &bs.secp_be, U256::ZERO).await,
+        relayer.claim(id, &bs.secp_be, U256::ZERO, &ready).await,
         Err(Error::ScalarMismatch)
     ));
     let err = relayer
-        .claim(id, &zs.secp_be, U256::from(MAX_TIP + 1))
+        .claim(id, &zs.secp_be, U256::from(MAX_TIP + 1), &ready)
         .await
         .unwrap_err();
     assert!(
@@ -234,7 +260,7 @@ async fn happy_claim_with_relayer(net: &Net, b: &EvmClient, z: &EvmClient, relay
     // A relayer claims for Z (Z needs no ETH) and keeps the tip.
     let z_before = net.balance(b, net.keys[Z].address()).await;
     let claim_tx = relayer
-        .claim(id, &zs.secp_be, U256::from(MAX_TIP))
+        .claim(id, &zs.secp_be, U256::from(MAX_TIP), &ready)
         .await
         .unwrap();
     assert_eq!(
@@ -250,14 +276,10 @@ async fn happy_claim_with_relayer(net: &Net, b: &EvmClient, z: &EvmClient, relay
     let kinds: Vec<_> = events.iter().map(|e| &e.kind).collect();
     assert!(matches!(
         kinds.as_slice(),
-        [
-            SwapEventKind::Locked(_),
-            SwapEventKind::Ready,
-            SwapEventKind::Claimed { .. }
-        ]
+        [SwapEventKind::Locked(_), SwapEventKind::Claimed { .. }]
     ));
     assert_eq!(events[0].kind, SwapEventKind::Locked(t.clone()));
-    let claimed = &events[2];
+    let claimed = &events[1];
     assert_eq!(claimed.tx_hash, claim_tx.tx_hash);
     let revealed = claimed.revealed_share(&t).unwrap().unwrap();
     assert_eq!(revealed, *zs.secp_be);
@@ -307,11 +329,12 @@ async fn refund(net: &Net, b: &EvmClient, z: &EvmClient) {
         nonce
     );
 
+    let ready = sign_ready(&net.keys[B], b.chain_id().await.unwrap(), net.lock, id);
     net.warp(b, t.t1).await;
-    // After t1 nobody can claim, even with the right share.
+    // After t1 nobody can claim, even with the right share and B's signature.
     assert!(matches!(
-        z.claim(id, &zs.secp_be, U256::ZERO).await,
-        Err(Error::WrongState(SwapState::Locked, _))
+        z.claim(id, &zs.secp_be, U256::ZERO, &ready).await,
+        Err(Error::WouldRevert(r)) if r.contains("TooLate")
     ));
     let refund_tx = b.refund(id, &bs.secp_be).await.unwrap();
     assert_eq!(net.balance(b, b.address()).await, b_before);
@@ -338,7 +361,6 @@ async fn punish(net: &Net, b: &EvmClient, relayer: &EvmClient) {
     let (zs, bs) = (Share::new(b"punish/Z"), Share::new(b"punish/B"));
     let t = terms(net, b, &zs, &bs).await;
     let (id, lock_tx) = b.lock(random_salt(), &t).await.unwrap();
-    b.ready(id).await.unwrap();
 
     assert!(
         matches!(relayer.punish(id).await, Err(Error::WouldRevert(r)) if r.contains("TooEarly"))

@@ -2109,6 +2109,7 @@ name = "ferry-evm"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "alloy-primitives",
  "ferry-dleq",
  "k256",
  "rand_core 0.6.4",

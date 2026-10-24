@@ -11,7 +11,6 @@ use crate::{address, Error, EvmClient, Terms};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SwapEventKind {
     Locked(Terms),
-    Ready,
     /// Z's share `z` (big-endian secp256k1 scalar), public from here on.
     Claimed {
         z: [u8; 32],
@@ -53,7 +52,6 @@ impl SwapEvent {
                     maxTip: e.maxTip,
                 }),
             ),
-            FerryLock::FerryLockEvents::Ready(e) => (e.id, SwapEventKind::Ready),
             FerryLock::FerryLockEvents::Claimed(e) => (
                 e.id,
                 SwapEventKind::Claimed {
@@ -180,7 +178,6 @@ impl EvmClient {
                 .address(self.contract())
                 .event_signature(vec![
                     FerryLock::Locked::SIGNATURE_HASH,
-                    FerryLock::Ready::SIGNATURE_HASH,
                     FerryLock::Claimed::SIGNATURE_HASH,
                     FerryLock::Refunded::SIGNATURE_HASH,
                     FerryLock::Punished::SIGNATURE_HASH,
@@ -224,6 +221,7 @@ mod tests {
             id,
             z,
             tip: U256::from(5),
+            readySig: vec![1u8; 65].into(),
         }
         .abi_encode();
         assert_eq!(
@@ -275,7 +273,7 @@ mod tests {
         let refunded = ev(SwapEventKind::Refunded { b: scalar });
         assert!(refunded.revealed_share(&terms).is_err());
         assert_eq!(
-            ev(SwapEventKind::Ready).revealed_share(&terms).unwrap(),
+            ev(SwapEventKind::Punished).revealed_share(&terms).unwrap(),
             None
         );
     }

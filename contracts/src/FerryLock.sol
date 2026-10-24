@@ -7,7 +7,8 @@ pragma solidity ^0.8.24;
 /// for B. If the swap is called off, B's refund publishes `b`, which lets Z reclaim its ZEC.
 ///
 /// Windows (block timestamps, seconds):
-///   [lock, t1)  claim, once B has called `ready` (after seeing the ZEC lock confirmed)
+///   [lock, t1)  claim, with B's EIP-712 `Ready(id)` signature (B signs it off-chain once it has
+///               seen the ZEC lock confirmed, and sends it to Z over the peer channel)
 ///   [t1, t2)    refund to B, revealing b
 ///   [t2, ...)   punish: the tokens go to Z (B failed to refund in time)
 ///
@@ -26,11 +27,20 @@ contract FerryLock {
         0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798;
     /// ecrecover recovery id for R = G: G.y is even, so v = 27.
     uint8 internal constant GV = 27;
+    /// n / 2: signatures with a larger s are rejected (EIP-2), so a signature has one encoding.
+    uint256 internal constant HALF_N =
+        0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
+
+    bytes32 internal constant DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 internal constant NAME_HASH = keccak256("FerryLock");
+    bytes32 internal constant VERSION_HASH = keccak256("1");
+    bytes32 internal constant READY_TYPEHASH = keccak256("Ready(bytes32 id)");
 
     enum State {
         None,
         Locked,
-        Ready,
         Claimed,
         Refunded,
         Punished
@@ -47,7 +57,7 @@ contract FerryLock {
         address bAddr;
         /// Z's payout address (claim and punish pay here).
         address claimer;
-        /// B's address (refund pays here; only it may call `ready`).
+        /// B's address: refund pays here, and it signs the `Ready(id)` that lets Z claim.
         address refunder;
         uint64 t1;
         uint64 t2;
@@ -75,7 +85,6 @@ contract FerryLock {
         uint64 t2,
         uint256 maxTip
     );
-    event Ready(bytes32 indexed id);
     /// `z` is Z's share: with B's own share it completes the joint Zcash spend key.
     event Claimed(bytes32 indexed id, uint256 z, address caller, uint256 tip);
     /// `b` is B's share: with Z's own share it completes the joint Zcash spend key.
@@ -85,8 +94,8 @@ contract FerryLock {
     error BadTerms(string reason);
     error SwapExists();
     error WrongState(State state);
+    /// The claim does not carry the refunder's valid `Ready(id)` signature.
     error NotReady();
-    error NotRefunder();
     error TooEarly();
     error TooLate();
     error BadScalar();
@@ -116,12 +125,30 @@ contract FerryLock {
         return ecrecover(bytes32(0), GV, bytes32(GX), bytes32(mulmod(k, GX, N)));
     }
 
+    /// EIP-712 domain: name "FerryLock", version "1", this chain and this contract. Computed on
+    /// each call (no immutables), so the deployed code equals the compiled runtime code.
+    function domainSeparator() public view returns (bytes32) {
+        return keccak256(
+            abi.encode(DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, block.chainid, address(this))
+        );
+    }
+
+    /// The EIP-712 digest B signs to let Z claim swap `id`: `Ready(bytes32 id)`.
+    function readyDigest(bytes32 id) public view returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                "\x19\x01", domainSeparator(), keccak256(abi.encode(READY_TYPEHASH, id))
+            )
+        );
+    }
+
     function getSwap(bytes32 id) external view returns (Terms memory terms, State state) {
         Swap storage s = swaps[id];
         return (s.terms, s.state);
     }
 
-    /// B locks `t.amount` of `t.token` (pre-approved) under `t`. Not claimable until `ready`.
+    /// B locks `t.amount` of `t.token` (pre-approved) under `t`. Claimable only with B's
+    /// `Ready(id)` signature.
     function lock(bytes32 salt, Terms calldata t) external nonReentrant returns (bytes32 id) {
         if (t.amount == 0) revert BadTerms("amount");
         if (t.maxTip > t.amount) revert BadTerms("maxTip");
@@ -150,27 +177,21 @@ contract FerryLock {
         );
     }
 
-    /// B, after the ZEC lock note has N confirmations: allow Z to claim. This is the EVM form of
-    /// the Bitcoin flow's redeem adaptor signature: without it Z could publish z and take the
-    /// tokens before locking any ZEC.
-    function ready(bytes32 id) external {
+    /// Anyone, before t1: pay Z's `claimer` (minus `tip` to the caller) by publishing z with
+    /// z*G = Z_s, together with the refunder's EIP-712 `Ready(id)` signature. B signs that only
+    /// once the ZEC lock note has N confirmations: it is the EVM form of the Bitcoin flow's
+    /// redeem adaptor signature, without which Z could publish z and take the tokens before
+    /// locking any ZEC. A relayer can claim for Z, so Z needs no ETH.
+    function claim(bytes32 id, uint256 z, uint256 tip, bytes calldata readySig)
+        external
+        nonReentrant
+    {
         Swap storage s = swaps[id];
         if (s.state != State.Locked) revert WrongState(s.state);
-        if (msg.sender != s.terms.refunder) revert NotRefunder();
-        if (block.timestamp >= s.terms.t1) revert TooLate();
-        s.state = State.Ready;
-        emit Ready(id);
-    }
-
-    /// Anyone, before t1, once ready: pay Z's `claimer` (minus `tip` to the caller) by
-    /// publishing z with z*G = Z_s. A relayer can claim for Z, so Z needs no ETH.
-    function claim(bytes32 id, uint256 z, uint256 tip) external nonReentrant {
-        Swap storage s = swaps[id];
-        if (s.state == State.Locked) revert NotReady();
-        if (s.state != State.Ready) revert WrongState(s.state);
         Terms storage t = s.terms;
         if (block.timestamp >= t.t1) revert TooLate();
         if (tip > t.maxTip) revert TipTooHigh();
+        if (_signer(readyDigest(id), readySig) != t.refunder) revert NotReady();
         if (scalarAddress(z) != t.zAddr) revert BadScalar();
         s.state = State.Claimed;
         emit Claimed(id, z, msg.sender, tip);
@@ -182,7 +203,7 @@ contract FerryLock {
     /// lets Z reclaim its ZEC. Anyone holding b may send it; the tokens only go to the refunder.
     function refund(bytes32 id, uint256 b) external nonReentrant {
         Swap storage s = swaps[id];
-        if (s.state != State.Locked && s.state != State.Ready) revert WrongState(s.state);
+        if (s.state != State.Locked) revert WrongState(s.state);
         Terms storage t = s.terms;
         if (block.timestamp < t.t1) revert TooEarly();
         if (block.timestamp >= t.t2) revert TooLate();
@@ -195,12 +216,22 @@ contract FerryLock {
     /// Anyone, from t2, if B never refunded: the tokens go to Z (mirrors tx_punish).
     function punish(bytes32 id) external nonReentrant {
         Swap storage s = swaps[id];
-        if (s.state != State.Locked && s.state != State.Ready) revert WrongState(s.state);
+        if (s.state != State.Locked) revert WrongState(s.state);
         Terms storage t = s.terms;
         if (block.timestamp < t.t2) revert TooEarly();
         s.state = State.Punished;
         emit Punished(id);
         _transfer(t.token, t.claimer, t.amount);
+    }
+
+    /// Signer of a 65-byte r || s || v signature, or address(0) for a malformed or high-s one.
+    function _signer(bytes32 digest, bytes calldata sig) private pure returns (address) {
+        if (sig.length != 65) return address(0);
+        bytes32 r = bytes32(sig[0:32]);
+        bytes32 s = bytes32(sig[32:64]);
+        uint8 v = uint8(sig[64]);
+        if (uint256(s) > HALF_N || (v != 27 && v != 28)) return address(0);
+        return ecrecover(digest, v, r, s);
     }
 
     function _transfer(address token, address to, uint256 amount) private {

@@ -40,7 +40,7 @@ pub fn verify_share(k_be: &[u8; 32], expected: Address) -> Result<(), Error> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "client"))]
 mod tests {
     use super::*;
     use alloy::primitives::address;

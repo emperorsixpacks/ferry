@@ -1,24 +1,31 @@
 [package]
 name = "ferry-evm"
-description = "EVM leg of Ferry: FerryLock contract client, event watching, share extraction, secp256k1 point addresses"
+description = "EVM leg of Ferry: FerryLock contract client, event watching, share extraction, secp256k1 point addresses, the EIP-712 ready signature"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["client"]
+# The contract client (RPC, signing, events). Without it only the pure helpers remain
+# (addresses, swap ids, the ready digest and its signer), which ferry-core uses.
+client = [
+    "alloy/contract",
+    "alloy/provider-http",
+    "alloy/reqwest",
+    "alloy/rpc-types",
+    "alloy/signer-local",
+    "alloy/network",
+    "alloy/consensus",
+    "alloy/eips",
+    "alloy/json",
+]
+
 [dependencies]
-alloy = { version = "~2.1", default-features = false, features = [
-    "std",
-    "contract",
-    "provider-http",
-    "reqwest",
-    "rpc-types",
-    "signer-local",
-    "sol-types",
-    "network",
-    "consensus",
-    "eips",
-] }
+# ~2.1: alloy 2.5 needs rustc 1.94.
+alloy = { version = "~2.1", default-features = false, features = ["std", "sol-types"] }
+alloy-primitives = { version = "1.7", default-features = false, features = ["std", "k256"] }
 k256 = { version = "0.13.4", default-features = false, features = ["std", "arithmetic"] }
 thiserror.workspace = true
 

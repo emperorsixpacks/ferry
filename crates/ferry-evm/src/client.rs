@@ -1,4 +1,4 @@
-//! FerryLock client: lock / ready / claim / refund / punish and reads.
+//! FerryLock client: lock / claim / refund / punish and reads.
 
 use alloy::network::{EthereumWallet, ReceiptResponse};
 use alloy::primitives::{Address, B256, U256};
@@ -13,7 +13,6 @@ use crate::{address, swap_id, Error, Terms};
 pub enum SwapState {
     None,
     Locked,
-    Ready,
     Claimed,
     Refunded,
     Punished,
@@ -24,17 +23,16 @@ impl SwapState {
         Ok(match v {
             0 => SwapState::None,
             1 => SwapState::Locked,
-            2 => SwapState::Ready,
-            3 => SwapState::Claimed,
-            4 => SwapState::Refunded,
-            5 => SwapState::Punished,
+            2 => SwapState::Claimed,
+            3 => SwapState::Refunded,
+            4 => SwapState::Punished,
             _ => return Err(Error::Rpc(format!("unknown swap state {v}"))),
         })
     }
 
     /// Tokens are still in the contract.
     pub fn is_open(self) -> bool {
-        matches!(self, SwapState::Locked | SwapState::Ready)
+        self == SwapState::Locked
     }
 }
 
@@ -124,6 +122,20 @@ impl EvmClient {
         Ok(block.header.timestamp)
     }
 
+    pub async fn chain_id(&self) -> Result<u64, Error> {
+        Ok(self.provider.get_chain_id().await?)
+    }
+
+    /// The code at `contract()` is exactly the FerryLock this build was compiled against (it
+    /// has no immutables, so the deployed code equals the compiled runtime code).
+    pub async fn check_deployment(&self) -> Result<(), Error> {
+        let code = self.provider.get_code_at(self.contract).await?;
+        if code != FerryLock::DEPLOYED_BYTECODE {
+            return Err(Error::UnknownContract);
+        }
+        Ok(())
+    }
+
     pub async fn token_balance(&self, token: Address, who: Address) -> Result<U256, Error> {
         Ok(IERC20::new(token, &self.provider)
             .balanceOf(who)
@@ -139,9 +151,9 @@ impl EvmClient {
         })
     }
 
-    /// Z, before locking any ZEC: the lock exists, is still un-ready, and every term matches
-    /// what was agreed. Z must also have checked that `contract()` is the agreed FerryLock
-    /// deployment and that `expected.token` is the agreed token.
+    /// Z, before locking any ZEC: the lock exists, is still open, and every term matches what
+    /// was agreed. Z must also have checked the deployment ([`EvmClient::check_deployment`])
+    /// and that `expected.token` is the agreed token.
     pub async fn check_lock(&self, id: B256, expected: &Terms) -> Result<OnChainSwap, Error> {
         let s = self.swap(id).await?;
         if s.state != SwapState::Locked {
@@ -182,35 +194,43 @@ impl EvmClient {
         Ok((swap_id(self.from, salt), tx))
     }
 
-    /// B, once the ZEC lock has N confirmations: let Z claim.
-    pub async fn ready(&self, id: B256) -> Result<TxInfo, Error> {
-        let c = self.lock_contract();
-        let call = c.ready(id);
-        simulate(call.call().await.map(|_| ()))?;
-        mined(call.send().await?.get_receipt().await?)
-    }
-
-    /// Claim for Z by publishing `z` (big-endian secp256k1 scalar), taking `tip` of the tokens
-    /// for the sender. Refuses to broadcast unless the share matches and a simulation passes,
-    /// because a reverted claim would still publish `z`.
-    pub async fn claim(&self, id: B256, z: &[u8; 32], tip: U256) -> Result<TxInfo, Error> {
+    /// Claim for Z by publishing `z` (big-endian secp256k1 scalar) with B's EIP-712
+    /// `Ready(id)` signature, taking `tip` of the tokens for the sender. Refuses to broadcast
+    /// unless the share and signature check out and a simulation passes, because a reverted
+    /// claim would still publish `z`.
+    pub async fn claim(
+        &self,
+        id: B256,
+        z: &[u8; 32],
+        tip: U256,
+        ready_sig: &[u8; 65],
+    ) -> Result<TxInfo, Error> {
         let s = self.swap(id).await?;
-        if s.state != SwapState::Ready {
-            return Err(Error::WrongState(s.state, "Ready"));
+        if s.state != SwapState::Locked {
+            return Err(Error::WrongState(s.state, "Locked"));
         }
         address::verify_share(z, s.terms.zAddr)?;
+        let digest = crate::ready_digest(self.chain_id().await?, self.contract, id);
+        if crate::ready_signer(&digest, ready_sig) != Some(s.terms.refunder) {
+            return Err(Error::WouldRevert("not B's ready signature".into()));
+        }
         let c = self.lock_contract();
-        let call = c.claim(id, U256::from_be_bytes(*z), tip);
+        let call = c.claim(
+            id,
+            U256::from_be_bytes(*z),
+            tip,
+            alloy::primitives::Bytes::copy_from_slice(ready_sig),
+        );
         simulate(call.call().await.map(|_| ()))?;
         mined(call.send().await?.get_receipt().await?)
     }
 
     /// Refund to B by publishing `b`. Same pre-checks as [`EvmClient::claim`]: a reverted
-    /// refund (sent before t1) would hand Z both b and, if ready, the tokens.
+    /// refund (sent before t1) would hand Z b while Z can still claim the tokens.
     pub async fn refund(&self, id: B256, b: &[u8; 32]) -> Result<TxInfo, Error> {
         let s = self.swap(id).await?;
         if !s.state.is_open() {
-            return Err(Error::WrongState(s.state, "Locked or Ready"));
+            return Err(Error::WrongState(s.state, "Locked"));
         }
         address::verify_share(b, s.terms.bAddr)?;
         let now = self.latest_timestamp().await?;
