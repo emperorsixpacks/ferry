@@ -6,8 +6,8 @@ cd "$(dirname "$0")"
 forge build --force
 dest=../crates/ferry-evm/artifacts
 mkdir -p "$dest"
-for c in FerryLock MockUSDC; do
+for c in FerryLock MockUSDC MockWETH; do
   jq '{abi, bytecode: {object: .bytecode.object}, deployedBytecode: {object: .deployedBytecode.object}}' \
     "out/$c.sol/$c.json" > "$dest/$c.json"
 done
-echo "wrote $dest/{FerryLock,MockUSDC}.json"
+echo "wrote $dest/{FerryLock,MockUSDC,MockWETH}.json"

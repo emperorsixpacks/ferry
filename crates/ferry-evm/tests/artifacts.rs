@@ -42,7 +42,7 @@ fn artifacts_match_forge_build() {
         .status()
         .unwrap();
     assert!(status.success(), "forge build failed");
-    for name in ["FerryLock", "MockUSDC"] {
+    for name in ["FerryLock", "MockUSDC", "MockWETH"] {
         let fresh = json(&out.join(format!("{name}.sol/{name}.json")));
         let committed = json(&manifest.join(format!("artifacts/{name}.json")));
         for key in ["abi", "bytecode", "deployedBytecode"] {
