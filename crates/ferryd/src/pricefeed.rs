@@ -10,6 +10,9 @@
 //! A taker fetches the offer, then proposes at that rate. A refresh may land in between, so the
 //! maker also accepts the previous rate for `grace` after it was replaced.
 
+// TEMPORARY: the daemon.rs hook that uses this module lands after the base update; remove then.
+#![allow(dead_code)]
+
 use std::fmt;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};

@@ -283,6 +283,8 @@ impl Cli {
     }
 
     /// The live rate behind the offer, when --maker-price-feed is given.
+    // TEMPORARY until the daemon.rs hook (after the base update) calls it.
+    #[allow(dead_code)]
     pub fn live_rate(&self) -> Option<crate::pricefeed::LiveRate> {
         use crate::pricefeed::{FeedConfig, LiveRate, Source, GRACE, REFRESH, STALE_AFTER};
         let feed = self.maker_price_feed.as_ref()?;
