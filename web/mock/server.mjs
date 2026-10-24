@@ -47,6 +47,14 @@
 // status and addresses), that holds coins and runs no swaps: for the wallet's EVM side. Its POST
 // /api/_mock/credit {asset: "token" | "eth", amount} lands a deposit in its account, as a transfer
 // from the person's browser wallet (Pay with MetaMask) would.
+//
+// MOCK_HANG (unset: none) makes some of the mock's daemons hang instead of failing: z, b, ltc
+// (MOCK_Z_LTC_PORT) or usdc (MOCK_USDC_PORT), comma separated. A hung daemon takes connections and
+// answers nothing, as a ferryd does whose state is held through slow work, or whose node is still
+// loading; what the UI server does about it is its own time limit (server/upstream.mjs). POST
+// /api/_mock/hang {"daemon": "usdc", "hang": false} on a daemon that answers lets one go (it then
+// answers what it was asked meanwhile, where the asker still waits), and "hang": true hangs one. The
+// mock makers a hung Z or B serves hang with it.
 
 import http from "node:http";
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
@@ -847,11 +855,43 @@ function readBody(req) {
   });
 }
 
+// MOCK_HANG: the daemons that take connections and answer nothing, and what each was asked meanwhile
+const HANGABLE = ["z", "b", "ltc", "usdc"];
+const hung = new Set((process.env.MOCK_HANG ?? "").split(",").map((s) => s.trim().toLowerCase()).filter((s) => HANGABLE.includes(s)));
+const held = new Map();
+const waiting = ({ req, res }) => !res.destroyed && !req.socket.destroyed;
+
+// `handle` for the daemon `name`, unless it hangs: then the request waits, unanswered
+function hangable(name, handle) {
+  return (req, res) => {
+    if (!hung.has(name)) return handle(req, res);
+    held.set(name, [...(held.get(name) ?? []).filter(waiting), { req, res, handle }]);
+  };
+}
+
+function setHang(name, on) {
+  if (on) return void hung.add(name);
+  hung.delete(name);
+  const asked = (held.get(name) ?? []).filter(waiting);
+  held.delete(name);
+  // the body of a request nobody read yet is still there to read
+  for (const h of asked) h.handle(h.req, h.res);
+}
+
 function handler(role, coin = null) {
   return async (req, res) => {
     const url = new URL(req.url, "http://x");
     const path = url.pathname;
     if (req.method === "OPTIONS") return send(res, 204, {});
+
+    // mock only: a daemon hangs, or answers again (MOCK_HANG)
+    if (req.method === "POST" && path === "/api/_mock/hang") {
+      const body = await readBody(req);
+      const name = String(body?.daemon ?? "").toLowerCase();
+      if (!HANGABLE.includes(name)) return send(res, 400, { error: `daemon: one of ${HANGABLE.join(", ")}` });
+      setHang(name, body?.hang !== false);
+      return send(res, 200, { hung: [...hung] });
+    }
 
     if (req.method === "GET" && path === "/api/status") return send(res, 200, statusView(role, coin));
     if (req.method === "GET" && path === "/api/addresses") return send(res, 200, addressesView(role, coin, url.searchParams.get("fresh") === "1"));
@@ -996,8 +1036,8 @@ function handler(role, coin = null) {
 
 for (const role of ["Z", "B"]) {
   const port = parties[role].port;
-  http.createServer(handler(role)).listen(port, "127.0.0.1", () => {
-    console.log(`mock ferryd ${role} (${parties[role].name}) on http://127.0.0.1:${port}  speed x${SPEED}`);
+  http.createServer(hangable(role.toLowerCase(), handler(role))).listen(port, "127.0.0.1", () => {
+    console.log(`mock ferryd ${role} (${parties[role].name}) on http://127.0.0.1:${port}  speed x${SPEED}${hung.has(role.toLowerCase()) ? "  (hangs: MOCK_HANG)" : ""}`);
   });
 }
 
@@ -1006,7 +1046,7 @@ for (const role of ["Z", "B"]) {
 // then hand LTC to NEAR Intents (its refunds come back to that address)
 if (process.env.MOCK_Z_LTC_PORT) {
   const port = Number(process.env.MOCK_Z_LTC_PORT);
-  http.createServer(handler("Z", "ltc")).listen(port, "127.0.0.1", () => console.log(`mock ferryd Z as LTC on http://127.0.0.1:${port}`));
+  http.createServer(hangable("ltc", handler("Z", "ltc"))).listen(port, "127.0.0.1", () => console.log(`mock ferryd Z as LTC on http://127.0.0.1:${port}${hung.has("ltc") ? "  (hangs: MOCK_HANG)" : ""}`));
 }
 
 // MOCK_USDC_PORT: a Ferry node for USDC on Base Sepolia that holds coins and runs no swaps
@@ -1036,7 +1076,7 @@ function pushUsdc() {
 }
 if (USDC_PORT) {
   http
-    .createServer(async (req, res) => {
+    .createServer(hangable("usdc", async (req, res) => {
       const path = new URL(req.url, "http://x").pathname;
       if (req.method === "OPTIONS") return send(res, 204, {});
       if (req.method === "GET" && path === "/api/events") {
@@ -1063,8 +1103,8 @@ if (USDC_PORT) {
       const r = await usdc.route(req, path, readBody, () => sentTx("zec"));
       if (r) return send(res, r[0], r[1]);
       send(res, 404, { error: "not found" });
-    })
-    .listen(USDC_PORT, "127.0.0.1", () => console.log(`mock ferryd for USDC on Base Sepolia (holds coins, no swaps) on http://127.0.0.1:${USDC_PORT}`));
+    }))
+    .listen(USDC_PORT, "127.0.0.1", () => console.log(`mock ferryd for USDC on Base Sepolia (holds coins, no swaps) on http://127.0.0.1:${USDC_PORT}${hung.has("usdc") ? "  (hangs: MOCK_HANG)" : ""}`));
 }
 
 if (NEAR_PORT) {
