@@ -1,8 +1,4 @@
 # TLS for the public demo (certificates from Let's Encrypt, kept in the caddy_data volume).
-{
-	email {$ACME_EMAIL:}
-}
-
 {$DOMAIN} {
 	encode zstd gzip
 	header {

@@ -13,13 +13,23 @@ Everything is in `infra/deploy/` and runs with Docker Compose. You drive it from
 machine over SSH with `infra/deploy/deploy.sh`.
 
 ```
+            front            app                    chain
 internet ──443──▶ caddy ──▶ web ──▶ ferryd-z :7101 ┐            ┌─▶ testnet.zec.rocks:443
                                  └─▶ ferryd-b :7102 ┴─ bitcoind ┘    (Zcash lightwalletd)
-                                     ferryd-b :7112 (peer; host loopback unless published)
+                                     ferryd-b :7112 (peer, for ferryd-z only)
 ```
 
-Only Caddy publishes ports to the internet. The daemons' APIs and bitcoind's RPC sit on a private
-Docker network. The web server adds the API tokens itself, so they never reach a browser.
+Only Caddy publishes ports. Three private networks separate Caddy from the web server, the web
+server from the daemons, and the daemons from bitcoind. Every container runs without Linux
+capabilities (Caddy keeps only the right to bind 80/443), with `no-new-privileges` and a
+read-only root filesystem.
+
+Secrets stay off command lines and out of `docker inspect`:
+- **bitcoind RPC password:** a file (`infra/deploy/secrets/btc_rpc_pass`) that the daemons read.
+  bitcoind only gets its salted hash (`rpcauth`).
+- **API tokens:** each daemon creates its token in its own small volume, which the web server
+  mounts read-only. The web server adds the token to proxied requests itself, so it never reaches
+  a browser.
 
 ## 1. Prerequisites
 
@@ -59,18 +69,19 @@ infra/deploy/deploy.sh <ssh-host>
 `<ssh-host>` is whatever `ssh` accepts (`user@1.2.3.4`, or a `Host` alias from `~/.ssh/config`).
 The first run:
 
-1. copies the repository to `~/ferry` on the server (rsync; `.git`, build outputs and local
-   state are left out)
-2. creates `~/ferry/infra/deploy/.env` from `infra/deploy/.env.example`, with a random bitcoind
-   RPC password and random API tokens. The file stays on the server, mode 600, and later deploys
-   never overwrite it.
+1. copies the repository to `~/ferry` on the server with rsync. Everything git ignores stays on
+   your machine (`--filter=':- .gitignore'`), and so do `.git`, build outputs, screenshots, spikes
+   and the film.
+2. creates `~/ferry/infra/deploy/.env` from `infra/deploy/.env.example` and a random bitcoind
+   RPC password in `~/ferry/infra/deploy/secrets/` (only `.env` gets its hash). Both stay on the
+   server, private to your user, and later deploys never overwrite them.
 3. stops and asks you to set `DOMAIN`
 
 Edit the file on the server:
 
 ```sh
 ssh <ssh-host>
-nano ~/ferry/infra/deploy/.env    # DOMAIN=demo.example.org, ACME_EMAIL=you@example.org
+nano ~/ferry/infra/deploy/.env    # DOMAIN=demo.example.org
 ```
 
 The other settings (the maker's rate and size limits, the swap timelocks, the demo guard) have
@@ -156,13 +167,13 @@ sudo ufw allow OpenSSH && sudo ufw allow 80,443/tcp && sudo ufw allow 443/udp &&
 ```
 
 Ports that Docker publishes bypass ufw, which is why the compose file publishes nothing but
-Caddy's 80/443. B's peer port stays on the server's loopback.
+Caddy's 80/443.
 
-**Optional: outside takers.** To let other people's ferryd take B's offer, set
-`B_PEER_PUBLISH=0.0.0.0:7112` and `B_PUBLIC_PEER_URL=http://<DOMAIN>:7112` in `.env`, allow
-7112/tcp in the firewall, and redeploy. The peer protocol is plain HTTP. The joint viewing key
-stays private (it depends on an ECDH secret that the transcript doesn't reveal), but treat it as a
-testnet-only setup.
+**Outside takers are not supported yet.** B's peer listener (7112) is reachable only by ferryd-z
+on the private network. Publishing it would hand the internet an unauthenticated maker API, which
+skips every guard of the public UI (swap size, rate limits) and lets anyone tie up the maker's one
+swap slot. Opening the maker to other people's ferryd needs a rate-limited, authenticated proxy in
+front of it first.
 
 ## 9. Backups
 
@@ -172,6 +183,7 @@ What has to survive lives in Docker volumes on the server:
 |---|---|---|
 | `ferry_ferryd-z`, `ferry_ferryd-b` | zcash-devtool wallets and their age identities, swap records | **ZEC funds and in-flight swaps** |
 | `ferry_bitcoind` | the `zoe` and `bram` BTC wallets (`signet/wallets/`), the pruned chain | **BTC funds**; the chain resyncs |
+| `ferry_token-z`, `ferry_token-b` | the daemons' API tokens | regenerated on restart |
 | `ferry_caddy_data` | HTTPS certificates | re-issued automatically |
 
 Back up the daemon volumes with the daemons stopped:
@@ -189,7 +201,7 @@ And the BTC wallets, with bitcoind running:
 ```sh
 ssh <ssh-host> 'cd ~/ferry && C="docker compose -f infra/deploy/docker-compose.yml --env-file infra/deploy/.env" &&
   for w in zoe bram; do
-    $C exec -T bitcoind sh -c "bitcoin-cli -signet -rpcport=38332 -rpcuser=\$BTC_RPC_USER -rpcpassword=\$BTC_RPC_PASS -rpcwallet=$w backupwallet /home/bitcoin/.bitcoin/$w.bak"
+    $C exec -T bitcoind bitcoin-cli -signet -datadir=/home/bitcoin/.bitcoin -rpcport=38332 -rpcwallet=$w backupwallet /home/bitcoin/.bitcoin/$w.bak
     docker cp $($C ps -q bitcoind):/home/bitcoin/.bitcoin/$w.bak ~/ferry-backups/$w-$(date +%F).bak
   done'
 ```
@@ -199,10 +211,24 @@ private keys, so keep them private.
 
 ## 10. Rotating secrets
 
-The API tokens (`FERRY_Z_TOKEN`, `FERRY_B_TOKEN`) and the bitcoind RPC password (`BTC_RPC_PASS`)
-live only in `~/ferry/infra/deploy/.env` on the server. To rotate them, put in new random values
-(`openssl rand -hex 32`) and redeploy (`infra/deploy/deploy.sh <ssh-host>`). Compose recreates
-the services that use them; nothing else stores them.
+**API tokens:**
+
+```sh
+infra/deploy/deploy.sh <ssh-host> rotate-tokens
+```
+
+This deletes both daemons' token files and restarts ferryd and web. Each daemon creates a new
+token, and the web server reads it from the token volume.
+
+**bitcoind RPC password:**
+
+```sh
+ssh <ssh-host> 'cd ~/ferry/infra/deploy && rm secrets/btc_rpc_pass && sed -i "/^BTC_RPCAUTH=/d" .env'
+infra/deploy/deploy.sh <ssh-host>
+```
+
+The deploy generates a new password and its `rpcauth` hash, and compose recreates bitcoind and
+the daemons.
 
 ## Moving existing wallets (owner only, optional)
 
@@ -214,15 +240,19 @@ infra/deploy/deploy.sh <ssh-host> migrate-wallets
 ```
 
 It needs that machine's `.testnet/z` and `.testnet/b` directories, and its signet node running
-(`infra/testnet.sh up`). It:
+(`infra/testnet.sh up`). It refuses to run while that machine's own daemons are running, because two
+live instances would act on the same keys and swap records. Stop them first: kill the pids in
+`.testnet/z.pid` and `.testnet/b.pid`, and leave the signet node up. `--force` overrides the check.
+It:
 - stops the daemons on the server
 - backs up the server's ferryd volumes to `~/ferry-backups/`
 - copies the zcash-devtool wallets and age identities in
 - imports the `zoe`/`bram` bitcoind wallets' descriptors, private keys included, over SSH
 
 The funded addresses then keep working. Run it right after the first deploy, while the server's
-node is still syncing, because a pruned node can only rescan blocks it still has. Anyone else can
-ignore this section.
+node is still syncing, because a pruned node can only rescan blocks it still has. The backups in
+`~/ferry-backups/` on the server hold wallet keys: keep a copy if you need one, then delete them.
+Anyone else can ignore this section.
 
 ## What runs
 

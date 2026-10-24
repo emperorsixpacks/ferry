@@ -1,29 +1,56 @@
 # Ferry public testnet demo on one host: signet bitcoind, the two parties' ferryd (Zcash testnet
 # through zcash-devtool), the web UI and Caddy for TLS. See docs/DEPLOY.md.
 #   docker compose -f infra/deploy/docker-compose.yml --env-file infra/deploy/.env up -d --build
+#
+# Secrets never appear on a command line or in `docker inspect`:
+# - the bitcoind RPC password is a file (secrets/btc_rpc_pass); bitcoind only gets its rpcauth hash
+# - each daemon creates its API token in its own small volume, which the web server mounts read-only
 name: ferry
 
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  read_only: true
+  tmpfs: [/tmp]
+
 x-ferryd: &ferryd
+  <<: *hardening
   build:
     context: ../..
     dockerfile: infra/deploy/Dockerfile.ferryd
   image: ferry-ferryd:local
-  restart: unless-stopped
   depends_on: [bitcoind]
-  networks: [internal]
+  networks: [app, chain]
+  secrets: [btc_rpc_pass]
   stop_grace_period: 30s
 
 services:
-  bitcoind:
+  # Gives the chain volume to bitcoind's uid once (bitcoind itself runs without capabilities).
+  bitcoind-init:
     image: bitcoin/bitcoin:28.1
-    restart: unless-stopped
+    entrypoint: ["sh", "-c", "[ \"$$(stat -c %u /home/bitcoin/.bitcoin)\" = 101 ] || chown -R 101:101 /home/bitcoin/.bitcoin"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE]
+    volumes:
+      - bitcoind:/home/bitcoin/.bitcoin
+    network_mode: none
+
+  bitcoind:
+    <<: *hardening
+    image: bitcoin/bitcoin:28.1
+    user: "101:101"
+    entrypoint: ["bitcoind"]
     command:
       - -signet
+      - -datadir=/home/bitcoin/.bitcoin
       - -prune=${PRUNE_MB:-2000}
       - -server
       - -printtoconsole
-      - -rpcuser=${BTC_RPC_USER:-ferry}
-      - -rpcpassword=${BTC_RPC_PASS:?set BTC_RPC_PASS in infra/deploy/.env}
+      # Daemons authenticate with rpcauth (a salted hash of secrets/btc_rpc_pass); bitcoin-cli in
+      # this container uses the cookie file.
+      - -rpcauth=${BTC_RPCAUTH:?run deploy.sh once to generate it}
       - -rpcbind=0.0.0.0
       - -rpcallowip=172.16.0.0/12
       - -rpcallowip=10.0.0.0/8
@@ -31,15 +58,15 @@ services:
       - -rpcport=38332
       - -fallbackfee=0.00002
       - -dbcache=${DBCACHE_MB:-1000}
-    environment:
-      BTC_RPC_USER: ${BTC_RPC_USER:-ferry}
-      BTC_RPC_PASS: ${BTC_RPC_PASS}
+    depends_on:
+      bitcoind-init:
+        condition: service_completed_successfully
     volumes:
       - bitcoind:/home/bitcoin/.bitcoin
     # bitcoind must flush its UTXO cache on shutdown; killed mid-sync it restarts from its last
     # flush (possibly the genesis block).
     stop_grace_period: 10m
-    networks: [internal]
+    networks: [chain]
 
   ferryd-b:
     <<: *ferryd
@@ -48,22 +75,23 @@ services:
       - --name=bram
       - --btc-wallet=bram
       - --api-listen=0.0.0.0:7102
+      - --api-token-file=/run/ferry-token/api-token
+      # The peer listener is reachable only by ferryd-z on the private network. Accepting outside
+      # takers needs a rate-limited proxy in front of it and isn't supported yet (docs/DEPLOY.md).
       - --listen=0.0.0.0:7112
-      - --public-url=${B_PUBLIC_PEER_URL:-http://ferryd-b:7112}
-      - --api-token=${FERRY_B_TOKEN:?run deploy.sh once to generate tokens}
+      - --public-url=http://ferryd-b:7112
       - --maker-offer=${RATE:-410000}:${MIN_ZAT:-10000000}:${MAX_ZAT:-100000000}
       - --data-dir=/data
       - --network=signet
       - --btc-rpc=http://bitcoind:38332
-      - --btc-rpc-user=${BTC_RPC_USER:-ferry}
-      - --btc-rpc-pass=${BTC_RPC_PASS:?set BTC_RPC_PASS in infra/deploy/.env}
+      - --btc-rpc-user=ferry
+      - --btc-rpc-pass-file=/run/secrets/btc_rpc_pass
       - --zec=devtool
       - --zec-network=test
       - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
       - --zec-devtool=/usr/local/bin/zcash-devtool
       - --zec-signer=/usr/local/bin/ferry-zec-signer
       - --api-allow-remote
-      - --ui-origin=https://${DOMAIN:?set DOMAIN in infra/deploy/.env}
       - --t1=${T1:-6}
       - --t2=${T2:-6}
       - --delta=${DELTA:-2}
@@ -73,15 +101,13 @@ services:
       - --fee-sat=${FEE_SAT:-1500}
       - --poll-ms=${POLL_MS:-5000}
     environment:
-      FERRY_TOKEN: ${FERRY_B_TOKEN}
+      FERRY_TOKEN_FILE: /run/ferry-token/api-token
+      FERRY_API_PORT: "7102"
     volumes:
       - ferryd-b:/data
-    # B's peer listener stays on the host's loopback unless B_PEER_PUBLISH says otherwise
-    # (e.g. 0.0.0.0:7112, to accept takers from outside; open the firewall port too).
-    ports:
-      - ${B_PEER_PUBLISH:-127.0.0.1:7112}:7112
+      - token-b:/run/ferry-token
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf -H \"authorization: Bearer $$FERRY_TOKEN\" http://127.0.0.1:7102/api/status >/dev/null"]
+      test: ["CMD", "ferry-api", "/api/status"]
       interval: 30s
       timeout: 10s
       start_period: 60s
@@ -93,21 +119,20 @@ services:
       - --name=zoe
       - --btc-wallet=zoe
       - --api-listen=0.0.0.0:7101
+      - --api-token-file=/run/ferry-token/api-token
       - --listen=0.0.0.0:7111
       - --public-url=http://ferryd-z:7111
-      - --api-token=${FERRY_Z_TOKEN:?run deploy.sh once to generate tokens}
       - --data-dir=/data
       - --network=signet
       - --btc-rpc=http://bitcoind:38332
-      - --btc-rpc-user=${BTC_RPC_USER:-ferry}
-      - --btc-rpc-pass=${BTC_RPC_PASS:?set BTC_RPC_PASS in infra/deploy/.env}
+      - --btc-rpc-user=ferry
+      - --btc-rpc-pass-file=/run/secrets/btc_rpc_pass
       - --zec=devtool
       - --zec-network=test
       - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
       - --zec-devtool=/usr/local/bin/zcash-devtool
       - --zec-signer=/usr/local/bin/ferry-zec-signer
       - --api-allow-remote
-      - --ui-origin=https://${DOMAIN:?set DOMAIN in infra/deploy/.env}
       - --t1=${T1:-6}
       - --t2=${T2:-6}
       - --delta=${DELTA:-2}
@@ -117,21 +142,25 @@ services:
       - --fee-sat=${FEE_SAT:-1500}
       - --poll-ms=${POLL_MS:-5000}
     environment:
-      FERRY_TOKEN: ${FERRY_Z_TOKEN}
+      FERRY_TOKEN_FILE: /run/ferry-token/api-token
+      FERRY_API_PORT: "7101"
     volumes:
       - ferryd-z:/data
+      - token-z:/run/ferry-token
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf -H \"authorization: Bearer $$FERRY_TOKEN\" http://127.0.0.1:7101/api/status >/dev/null"]
+      test: ["CMD", "ferry-api", "/api/status"]
       interval: 30s
       timeout: 10s
       start_period: 60s
 
   web:
+    <<: *hardening
     build:
       context: ../..
       dockerfile: infra/deploy/Dockerfile.web
     image: ferry-web:local
-    restart: unless-stopped
+    # Same uid as ferryd, so it can read the daemons' 0600 token files (mounted read-only).
+    user: "10001:10001"
     depends_on: [ferryd-z, ferryd-b]
     # Contract: header of web/server/prod.mjs. It strips the browser Origin after its own
     # PUBLIC_ORIGIN check, so the daemons never see one.
@@ -140,27 +169,32 @@ services:
       FERRY_Z_URL: http://ferryd-z:7101
       FERRY_B_URL: http://ferryd-b:7102
       FERRY_MAKER_URL: http://ferryd-b:7112
-      FERRY_Z_TOKEN: ${FERRY_Z_TOKEN}
-      FERRY_B_TOKEN: ${FERRY_B_TOKEN}
-      PUBLIC_ORIGIN: https://${DOMAIN}
+      FERRY_Z_TOKEN_FILE: /tokens/z/api-token
+      FERRY_B_TOKEN_FILE: /tokens/b/api-token
+      PUBLIC_ORIGIN: https://${DOMAIN:?set DOMAIN in infra/deploy/.env}
       TRUST_PROXY: "1"
       DEMO_MAX_ZAT: ${DEMO_MAX_ZAT:-50000000}
       DEMO_RATE_PER_HOUR: ${DEMO_RATE_PER_HOUR:-3}
       DEMO_SWAPS_PER_HOUR: ${DEMO_SWAPS_PER_HOUR:-12}
+      DEMO_SSE_PER_IP: ${DEMO_SSE_PER_IP:-8}
+      DEMO_SSE_TOTAL: ${DEMO_SSE_TOTAL:-200}
       DEMO_FAULTS: ${DEMO_FAULTS:-0}
+    volumes:
+      - token-z:/tokens/z:ro
+      - token-b:/tokens/b:ro
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
-    networks: [internal]
+    networks: [front, app]
 
   caddy:
+    <<: *hardening
     image: caddy:2.8-alpine
-    restart: unless-stopped
+    cap_add: [NET_BIND_SERVICE]
     depends_on: [web]
     environment:
       DOMAIN: ${DOMAIN}
-      ACME_EMAIL: ${ACME_EMAIL:-}
     ports:
       - 80:80
       - 443:443
@@ -169,14 +203,24 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    networks: [internal]
+    networks: [front]
 
+# caddy↔web, web↔daemons, daemons↔bitcoind. All are ordinary bridges (bitcoind and the daemons
+# need outbound internet for P2P and the Zcash lightwalletd).
 networks:
-  internal: {}
+  front: {}
+  app: {}
+  chain: {}
+
+secrets:
+  btc_rpc_pass:
+    file: ./secrets/btc_rpc_pass
 
 volumes:
   bitcoind: {}
   ferryd-b: {}
   ferryd-z: {}
+  token-b: {}
+  token-z: {}
   caddy_data: {}
   caddy_config: {}

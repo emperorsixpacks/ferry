@@ -1,0 +1,6 @@
+#!/bin/sh
+# ferry-api <path>: GET this container's ferryd control API, authenticating with the token file.
+# The token never appears on a command line (printf is a shell builtin; curl reads it via -K -).
+set -eu
+token=$(cat "${FERRY_TOKEN_FILE:?}")
+printf 'header = "authorization: Bearer %s"\n' "$token" | curl -sf -K - "http://127.0.0.1:${FERRY_API_PORT:?}$1"

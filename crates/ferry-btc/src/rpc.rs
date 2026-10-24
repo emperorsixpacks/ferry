@@ -172,15 +172,20 @@ impl BitcoinRpc {
         method: &str,
         params: Value,
     ) -> Result<T, RpcError> {
-        let resp: Value = self
+        let resp = self
             .http
             .post(url)
             .basic_auth(&self.user, Some(&self.pass))
             .json(&json!({"jsonrpc": "1.0", "id": "ferry", "method": method, "params": params}))
             .send()
-            .await?
-            .json()
             .await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(RpcError::Decode {
+                method: method.into(),
+                detail: "401 unauthorized: wrong bitcoind RPC user or password".into(),
+            });
+        }
+        let resp: Value = resp.json().await?;
         if let Some(err) = resp.get("error").filter(|e| !e.is_null()) {
             return Err(RpcError::Rpc {
                 method: method.into(),

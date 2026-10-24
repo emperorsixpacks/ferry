@@ -52,8 +52,12 @@ pub struct Cli {
     #[arg(long)]
     pub api_allow_remote: bool,
     /// Bearer token required on /api/*. Default: a random token, written to <data-dir>/api-token.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "api_token_file")]
     pub api_token: Option<String>,
+    /// Read the API token from this file, or create it there (random, mode 0600) if it is missing
+    /// or empty. Keeps the token out of command lines; a UI server can read the same file.
+    #[arg(long)]
+    pub api_token_file: Option<PathBuf>,
     /// Browser origin allowed to call /api/* (repeatable). Requests carrying any other
     /// `Origin` header are refused.
     #[arg(long)]
@@ -89,6 +93,9 @@ pub struct Cli {
     pub btc_rpc_user: String,
     #[arg(long, default_value = "ferry")]
     pub btc_rpc_pass: String,
+    /// Read the bitcoind RPC password from this file instead of --btc-rpc-pass.
+    #[arg(long)]
+    pub btc_rpc_pass_file: Option<PathBuf>,
     /// bitcoind wallet holding our BTC (created if missing; default: --name).
     #[arg(long)]
     pub btc_wallet: Option<String>,

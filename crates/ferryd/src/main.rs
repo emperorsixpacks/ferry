@@ -23,7 +23,8 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "ferryd=info".into()),
         )
         .init();
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    resolve_secret_files(&mut cli)?;
     match cli.zec {
         ZecBackend::Mock => {
             let path = cli
@@ -72,6 +73,34 @@ async fn main() -> anyhow::Result<()> {
             run(cli, leg).await
         }
     }
+}
+
+/// Secrets given as files (kept out of `ps` and `docker inspect`).
+fn resolve_secret_files(cli: &mut Cli) -> anyhow::Result<()> {
+    if let Some(path) = &cli.btc_rpc_pass_file {
+        let pass = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        cli.btc_rpc_pass = pass.trim().to_string();
+    }
+    if let Some(path) = &cli.api_token_file {
+        let existing = std::fs::read_to_string(path).ok().map(|t| t.trim().to_string());
+        let token = match existing.filter(|t| !t.is_empty()) {
+            Some(t) => t,
+            None => {
+                use rand_core::RngCore;
+                let mut b = [0u8; 32];
+                rand_core::OsRng.fill_bytes(&mut b);
+                let t = hex::encode(b);
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                record::write_private(path, t.as_bytes())
+                    .with_context(|| format!("writing {}", path.display()))?;
+                t
+            }
+        };
+        cli.api_token = Some(token);
+    }
+    Ok(())
 }
 
 async fn run<L: ZecLeg + 'static>(cli: Cli, leg: L) -> anyhow::Result<()> {

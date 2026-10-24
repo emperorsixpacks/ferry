@@ -47,12 +47,14 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin ferry \
-    && mkdir -p /data && chown ferry:ferry /data
+    && mkdir -p /data /run/ferry-token && chown ferry:ferry /data /run/ferry-token \
+    && chmod 700 /data /run/ferry-token
 COPY --from=devtool /usr/local/bin/zcash-devtool /usr/local/bin/
 COPY --from=signer /usr/local/bin/ferry-zec-signer /usr/local/bin/
 COPY --from=ferryd /usr/local/bin/ferryd /usr/local/bin/
+COPY infra/deploy/ferry-api /usr/local/bin/ferry-api
 USER ferry
 WORKDIR /data
-VOLUME ["/data"]
+VOLUME ["/data", "/run/ferry-token"]
 ENTRYPOINT ["ferryd"]
 CMD ["--help"]

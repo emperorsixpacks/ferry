@@ -14,15 +14,18 @@ usage() {
   cat <<EOF
 Usage: infra/deploy/deploy.sh <ssh-host> [command]
 
-  up (default)     copy the repository to <ssh-host>:~/$REMOTE_DIR, create infra/deploy/.env there on
-                   first run (random RPC password and API tokens), then build and start everything
+  up (default)     copy the repository (tracked and untracked files git doesn't ignore) to
+                   <ssh-host>:~/$REMOTE_DIR, create the secrets and infra/deploy/.env there on first
+                   run, then build and start everything
   status           containers, signet sync, daemon balances and swaps
   logs [service]   follow logs (bitcoind, ferryd-z, ferryd-b, web, caddy; default: all)
   addresses        where to send test coins (B's signet address, Z's Zcash testnet address)
-  migrate-wallets  owner only: move the wallets of a local infra/testnet.sh setup to the host
+  rotate-tokens    replace both daemons' API tokens (the web server picks them up)
+  down             stop everything (volumes, so wallets and the synced chain, are kept)
+  migrate-wallets [--force]
+                   owner only: move the wallets of a local infra/testnet.sh setup to the host
                    (copies .testnet/{z,b} into the ferryd volumes and imports the zoe/bram
                    bitcoind wallet descriptors), so already-funded addresses keep working
-  down             stop everything (volumes, so wallets and the synced chain, are kept)
 
 Set DOMAIN in ~/$REMOTE_DIR/infra/deploy/.env on the host before the first real start: Caddy
 requests a TLS certificate for it. Environment: FERRY_REMOTE_DIR [$REMOTE_DIR].
@@ -40,38 +43,57 @@ CMD=${2:-up}
 remote() { ssh "$HOST" "cd $REMOTE_DIR && $*"; }
 rcompose() { remote "$COMPOSE $*"; }
 
-# GET a daemon's control API from inside its container (the API is not published).
+# GET a daemon's control API from inside its container (the API is not published; the token is
+# read from its file there and never put on a command line).
 api() { # api <z|b> <path>
-  local svc=ferryd-$1 port=7101
-  [ "$1" = b ] && port=7102
-  rcompose exec -T "$svc" sh -c "'curl -sf -H \"authorization: Bearer \$FERRY_TOKEN\" http://127.0.0.1:$port$2'"
+  rcompose exec -T "ferryd-$1" ferry-api "$2"
 }
 
+# bitcoin-cli inside the bitcoind container, authenticated by its cookie file.
 btc_cli() { # btc_cli [bitcoin-cli args...]
-  rcompose exec -T bitcoind sh -c "'bitcoin-cli -signet -rpcport=38332 -rpcuser=\"\$BTC_RPC_USER\" -rpcpassword=\"\$BTC_RPC_PASS\" $*'"
+  rcompose exec -T bitcoind bitcoin-cli -signet -datadir=/home/bitcoin/.bitcoin -rpcport=38332 "$@"
 }
 
 sync_repo() {
   log "copying the repository to $HOST:~/$REMOTE_DIR"
   ssh "$HOST" "mkdir -p $REMOTE_DIR"
+  # Whatever git ignores stays here (keys, local state, build outputs), plus some large
+  # tracked directories the server doesn't need.
   rsync -az --delete \
+    --filter=':- .gitignore' \
     --exclude .git --exclude target --exclude node_modules --exclude vendor \
     --exclude .demo --exclude .e2e-real --exclude .film-real --exclude .testnet \
-    --exclude web/dist --exclude infra/deploy/.env \
+    --exclude web/dist --exclude web/film --exclude web/screenshots --exclude spikes \
+    --exclude docs/evidence \
+    --exclude infra/deploy/.env --exclude infra/deploy/secrets \
     "$ROOT/" "$HOST:$REMOTE_DIR/"
 }
 
 ensure_env() {
-  # First run: secrets are generated on the host and never leave it.
+  # First run: secrets are generated on the server and never leave it.
   remote '
+    set -e
+    umask 077
     f=infra/deploy/.env
-    if [ ! -f "$f" ]; then cp infra/deploy/.env.example "$f"; chmod 600 "$f"; fi
-    for k in BTC_RPC_PASS FERRY_Z_TOKEN FERRY_B_TOKEN; do
-      if grep -q "^$k=$" "$f"; then
-        v=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d " \n")
-        umask 077; sed "s/^$k=$/$k=$v/" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-      fi
-    done'
+    [ -f "$f" ] || cp infra/deploy/.env.example "$f"
+    mkdir -p infra/deploy/secrets
+    chmod 700 infra/deploy/secrets
+    if [ ! -s infra/deploy/secrets/btc_rpc_pass ]; then
+      head -c 32 /dev/urandom | od -An -tx1 | tr -d " \n" > infra/deploy/secrets/btc_rpc_pass
+      # Readable inside the containers (a bind-mounted secret keeps host permissions); the
+      # directory above stays private to the deploying user.
+      chmod 644 infra/deploy/secrets/btc_rpc_pass
+      sed "/^BTC_RPCAUTH=/d" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    fi
+    if ! grep -q "^BTC_RPCAUTH=." "$f"; then
+      auth=$(python3 -c "
+import hashlib, hmac, secrets
+pw = open(\"infra/deploy/secrets/btc_rpc_pass\").read().strip()
+salt = secrets.token_hex(16)
+print(\"ferry:%s\$%s\" % (salt, hmac.new(salt.encode(), pw.encode(), hashlib.sha256).hexdigest()))")
+      sed "/^BTC_RPCAUTH=/d" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+      printf "BTC_RPCAUTH=%s\n" "'"'"'$auth'"'"'" >> "$f"
+    fi'
   if remote 'grep -q "^DOMAIN=ferry.example.com$" infra/deploy/.env'; then
     die "set DOMAIN in $HOST:~/$REMOTE_DIR/infra/deploy/.env (DNS must point at the host), then run again"
   fi
@@ -81,7 +103,7 @@ cmd_up() {
   command -v rsync >/dev/null || die "rsync is required"
   sync_repo
   ensure_env
-  log "building and starting (first build compiles zcash-devtool: allow 20-40 minutes)"
+  log "building and starting (the first build compiles zcash-devtool: allow 20-40 minutes)"
   rcompose up -d --build
   rcompose ps
   log "done. Follow the signet sync with: infra/deploy/deploy.sh $HOST status"
@@ -125,6 +147,16 @@ else:
   done
 }
 
+cmd_rotate_tokens() {
+  log "replacing the API tokens"
+  rcompose stop ferryd-z ferryd-b web
+  for key in z b; do
+    ssh "$HOST" "docker run --rm -v ${PROJECT}_token-$key:/t debian:bookworm-slim rm -f /t/api-token"
+  done
+  rcompose up -d ferryd-z ferryd-b web
+  log "done: each daemon created a new token; the web server reads it from the token volume"
+}
+
 local_rpc() { # local_rpc <wallet> <method> [json params]
   curl -sf --user ferry:ferry -H 'content-type: text/plain;' \
     --data-binary "{\"jsonrpc\":\"1.0\",\"id\":\"deploy\",\"method\":\"$2\",\"params\":${3:-[]}}" \
@@ -132,9 +164,26 @@ local_rpc() { # local_rpc <wallet> <method> [json params]
 }
 
 cmd_migrate_wallets() {
+  local force=${1:-}
   for key in z b; do
     [ -d "$LOCAL_TESTNET/$key" ] || die "no local $LOCAL_TESTNET/$key (this command moves the wallets of infra/testnet.sh)"
   done
+  # Two live instances would act on the same keys and swap records.
+  local running=
+  for key in z b; do
+    if [ -f "$LOCAL_TESTNET/$key.pid" ] && kill -0 "$(cat "$LOCAL_TESTNET/$key.pid")" 2>/dev/null; then
+      running="$running $key"
+    fi
+  done
+  if [ -n "$running" ]; then
+    [ "$force" = --force ] || die "the local infra/testnet.sh daemons are running (${running# }). Stop them first: kill the pids in $LOCAL_TESTNET/{z,b}.pid, keeping the signet node up, or pass --force"
+    log "WARNING: the local daemons are still running (${running# }); both copies will act on the same wallets"
+  fi
+  local tmp
+  tmp=$(mktemp)
+  chmod 600 "$tmp"
+  trap 'rm -f "$tmp"' EXIT
+
   log "stopping the daemons on $HOST"
   rcompose stop ferryd-z ferryd-b web
   rcompose up -d bitcoind
@@ -160,9 +209,6 @@ cmd_migrate_wallets() {
       log "local bitcoind wallet $wallet not reachable at $LOCAL_SIGNET_RPC; skipped (is infra/testnet.sh's node up?)"
       continue
     fi
-    local tmp
-    tmp=$(mktemp)
-    chmod 600 "$tmp"
     local_rpc "$wallet" listdescriptors '[true]' | python3 -c '
 import json, sys
 ds = json.load(sys.stdin)["result"]["descriptors"]
@@ -178,28 +224,30 @@ print(json.dumps(req))' >"$tmp"
     label_addr=$(local_rpc "$wallet" getaddressesbylabel '["ferry-funding"]' \
       | python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]; print(min(r) if r else "")' 2>/dev/null || true)
     log "importing $(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$tmp") descriptors into $wallet on $HOST"
-    btc_cli "-named createwallet wallet_name=$wallet blank=true load_on_startup=true" >/dev/null 2>&1 \
-      || btc_cli "loadwallet $wallet" >/dev/null 2>&1 || true
-    remote "$COMPOSE exec -T bitcoind sh -c 'bitcoin-cli -signet -rpcport=38332 -rpcuser=\"\$BTC_RPC_USER\" -rpcpassword=\"\$BTC_RPC_PASS\" -rpcwallet=$wallet -stdin importdescriptors'" \
-      <"$tmp" | python3 -c '
+    btc_cli -named createwallet wallet_name="$wallet" blank=true load_on_startup=true >/dev/null 2>&1 \
+      || btc_cli loadwallet "$wallet" >/dev/null 2>&1 || true
+    rcompose exec -T bitcoind bitcoin-cli -signet -datadir=/home/bitcoin/.bitcoin -rpcport=38332 \
+      -rpcwallet="$wallet" -stdin importdescriptors <"$tmp" | python3 -c '
 import json, sys
 res = json.load(sys.stdin)
 bad = [r for r in res if not r.get("success")]
 print("  %d imported, %d failed%s" % (len(res) - len(bad), len(bad), (": " + json.dumps(bad[0].get("error"))) if bad else ""))'
-    rm -f "$tmp"
+    : >"$tmp"
     if [ -n "$label_addr" ]; then
       # ferryd shows the wallet's "ferry-funding" address: make it the migrated one only.
-      for other in $(btc_cli "-rpcwallet=$wallet getaddressesbylabel ferry-funding" 2>/dev/null \
+      for other in $(btc_cli -rpcwallet="$wallet" getaddressesbylabel ferry-funding 2>/dev/null \
         | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)))' 2>/dev/null); do
-        [ "$other" = "$label_addr" ] || btc_cli "-rpcwallet=$wallet setlabel $other \"\"" >/dev/null
+        [ "$other" = "$label_addr" ] || btc_cli -rpcwallet="$wallet" setlabel "$other" '""' >/dev/null
       done
-      btc_cli "-rpcwallet=$wallet setlabel $label_addr ferry-funding" >/dev/null && log "  funding address $label_addr kept"
+      btc_cli -rpcwallet="$wallet" setlabel "$label_addr" ferry-funding >/dev/null && log "  funding address $label_addr kept"
     fi
   done
 
   log "starting the daemons"
   rcompose up -d
   log "done. Check with: infra/deploy/deploy.sh $HOST addresses"
+  log "The host's previous ferryd volumes are backed up in $HOST:~/$REMOTE_DIR-backups/. They hold"
+  log "wallet keys: copy them somewhere safe if you need them, then delete them there (rm -r ~/$REMOTE_DIR-backups)."
 }
 
 case "$CMD" in
@@ -207,7 +255,8 @@ case "$CMD" in
   status) cmd_status ;;
   logs) rcompose logs -f --tail 100 ${3:-} ;;
   addresses) cmd_addresses ;;
-  migrate-wallets) cmd_migrate_wallets ;;
+  rotate-tokens) cmd_rotate_tokens ;;
+  migrate-wallets) cmd_migrate_wallets "${3:-}" ;;
   down) rcompose down ;;
   *) usage; exit 2 ;;
 esac

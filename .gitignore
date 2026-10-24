@@ -13,3 +13,4 @@ spikes/zec/jointkey/target/
 web/film/*.mp4
 .e2e-real/
 .film-real/
+infra/deploy/secrets/
