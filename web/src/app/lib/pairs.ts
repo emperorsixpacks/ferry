@@ -49,7 +49,7 @@ export interface Pairs {
   list: Pair[];
 }
 
-const NONE: PairsInfo = { sell: [], buy: [], main: { sell: false, buy: false }, routes: null };
+const NONE: PairsInfo = { sell: [], buy: [], main: { sell: false, buy: false }, routes: null, own: false };
 
 // the pair a daemon's status describes; an EVM daemon on a local chain counts as Base
 export function pairOf(s: Status | null): PairId | null {

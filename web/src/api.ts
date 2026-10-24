@@ -36,6 +36,11 @@ export interface Status {
     // started with --maker-offer (older daemons leave it out)
     maker?: boolean;
   };
+  // what this ferryd supports beyond the base API: "route" (route legs, sweep_to), "payout"
+  // (payout_to), "withdraw" (POST /api/withdraw), "withdraw_preview" (its dry_run)
+  features?: string[];
+  // an EVM daemon's chain, contracts and account
+  counter?: { kind: string; chain_id: number; contract: string; token: string; symbol: string; decimals: number; account: string };
 }
 
 export interface TimelineEntry {
@@ -85,6 +90,10 @@ export interface SwapView {
   watchtower?: { url: string; status: "pending" | "armed" | "refused"; package_id: string | null; note: string } | null;
   /** One of a private swap's two swaps: the router's label, "<route id>/1" or "<route id>/2". */
   route?: string | null;
+  /** Z: where the coin it receives was paid, when not its own wallet (the person's own, a NEAR deposit). */
+  payout_to?: string | null;
+  /** B: the shielded address its sweep paid, when not its own wallet. */
+  sweep_to?: string | null;
 }
 
 export const DAEMONS: Record<Role, string> = { Z: "/daemon/z", B: "/daemon/b" };
@@ -145,8 +154,52 @@ export const getSwaps = (daemon: string) => call<SwapView[]>(daemon, "/api/swaps
 // (the browser never sends a URL). Left out, the server's first maker. `quote`: the id of that
 // maker's firm price (POST /api/quotes), which the server forwards as the maker signed it. The
 // same call sells ZEC on a Z daemon and buys it on a B daemon; the amount is the ZEC either way.
-export const startSwap = (zec_zat: number, daemon: string = DAEMONS.Z, maker?: string, quote?: string) =>
-  call<{ id: string }>(daemon, "/api/swaps", maker === undefined ? { zec_zat } : quote === undefined ? { maker, zec_zat } : { maker, zec_zat, quote });
+// `receive`: the person's own wallet for what they get (payout_to selling, sweep_to buying), which
+// the UI server passes on their own node only.
+export const startSwap = (zec_zat: number, daemon: string = DAEMONS.Z, maker?: string, quote?: string, receive?: { payout_to?: string; sweep_to?: string }) =>
+  call<{ id: string }>(daemon, "/api/swaps", { ...(maker === undefined ? {} : quote === undefined ? { maker } : { maker, quote }), zec_zat, ...(receive ?? {}) });
+
+// ------------------------------------------------------------------------------------------------
+// The node's own wallet (the person's own node only; server/own.mjs): where to add funds, sending
+// coins out to their own wallet, and what was sent.
+
+// GET /api/addresses: the daemon's own addresses. zec: its shielded (Orchard-only unified) address;
+// btc: its counter coin's, stable (`fresh` asks a Bitcoin or Litecoin daemon for a new one), or an
+// EVM daemon's one account (the token and the gas coin both), with the token and chain id.
+export interface Addresses {
+  role?: Role;
+  name?: string;
+  btc: { address: string; coin?: string; ticker?: string; network?: string; token?: string; symbol?: string; decimals?: number; chain_id?: number } | null;
+  zec: { address: string | null; network?: string } | null;
+}
+export const getAddresses = (daemon: string, fresh = false) => call<Addresses>(daemon, fresh ? "/api/addresses?fresh=1" : "/api/addresses");
+
+// what a node sends out: shielded ZEC, its coin (BTC, LTC), an EVM daemon's token, or its gas ETH
+export type SendAsset = "zec" | "btc" | "token" | "eth";
+// A send out (ferryd's withdrawal). Amounts are base units, as decimal strings (wei doesn't fit a
+// number); the recipient gets `amount` and the fee, in `fee_coin`, is paid on top.
+export interface Withdrawal {
+  id?: string;
+  asset: SendAsset | string;
+  coin?: string;
+  amount: string | number;
+  to: string;
+  fee: string | number | null;
+  fee_coin?: string;
+  txid: string | null;
+  // "sending" (signed, not yet known to be out), "pending", "confirmed", "failed": see sendState()
+  status?: string;
+  confirmations?: number;
+  error?: string | null;
+  created_at?: string | number;
+  updated_at?: string | number;
+}
+export const getWithdrawals = (daemon: string) => call<Withdrawal[]>(daemon, "/api/withdrawals");
+export const sendOut = (daemon: string, body: { asset: SendAsset; amount: string; to: string }) => call<Withdrawal>(daemon, "/api/withdraw", body);
+// the fee, without sending: only for a daemon that lists "withdraw_preview" (the mock; ferryd has no
+// dry run, and the UI server never forwards one to a daemon that doesn't list it)
+export const previewSend = (daemon: string, body: { asset: SendAsset; amount: string; to: string }) =>
+  call<Withdrawal & { dry_run?: boolean }>(daemon, "/api/withdraw", { ...body, dry_run: true });
 
 // The daemons this UI server fronts (GET /api/pairs): which other pairs have a sell-side (Z)
 // daemon at /daemon/<pair> or a buy-side (B) one at /daemon/b-<pair>, and whether the main Z
@@ -159,14 +212,17 @@ export interface PairsInfo {
   // private swaps the server's router runs: from the pairs it buys ZEC with, to the ones it sells
   // ZEC for; null without a router (and then the page shows none of it)
   routes: RouteLegs | null;
+  // the person's own node, opened on their own machine: the page may say where coins go and send
+  // them out (server/own.mjs). False on a public demo, and from an older server.
+  own: boolean;
 }
 
 export async function getPairs(): Promise<PairsInfo> {
   // an older server: no extra pairs, and the page's own side only
-  const old: PairsInfo = { sell: [], buy: [], main: { sell: LOCAL_ROLE === "Z", buy: LOCAL_ROLE === "B" }, routes: null };
+  const old: PairsInfo = { sell: [], buy: [], main: { sell: LOCAL_ROLE === "Z", buy: LOCAL_ROLE === "B" }, routes: null, own: false };
   const res = await fetch("/api/pairs").catch(() => null);
   if (!res?.ok) return old;
-  const data = (await res.json().catch(() => null)) as { pairs?: unknown; buy?: unknown; main?: { sell?: unknown; buy?: unknown }; routes?: { from?: unknown; to?: unknown } | null } | null;
+  const data = (await res.json().catch(() => null)) as { pairs?: unknown; buy?: unknown; main?: { sell?: unknown; buy?: unknown }; routes?: { from?: unknown; to?: unknown } | null; node?: { own?: unknown } } | null;
   const ids = (v: unknown) => (Array.isArray(v) ? PAIR_IDS.filter((id) => (v as unknown[]).includes(id)) : []);
   if (!data) return old;
   const side = (v: unknown) => (v === true || v === false || v === "auto" ? v : "auto");
@@ -176,6 +232,7 @@ export async function getPairs(): Promise<PairsInfo> {
     buy: ids(data.buy),
     main: data.main ? { sell: side(data.main.sell), buy: side(data.main.buy) } : old.main,
     routes: routes && routes.from.length && routes.to.length ? routes : null,
+    own: data.node?.own === true,
   };
 }
 
@@ -233,12 +290,15 @@ export interface RouteView {
   stop_requested: boolean;
   created_at: number;
   updated_at: number;
+  // where swap 2 pays coin C, when not the user's leg-2 wallet (their own wallet, a NEAR deposit)
+  payout_to?: string | null;
 }
 
 export const getRoutes = () => call<RouteView[]>(ROUTER, "/api/routes");
 // Partners are named as for a swap; the UI server maps them to allowlisted URLs and adds leg 2's
-// fallbacks. max_in / min_out are in the coins' smallest units.
-export const startRoute = (body: { from: PairId; to: PairId; zec_zat: number; maker1: string; maker2: string[]; max_in: number; min_out: number; pause: Pause }) =>
+// fallbacks. max_in / min_out are in the coins' smallest units. payout_to: the person's own wallet
+// for coin C (their own node only).
+export const startRoute = (body: { from: PairId; to: PairId; zec_zat: number; maker1: string; maker2: string[]; max_in: number; min_out: number; pause: Pause; payout_to?: string }) =>
   call<RouteView>(ROUTER, "/api/routes", body);
 // "Finish now": out of holding, try the second swap again; during the pause, start it now
 export const continueRoute = (id: string) => call<RouteView>(ROUTER, `/api/routes/${id}/continue`, {});
@@ -357,6 +417,8 @@ export interface NearJob {
   address: string;
   // the user's own Ferry node's address for the coin between (a sell's refunds; a buy's delivery)
   own_address: string;
+  // a buy: the person's own shielded address the ZEC goes to (null: the node's wallet)
+  sweep_to?: string | null;
   ferry: { swap_id: string | null; state: string | null; outcome: Outcome; counter: string; counter_units?: string; zec_zat?: number; earlier: string[] };
   near: {
     deposit_address: string;
@@ -414,7 +476,7 @@ export async function getNearInfo(): Promise<NearInfo | null> {
 }
 // `exact`: the card's quote (the exact amount, and the address checked); else a picker row's
 export const getNearQuote = (body: { direction: Direction; zec_zat: number; asset: string; address?: string; exact?: boolean }) => near<NearQuote>("/quote", body);
-export const startNear = (body: { direction: Direction; zec_zat: number; asset: string; address: string; via: PairId; min_out?: string; max_in?: string }) => near<NearJob>("/swap", body);
+export const startNear = (body: { direction: Direction; zec_zat: number; asset: string; address: string; via: PairId; min_out?: string; max_in?: string; sweep_to?: string }) => near<NearJob>("/swap", body);
 export const getNearJobs = () => near<NearJob[]>("/jobs");
 export const retryNear = (id: string) => near<NearJob>(`/jobs/${id}/retry`, {});
 
@@ -481,6 +543,8 @@ export interface ComboJob {
   // where the last asset goes; where a refund of the first goes
   address: string | null;
   refund_address: string | null;
+  // near-route: the person's own wallet for coin C (null: their Ferry node)
+  payout_to?: string | null;
   own_in: string | null;
   own_out: string | null;
   agreed: { zec_zat: number; min_out: string; min_asset_out: string | null };
@@ -502,6 +566,7 @@ export const startCombo = (body: {
   asset_out?: string;
   address?: string;
   min_asset_out?: string;
+  payout_to?: string;
 }) => near<ComboJob>("/combo", body);
 export const getCombos = () => near<ComboJob[]>("/combos");
 export const retryCombo = (id: string) => near<ComboJob>(`/combos/${id}/retry`, {});

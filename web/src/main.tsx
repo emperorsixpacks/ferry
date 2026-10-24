@@ -14,6 +14,7 @@ import { Landing } from "./app/pages/Landing";
 import { NearDetail } from "./app/pages/NearDetail";
 import { Privacy } from "./app/pages/Privacy";
 import { Ramp } from "./app/pages/Ramp";
+import { WalletPage } from "./app/pages/Wallet";
 import { RouteDetail } from "./app/pages/RouteDetail";
 import { Safety } from "./app/pages/Safety";
 import { SwapDetail } from "./app/pages/SwapDetail";
@@ -22,7 +23,8 @@ import { usePath } from "./router";
 // `/` landing, `/app` the swap card, `/app/activity` my swaps, `/app/swap/:id` one swap,
 // `/app/route/:id` one private swap (coin → shielded ZEC → coin), `/app/near/:id` one NEAR Intents
 // swap (shielded ZEC for any of its assets, or the other way), `/app/combo/:id` one private swap
-// with NEAR Intents at an end, `/ramp` Naira on- and off-ramp (not available yet), `/help`
+// with NEAR Intents at an end, `/wallet` the node's coins (add funds, send them to your own
+// wallet), `/ramp` Naira on- and off-ramp (not available yet), `/help`
 // plain answers, `/how-it-works` and `/safety` the deep explanations, `/privacy` what a chain
 // analyst sees of one swap done four ways (a bridge, NEAR Intents, Ferry, a Ferry route),
 // `/inspect` the live two-party protocol view for developers.
@@ -38,6 +40,7 @@ function Root() {
   if (combo) return <ComboDetail id={combo[1]} />;
   if (path === "/app") return <AppHome />;
   if (path === "/app/activity") return <Activity />;
+  if (path === "/wallet") return <WalletPage />;
   if (path === "/help") return <Help />;
   if (path === "/how-it-works") return <HowItWorks />;
   if (path === "/safety") return <Safety />;
