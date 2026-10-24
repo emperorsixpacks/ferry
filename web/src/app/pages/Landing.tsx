@@ -56,7 +56,7 @@ function Hero() {
             <span className="text-slate-500">One private path.</span>
           </h1>
           <p className="mx-auto mt-6 max-w-[34rem] text-[17px] leading-relaxed text-slate-600 sm:text-lg">
-            Swap BTC, ETH, USDC and 200+ more assets through Zcash's shielded pool. No account. Nobody holds your ZEC.
+            Swap shielded ZEC with BTC, LTC, ETH and USDC on six chains, and reach 200+ more assets through NEAR Intents. No account. Nobody holds your ZEC.
           </p>
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
             <Link to="/app" className={primary}>
@@ -68,8 +68,7 @@ function Hero() {
             </a>
           </div>
           <p className="mt-6 text-sm text-slate-500">
-            <span className="font-semibold text-slate-900 tabular-nums">{NEAR_ASSETS}</span> assets · <span className="font-semibold text-slate-900 tabular-nums">{NEAR_CHAINS}</span>{" "}
-            chains · ZEC always shielded
+            <span className="font-semibold text-slate-900">BTC · LTC · ETH · USDC</span> on {DIRECT_CHAINS} chains · {NEAR_ASSETS - (NEAR_ASSETS % 100)}+ more via NEAR Intents
           </p>
         </div>
         {/* where the gate stands: above the text on a phone, below it on wider screens */}
@@ -138,9 +137,9 @@ function NetworksSection() {
         <dl data-reveal style={delay(160)} className="flex gap-10 sm:gap-12">
           {(
             [
-              [NEAR_ASSETS, "assets"],
-              [NEAR_CHAINS, "chains"],
-              [DIRECT_CHAINS, "direct chains"],
+              [DIRECT_CHAINS, "chains, direct"],
+              [NEAR_ASSETS, "assets via NEAR Intents"],
+              [NEAR_CHAINS, "chains via NEAR Intents"],
             ] as const
           ).map(([n, label]) => (
             <div key={label} className="flex flex-col">
