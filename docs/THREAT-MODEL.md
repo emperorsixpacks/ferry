@@ -42,6 +42,18 @@ Z has ZEC and wants bitcoin. B has bitcoin and wants ZEC. B always locks first.
 - B does not refund close to the second deadline, for the same reason.
 - B refunds only after the call-off is confirmed on Bitcoin.
 - B waits for several Zcash confirmations of the lock before letting Z claim the bitcoin.
+- B never hands over what lets Z claim (the redeem signature; on EVM, Ready) once the locked ZEC has
+  been spent by anyone else or the swap was called off, even if it made it earlier and Z had not
+  picked it up yet.
+
+**Selling or buying makes no difference.** Whoever proposes the swap (the taker) and whoever
+answered an offer (the maker), B locks first and Z second, and every rule above holds the same:
+selling ZEC is Z taking a B maker's offer, buying ZEC is B taking a Z maker's. What changes is who
+holds the option. Once both have locked, B can still let the swap run out by never sending the
+signature; that ties up Z's ZEC until the refund, and B pays the fees. A Z maker selling ZEC carries
+this the way a B maker carries a taker who never locks. Ferry never moves funds while answering a
+request: a lock goes out only after the swap is saved, so a request that gives up halfway can't
+leave coins locked that the node doesn't track.
 
 ## What you must still do
 

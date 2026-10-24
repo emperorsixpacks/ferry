@@ -72,7 +72,22 @@ fetched server-side (2.5 s timeout, 16 KB cap, cached 10 s):
 The browser starts a swap with `POST /daemon/z/api/swaps {"maker": "Kestrel" | 0, "zec_zat": …}`;
 the UI server replaces `maker` with that entry's allowlisted URL (leaving it out picks the first
 maker). Any other value, a URL included, is refused with `400`, so a client can never make a daemon
-fetch a URL of its choosing.
+fetch a URL of its choosing. Buying ZEC is the same call on a B daemon (`/daemon/b`, or
+`/daemon/b-<pair>`), naming a maker whose `role` is `Z`; `prod.mjs` puts it through the same guard
+(the per-swap cap, both rate limits, the allowlist, firm quotes, and one live swap per pair across
+both of its daemons).
+
+`GET /api/pairs` says which of the user's daemons the server fronts:
+
+```json
+{ "pairs": ["ltc"],                  // other pairs with a Z (sell-side) daemon: /daemon/<pair>
+  "buy": ["ltc", "usdc-base"],       // other pairs with a B (buy-side) daemon: /daemon/b-<pair>
+  "main": { "sell": true, "buy": true } }  // /daemon/z sells ZEC, /daemon/b buys it, whatever pair they run
+```
+
+configured with `FERRY_<PAIR>_URL` / `FERRY_<PAIR>_B_URL` (and `_TOKEN` / `_TOKEN_FILE`), and
+`FERRY_Z_SELLS=0` / `FERRY_B_BUYS=0` to take a main daemon out (a local demo's maker). `pairs` keeps
+its old meaning for older pages.
 
 ## Firm quotes
 
@@ -100,7 +115,7 @@ the amounts from the bucket below it (0 for the first) up to the bucket, within 
 ```
 
 - `taker_role`: `Z` sells ZEC, `B` buys it. A maker quotes only the side opposite its own role, so this
-  works the same for a B maker (today) and a Z maker.
+  works the same for a B maker and a Z maker.
 - `market`: `btc:<network>`, `ltc:<network>`, or `evm:<chain id>:<token address>` (lowercase).
 - `rate_sat_per_zec`: counter-coin base units per ZEC, as in the offer (WETH: wei, so it can pass
   2^53; read it as an exact integer).
@@ -235,6 +250,21 @@ Start a swap as taker against a maker.
 ```
 → `201 { "id": "f3c1…" }`
 
+Either role can take, against a maker of the other role. On a Z daemon this sells `zec_zat` of
+shielded ZEC to a B maker; on a B daemon it **buys** `zec_zat` from a Z maker (a Z daemon started
+with `--maker-offer`, whose offer has `"role": "Z"`, quotes what it asks per ZEC, and has its
+spendable shielded ZEC, less the lock fee, as `liquidity`). The amount is the ZEC either way; the
+counter amount is the maker's rate (or a firm quote's) applied to it. The call returns once the
+maker has accepted and the swap is saved; the swap's own transactions (a B taker's lock, for one)
+go out from the daemon's loop right after, never from inside the request, so a caller that gives up
+waiting cannot leave a lock behind that the daemon doesn't track. The ZEC a B taker receives is
+swept to its own wallet's shielded address.
+
+Refusals name whose funds are short: `B does not have enough BTC: 0.0042 BTC needed (the amount plus
+about 0.0001 BTC for the lock's fee), 0.002 BTC in the wallet` is ours; anything prefixed `The maker
+refused:` is the maker's (`… Z does not have enough shielded ZEC …`). Proposing to a maker of our own
+role gets `400 the counterparty also has role B`.
+
 An optional `quote` (a firm quote from that maker) fixes the rate: see
 [POST /api/swaps with a quote](#post-apiswaps-with-a-quote-taker).
 
@@ -246,6 +276,7 @@ An optional `quote` (a firm quote from that maker) fixes the rate: see
   "id": "f3c1…",
   "coin": "btc",                    // the coin swapped against ZEC: "btc" | "ltc"
   "role": "Z",
+  "taker": true,                    // we proposed it; false: we are its maker
   "counterparty": "http://127.0.0.1:7102",
   "state": "ZecLocked",             // see state list below
   "outcome": null,                  // null | "swapped" | "refunded" | "punished"
@@ -332,8 +363,12 @@ free-form. The mock uses: `propose_sent`, `propose_received`, `dleq_verified`, `
 `lock_template_sent`, `cancel_sigs_sent`, `refund_adaptor_verified`, `cancel_sig_received`,
 `btc_lock_seen`, `zec_note_seen`, `zec_confirmed`, `redeem_adaptor_sent`, `redeem_adaptor_received`,
 `cancel_seen`, `punish_seen`, `swap_complete`, `refunded`, `reclaimed`, `punished`. ferryd also
-emits `sweep_delayed` (local) when it schedules the random delay before a ZEC sweep or reclaim, and
-`peer_message_ignored` / `peer_message_rejected` for a late or invalid peer message.
+emits `sweep_delayed` (local) when it schedules the random delay before a ZEC sweep or reclaim,
+`peer_message_ignored` / `peer_message_rejected` for a late or invalid peer message, and
+`redeem_adaptor_withheld` (B, local) when its redeem adaptor (EVM: Ready signature) had not reached Z
+by the time the swap moved on (the lock note spent, or the call-off) and so never will: B hands it
+over only while it waits for Z's redeem with the lock note unspent, whether it pushes it as taker
+or Z reads it from its outbox as maker.
 
 `label` is a full sentence written from the emitting party's point of view, for example
 `"Broadcast tx_lock: 0.0041 BTC to the Taproot lock address"`. The UI shows the newest label from

@@ -12,7 +12,8 @@ testnet is Base Sepolia, and local runs use anvil.
 
 To run it: `ferryd --counter evm` with the `--evm-*` flags (below). `infra/evm-demo.sh test`
 runs a happy swap, a refund and a punish against anvil with the mock ZEC leg (`TOKEN=weth` for
-WETH). `infra/evm-testnet.sh` sets up the public run on Base Sepolia and Zcash testnet
+WETH; `MAKER=z` for buying ZEC, a B taker with a Z maker: either role can make, B still locks
+first). `infra/evm-testnet.sh` sets up the public run on Base Sepolia and Zcash testnet
 ([Running on Base Sepolia](#running-on-base-sepolia)).
 
 ## Contract
