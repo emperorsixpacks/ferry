@@ -85,7 +85,10 @@ nano ~/ferry/infra/deploy/.env    # DOMAIN=demo.example.org
 ```
 
 The other settings (the maker's rate and size limits, the swap timelocks, the demo guard) have
-working defaults and are explained in the file. Then run the deploy again:
+working defaults and are explained in the file. The maker quotes the fixed `RATE` by default. Set
+`PRICE_FEED=coingecko` (or `kraken`, `all`) to follow the live ZEC/BTC price plus `SPREAD_BPS`; it
+pauses its offer if the feed fails for 5 minutes. The real price is about 3x the demo `RATE`, so
+fund the maker with about 3x more signet BTC first. Then run the deploy again:
 
 ```sh
 infra/deploy/deploy.sh <ssh-host>
@@ -259,7 +262,7 @@ Anyone else can ignore this section.
 | service | image | notes |
 |---|---|---|
 | bitcoind | `bitcoin/bitcoin:28.1` | `-signet -prune=2000`; RPC on the private network only |
-| ferryd-b | `infra/deploy/Dockerfile.ferryd` | maker "bram", offer `RATE:MIN_ZAT:MAX_ZAT` |
+| ferryd-b | `infra/deploy/Dockerfile.ferryd` | maker "bram", offer `RATE:MIN_ZAT:MAX_ZAT`, live rate from `PRICE_FEED` + `SPREAD_BPS` |
 | ferryd-z | same image | taker "zoe" |
 | web | `infra/deploy/Dockerfile.web` | the UI and the guarded `/daemon/{z,b}` proxy (`web/server/prod.mjs`) |
 | caddy | `caddy:2.8-alpine` | HTTPS for `$DOMAIN`, HTTP/3 |

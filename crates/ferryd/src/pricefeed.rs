@@ -173,7 +173,8 @@ impl SourceKind {
     }
 }
 
-/// `--maker-price-feed`: `kraken`, `coingecko`, a comma list of them, or `all`.
+/// `--maker-price-feed`: `kraken`, `coingecko`, a comma list of them, `all`, or `off` (a fixed
+/// rate; lets a deployment template always pass the flag).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeedArg(pub Vec<SourceKind>);
 
@@ -181,6 +182,9 @@ impl FromStr for FeedArg {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, String> {
         let mut out = vec![];
+        if matches!(s.trim().to_ascii_lowercase().as_str(), "off" | "none") {
+            return Ok(FeedArg(out));
+        }
         for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
             let kinds: &[SourceKind] = match part.to_ascii_lowercase().as_str() {
                 "all" => &[SourceKind::Kraken, SourceKind::CoinGecko],
@@ -737,6 +741,7 @@ mod tests {
             vec![SourceKind::CoinGecko, SourceKind::Kraken]
         );
         assert_eq!("all".parse::<FeedArg>().unwrap().0.len(), 2);
+        assert!("off".parse::<FeedArg>().unwrap().0.is_empty());
         assert!("binance".parse::<FeedArg>().is_err());
         assert!("".parse::<FeedArg>().is_err());
     }

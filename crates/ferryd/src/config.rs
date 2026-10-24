@@ -153,7 +153,7 @@ pub struct Cli {
     #[arg(long)]
     pub maker_offer: Option<OfferArg>,
     /// Follow the market instead of the fixed --maker-offer rate: `kraken`, `coingecko`, a comma
-    /// list, or `all`. The rate is the median of the sources that answer, times
+    /// list, `all`, or `off`. The rate is the median of the sources that answer, times
     /// (1 + --maker-spread-bps), refreshed every minute; the offer pauses when every source has
     /// been failing for 5 minutes. MIN/MAX still come from --maker-offer.
     #[arg(long, requires = "maker_offer")]
@@ -295,7 +295,7 @@ impl Cli {
     pub fn live_rate(&self) -> Option<crate::pricefeed::LiveRate> {
         use crate::pricefeed::{FeedConfig, LiveRate, Source, GRACE};
         use std::time::Duration;
-        let feed = self.maker_price_feed.as_ref()?;
+        let feed = self.maker_price_feed.as_ref().filter(|f| !f.0.is_empty())?;
         let sources = feed
             .0
             .iter()

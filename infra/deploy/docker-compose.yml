@@ -81,6 +81,8 @@ services:
       - --listen=0.0.0.0:7112
       - --public-url=http://ferryd-b:7112
       - --maker-offer=${RATE:-410000}:${MIN_ZAT:-10000000}:${MAX_ZAT:-100000000}
+      - --maker-price-feed=${PRICE_FEED:-off}
+      - --maker-spread-bps=${SPREAD_BPS:-0}
       - --data-dir=/data
       - --network=signet
       - --btc-rpc=http://bitcoind:38332
