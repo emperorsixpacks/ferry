@@ -471,7 +471,7 @@ const LIMITS = [
   ["Not quantum-recoverable", "The shared address uses a key Zcash's quantum-recovery plan doesn't cover. It is single-use and short-lived, like today's FROST multisig setups."],
   [
     "Test networks so far",
-    "14 live swaps on public test networks (ZEC for USDC and WETH, both ways, on Base Sepolia, 2026-10-20 to 2026-10-22) and a full local test with real shielded notes. Nothing has run on mainnet, and nobody outside the project has reviewed Ferry.",
+    "15 live swaps on public test networks (ZEC for USDC and WETH, both ways, on Base Sepolia, 2026-10-20 to 2026-10-22; ZEC for BTC on Bitcoin signet, 2026-10-23) and a full local test with real shielded notes. Nothing has run on mainnet, and nobody outside the project has reviewed Ferry.",
   ],
 ];
 

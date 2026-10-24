@@ -167,7 +167,9 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
 - Two daemons swap end to end over HTTP (happy, refund, punish) against regtest Bitcoin, and
   against regtest Litecoin (`--chain ltc`), with the stand-in Zcash chain (`--zec mock`). With
   Bitcoin, the same three stories also run on real Zcash regtest notes (`infra/e2e-real.sh`,
-  below); Litecoin has run only with the stand-in chain.
+  below); Litecoin has run only with the stand-in chain. On public test networks, one ZEC → BTC
+  swap on Bitcoin signet and the Zcash testnet, with real shielded notes, through the public swap
+  card on 2026-10-23 ([log](docs/evidence/btc-sell-signet-2026-10-23.txt)).
 - ZEC ⇄ USDC: FerryLock has 34 Foundry tests (5 fuzz, including the scalar check against an
   independent secp256k1 implementation); two daemons with `--counter evm` run happy, refund and
   punish against anvil and on a fork of Base Sepolia, with the stand-in Zcash chain. Fourteen

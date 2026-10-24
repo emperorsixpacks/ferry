@@ -8,17 +8,18 @@ WETH). B always locks first.
 
 ## In short
 
-- **Real:** the protocol and all of its code. Fourteen live swaps on public test networks (Zcash
-  testnet and Base Sepolia), all with real shielded notes: the first ZEC ⇄ USDC swap on
-  2026-10-20, twelve through the public swap card of the server deploy on 2026-10-21
-  (ZEC → USDC twice, USDC → ZEC twice, ZEC → WETH eight times, up to three at once), and the first
-  WETH → ZEC buy on 2026-10-22. A full local run with real shielded ZEC on Bitcoin regtest,
-  covering the swap, the refund and the penalty.
+- **Real:** the protocol and all of its code. Fifteen live swaps on public test networks (Zcash
+  testnet, Base Sepolia and Bitcoin signet), all with real shielded notes: the first ZEC ⇄ USDC
+  swap on 2026-10-20, twelve through the public swap card of the server deploy on 2026-10-21
+  (ZEC → USDC twice, USDC → ZEC twice, ZEC → WETH eight times, up to three at once), the first
+  WETH → ZEC buy on 2026-10-22, and the first ZEC → BTC swap on Bitcoin signet on 2026-10-23. A
+  full local run with real shielded ZEC on Bitcoin regtest, covering the swap, the refund and the
+  penalty.
 - **Test coins only.** No swap has run on mainnet. The node's mainnet mode is capped at 0.02 ZEC
   per swap, and the mainnet demo is on hold.
 - **One partner per pair, run by us.** On the public demo we run both sides on one server. No
   outside partner is listed yet.
-- **Not run yet:** a public Bitcoin signet swap, a Litecoin testnet swap, a live refund or
+- **Not run yet:** a BTC → ZEC buy on signet, a Litecoin testnet swap, a live refund or
   penalty, anything on mainnet, and NEAR Intents with real funds.
 - **Mocks** are used for local development and some demo scripts. Each is listed
   [below](#what-is-mocked-in-local-demos).
@@ -35,6 +36,7 @@ We ran both sides of every swap below.
 | ZEC ⇄ USDC, one swap that completed (0.05 test ZEC for 2 test USDC) | **Public test networks:** Base Sepolia and Zcash testnet, run from our machine with `infra/evm-testnet.sh` | **Real** shielded notes | [log](evidence/evm-base-sepolia-live-2026-10-20.txt); on Base Sepolia: [FerryLock](https://sepolia.basescan.org/address/0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef), [lock](https://sepolia.basescan.org/tx/0xeac4a050a97702fbca0fb1cf8ad8d4f965549e0612c62e0d85d233182fa926bb), [claim](https://sepolia.basescan.org/tx/0xde25c161c7e9b978de9aed580d12b0530813a460dd543124fbfc345978996aad) |
 | Twelve swaps that completed: ZEC → USDC twice, USDC → ZEC twice, ZEC → WETH eight times (two and three at once); a start refused while the partner was busy (409) and the demo's per-address limit (429) | **Public test networks:** Base Sepolia and Zcash testnet, through the public swap card of the server deploy (`infra/deploy/deploy.sh local`, run on our machine) | **Real** shielded notes | [log](evidence/local-stack-base-sepolia-2026-10-21.txt), with every Base Sepolia transaction read back from the chain |
 | WETH → ZEC, one buy that completed (0.00012 test WETH for 0.01 test ZEC), start to ZEC in the buyer's own shielded notes in 7.5 minutes | **Public test networks:** Base Sepolia and Zcash testnet, through the same public swap card | **Real** shielded notes | [log](evidence/weth-buy-base-sepolia-2026-10-22.txt); on Base Sepolia: [lock](https://sepolia.basescan.org/tx/0x8d2ba7ed272476ab8585f85dd7fda874bdfaee2c9befa801913ca85ff5f2c365), [claim](https://sepolia.basescan.org/tx/0xdb0b11bd8b7178862bbb015514ff2aebe9ac1b437862474fd8ddade5668029a3) |
+| ZEC → BTC, one swap that completed (0.10 test ZEC for 0.00041 signet BTC, 0.000395 after the redeem's fixed fee), start to BTC in the seller's wallet in 14.5 minutes | **Public test networks:** Bitcoin signet (our own Bitcoin Core node) and Zcash testnet, through the same public swap card | **Real** shielded notes | [log](evidence/btc-sell-signet-2026-10-23.txt); on signet: [lock](https://mempool.space/signet/tx/f3021217123129e1c55032e1cf5a74557f4aa5b40bd154c6235b5e01405c39f4), [redeem](https://mempool.space/signet/tx/472b3d9389133612e644438d5ebfb6326ed747e843034c2dd2c70f4fcd1ef12b) |
 | ZEC ⇄ BTC: a swap, a refund, a penalty, a swap refused for too little shielded ZEC, and a privacy check with a control run | **Local:** Bitcoin regtest and Zcash regtest (Zebra + Zaino), `infra/e2e-real.sh` | **Real** shielded notes; every ZEC transaction checked: 0 transparent, 0 Sapling, 0 Orchard parts | [log](evidence/e2e-real-regtest-2026-10-19.txt) |
 | ZEC ⇄ USDC: a swap, a refund, a penalty | **A fork of Base Sepolia** (see below), with Circle's test USDC contract | Stand-in chain | [log](evidence/evm-base-sepolia-fork-2026-10-20.txt) |
 | The mainnet demo: sell ZEC, its USDC paid into NEAR Intents, which delivers SOL; plus a NEAR refund and a Ferry refund | **A fork of Base mainnet**, with Circle's USDC contract, under Ferry's Base mainnet rules | Stand-in chain; NEAR Intents mocked for deposits, real for read-only price quotes | [log](evidence/mainnet-demo-fork-2026-10-20.txt) |
@@ -51,9 +53,9 @@ We ran both sides of every swap below.
 
 ## Not run yet
 
-- **No public Bitcoin signet swap has completed.** Our signet partner is still waiting for enough
-  signet coins. Bitcoin has run only on regtest.
-  <!-- update this line if the public signet swap runs before release -->
+- **No BTC → ZEC buy on signet.** One ZEC → BTC swap has completed on signet (2026-10-23); the
+  buy waits for more signet coins. Bitcoin's refund and penalty have run on regtest only.
+  <!-- update this line if the signet buy runs before release -->
 - **No Litecoin testnet swap.** Litecoin has run only on regtest, with the stand-in Zcash chain.
 - **Refund and penalty on Base Sepolia** ran on the fork, not live.
 - **Ethereum, Arbitrum and Optimism.** ferryd has safety settings for them
@@ -210,21 +212,25 @@ still open:
 
 Paste-ready (plain text):
 
-<!-- update after many-swaps / safer-settings merge, the signet swap or the mainnet demo -->
+<!-- update after the signet buy, a Litecoin testnet swap or the mainnet demo -->
 
 ```text
 What is real
 - The protocol and all of its code: shielded ZEC is locked to a key split between the two
   parties, and claiming the other coin reveals the missing half. Nobody holds both coins, and
   the ZEC never leaves the shielded pool.
-- Fourteen live swaps on public test networks (Zcash testnet, Base Sepolia), all with real
-  shielded notes. The first, on 2026-10-20: 0.05 test ZEC for 2 test USDC.
+- Fifteen live swaps on public test networks (Zcash testnet, Base Sepolia, Bitcoin signet), all
+  with real shielded notes. The first, on 2026-10-20: 0.05 test ZEC for 2 test USDC.
   Lock: https://sepolia.basescan.org/tx/0xeac4a050a97702fbca0fb1cf8ad8d4f965549e0612c62e0d85d233182fa926bb
   Claim: https://sepolia.basescan.org/tx/0xde25c161c7e9b978de9aed580d12b0530813a460dd543124fbfc345978996aad
   Then, on 2026-10-21, twelve through the public swap card of our server deploy: ZEC -> USDC
   twice, USDC -> ZEC twice and ZEC -> WETH eight times, up to three at once
   (docs/evidence/local-stack-base-sepolia-2026-10-21.txt). On 2026-10-22, the first WETH -> ZEC
-  buy (docs/evidence/weth-buy-base-sepolia-2026-10-22.txt).
+  buy (docs/evidence/weth-buy-base-sepolia-2026-10-22.txt). On 2026-10-23, the first ZEC -> BTC
+  swap on Bitcoin signet, 0.10 test ZEC for 0.00041 signet BTC
+  (docs/evidence/btc-sell-signet-2026-10-23.txt).
+  Lock: https://mempool.space/signet/tx/f3021217123129e1c55032e1cf5a74557f4aa5b40bd154c6235b5e01405c39f4
+  Redeem: https://mempool.space/signet/tx/472b3d9389133612e644438d5ebfb6326ed747e843034c2dd2c70f4fcd1ef12b
 - A full local run with real shielded ZEC on Bitcoin regtest: a swap, a refund, a penalty and a
   privacy check. Every ZEC transaction had 0 transparent, 0 Sapling and 0 Orchard parts.
 
@@ -233,8 +239,9 @@ What is a mock or not done yet
   0.02 ZEC, because the cross-chain proof (Serai's experimental DLEQ) is unaudited. Our small
   mainnet demo is rehearsed on a fork of Base mainnet and on hold.
 - One partner per pair, run by us. On the public demo we run both sides on one server.
-- No public Bitcoin signet or Litecoin testnet swap has completed yet: Bitcoin and Litecoin have
-  run on regtest only. Refund and penalty on Base Sepolia ran on a fork, not live.
+- Bitcoin on signet: one ZEC -> BTC swap, no BTC -> ZEC buy yet. No Litecoin testnet swap:
+  Litecoin has run on regtest only. Refund and penalty ran on regtest (Bitcoin) and on a fork
+  (Base Sepolia), not live.
 - NEAR Intents is mainnet-only and off on the demo (prices only). It has run against a mock of
   NEAR's API, never with real funds. Ferry never sends ZEC to NEAR Intents.
 - The Wallet page's Add funds and Send to my wallet work only on your own node.
