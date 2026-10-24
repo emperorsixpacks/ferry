@@ -113,7 +113,7 @@ function TestPill({ status }: { status: Status | null }) {
 
 // Your Ferry node and its balances: the name and ZEC on the chip, the other coin on lg+ and on a tap.
 function BalanceChip({ online, name, status }: { online: boolean; name: string | null; status: Status | null }) {
-  const { pair } = useLocal();
+  const { pair, dir } = useLocal();
   if (!online) {
     return (
       <span className="inline-flex h-9 items-center gap-2 rounded-full bg-rose-50 px-3 text-xs font-medium text-rose-700">
@@ -135,11 +135,12 @@ function BalanceChip({ online, name, status }: { online: boolean; name: string |
             {(name ?? "?").slice(0, 1)}
           </span>
           <span className="hidden max-w-[7rem] truncate font-medium text-slate-900 sm:inline">{name ?? "…"}</span>
-          <span className="flex items-center gap-1.5 text-slate-700 tabular-nums">
+          {/* what you spend shows on every screen (ZEC when selling, the coin when buying); both on lg+ */}
+          <span className={cn("items-center gap-1.5 text-slate-700 tabular-nums", dir === "buy" ? "hidden lg:flex" : "flex")}>
             <TokenLogo id="zec" size={14} />
             {zecBal}
           </span>
-          <span className="hidden items-center gap-1.5 text-slate-700 tabular-nums lg:flex">
+          <span className={cn("items-center gap-1.5 text-slate-700 tabular-nums", dir === "buy" ? "flex" : "hidden lg:flex")}>
             <PairLogo pair={pair} size={14} />
             {other}
           </span>
