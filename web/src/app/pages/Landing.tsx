@@ -1,22 +1,26 @@
 import { useRef, type CSSProperties } from "react";
-import { ArrowDown, ArrowRight } from "@phosphor-icons/react";
+import { ArrowDown, ArrowRight, ArrowUpRight } from "@phosphor-icons/react";
 import { Link } from "@/router";
-import { SiteFooter, SiteHeader } from "../components/Layout";
+import { REPO_URL, SiteFooter, SiteHeader } from "../components/Layout";
 import { Gate } from "../components/landing/Gate";
 import { Mark } from "../components/landing/marks";
 import { useReveal } from "../components/landing/motion";
 import { Networks } from "../components/landing/Networks";
 import { Proof } from "../components/landing/Proof";
-import { DIRECT_CHAINS, NEAR_ASSETS, NEAR_CHAINS } from "../components/landing/stats";
 import { Steps } from "../components/landing/Steps";
 import { SwapWidget } from "../components/landing/SwapWidget";
 import "../landing.css";
 
 // `/`: the Shield Gate, on the app's own white. Coins drift into a hexagonal gate with Zcash's gold
 // core and come out the other side as other coins. Then three proof points, the app's swap card
-// quoting live, the networks, how it works in three steps, and one last call to start. Ink, greys
+// quoting, the networks, how it works in three steps, and one last call to start. Ink, greys
 // and white, with Zcash gold only at the gate's core; coins and chains keep their colours inside
 // their own marks. Sections rise into place as they scroll in (useReveal).
+//
+// Every claim here must match docs/WHAT-IS-REAL.md. Ferry's own chains are Bitcoin, Litecoin and
+// Base: ferryd's Ethereum, Arbitrum and Optimism settings have never run, and neither the installer
+// nor the demo offers them. NEAR Intents is mainnet only, prices only on the demo, and has not run
+// with real funds. Nothing has run on mainnet. No counts of NEAR Intents' assets: they drift.
 export function Landing() {
   const root = useRef<HTMLDivElement>(null);
   useReveal(root);
@@ -51,12 +55,12 @@ function Hero() {
       <div className="relative mx-auto flex max-w-6xl flex-col px-4 sm:min-h-[max(720px,calc(100svh-105px))] sm:px-6 md:min-h-[max(720px,calc(100svh-64px))]">
         <div className="order-2 mx-auto max-w-3xl pb-10 text-center sm:order-1 sm:pt-14 sm:pb-0 lg:pt-16">
           <h1 id="hero-title" className="text-[42px] leading-[1.03] font-semibold tracking-[-0.035em] text-slate-900 sm:text-6xl lg:text-[72px]">
-            Every chain.{" "}
+            Other chains.{" "}
             <br />
             <span className="text-slate-500">One private path.</span>
           </h1>
           <p className="mx-auto mt-6 max-w-[34rem] text-[17px] leading-relaxed text-slate-600 sm:text-lg">
-            Swap shielded ZEC with BTC, LTC, ETH and USDC on six chains, and reach 200+ more assets through NEAR Intents. No account. Nobody holds your ZEC.
+            Swap shielded ZEC for bitcoin, litecoin, or ETH and USDC on Base, either way round. No account. Nobody holds your ZEC.
           </p>
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
             <Link to="/app" className={primary}>
@@ -68,7 +72,7 @@ function Hero() {
             </a>
           </div>
           <p className="mt-6 text-sm text-slate-500">
-            <span className="font-semibold text-slate-900">BTC · LTC · ETH · USDC</span> on {DIRECT_CHAINS} chains · {NEAR_ASSETS - (NEAR_ASSETS % 100)}+ more via NEAR Intents
+            <span className="font-semibold text-slate-900">BTC · LTC · ETH · USDC</span> on Bitcoin, Litecoin and Base · more via NEAR Intents, on mainnet
           </p>
         </div>
         {/* where the gate stands: above the text on a phone, below it on wider screens */}
@@ -83,10 +87,10 @@ function ProofSection() {
     <section aria-labelledby="proof-title" className="border-t border-slate-100 bg-slate-50/70 dark:bg-white/40">
       <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6 sm:py-28">
         <h2 id="proof-title" data-reveal className={h2}>
-          Private. Direct. Everywhere.
+          Private. Direct. Cross-chain.
         </h2>
         <p data-reveal style={delay(80)} className={`${lede} max-w-[36rem]`}>
-          Ferry swaps through Zcash's shielded pool, directly with the other side, and reaches most chains you use.
+          Ferry swaps through Zcash's shielded pool, directly with the other side, on Bitcoin, Litecoin and Base.
         </p>
         <div className="mt-12">
           <Proof />
@@ -105,7 +109,8 @@ function TryIt() {
             See your price before you start.
           </h2>
           <p data-reveal style={delay(80)} className={`${lede} max-w-[32rem]`}>
-            This is the app's own swap card, quoting 1 ZEC at the best partner's rate right now. Pick another coin to compare, then swap in the app.
+            This is the app's own swap card, quoting 1 ZEC at the best rate this server's partners offer. On test networks that is a fixed demo rate, not a
+            market price. Pick another coin to compare, then swap in the app.
           </p>
           <div data-reveal style={delay(160)} className="mt-8">
             <Link to="/app" className={primary}>
@@ -124,35 +129,31 @@ function TryIt() {
 function NetworksSection() {
   return (
     <section aria-labelledby="net-title" className="border-t border-slate-100 py-20 sm:py-28">
-      <div className="mx-auto grid max-w-6xl items-end gap-10 px-4 sm:px-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-16">
-        <div>
-          <h2 id="net-title" data-reveal className={`${h2} max-w-[20ch]`}>
-            Six chains direct. {NEAR_CHAINS - DIRECT_CHAINS} more through NEAR Intents.
-          </h2>
-          <p data-reveal style={delay(80)} className={`${lede} max-w-[40rem]`}>
-            Ferry swaps natively on Bitcoin, Litecoin, Ethereum, Base, Arbitrum and Optimism. NEAR Intents carries the rest, from Solana to XRP: that leg is public and settled by NEAR
-            Intents, and your ZEC never goes to NEAR.
-          </p>
-        </div>
-        <dl data-reveal style={delay(160)} className="flex gap-10 sm:gap-12">
-          {(
-            [
-              [DIRECT_CHAINS, "chains, direct"],
-              [NEAR_ASSETS, "assets via NEAR Intents"],
-              [NEAR_CHAINS, "chains via NEAR Intents"],
-            ] as const
-          ).map(([n, label]) => (
-            <div key={label} className="flex flex-col">
-              <dt className="order-2 mt-1 text-sm text-slate-500">{label}</dt>
-              <dd className="order-1 text-[44px] leading-none font-semibold tracking-[-0.04em] text-slate-900 tabular-nums sm:text-[52px]">{n}</dd>
-            </div>
-          ))}
-        </dl>
+      <div className="mx-auto max-w-6xl px-4 sm:px-6">
+        <h2 id="net-title" data-reveal className={`${h2} max-w-[22ch]`}>
+          Three chains direct. More through NEAR Intents.
+        </h2>
+        <p data-reveal style={delay(80)} className={`${lede} max-w-[42rem]`}>
+          Ferry swaps directly on Bitcoin, Litecoin and Base. On mainnet, NEAR Intents can carry the other coin on to more chains, from Solana to XRP: that leg is
+          public and settled by NEAR Intents, and your ZEC never goes to NEAR. The public demo shows NEAR Intents' prices only.
+        </p>
       </div>
-      <div data-reveal style={delay(200)} className="mt-12">
+      <div data-reveal style={delay(160)} className="mt-12">
         <Networks />
       </div>
-      <p className="mx-auto mt-6 max-w-6xl px-4 text-sm text-slate-500 sm:px-6">Each Ferry server offers some of these; the app lists the ones you can pick.</p>
+      <p className="mx-auto mt-6 max-w-6xl px-4 text-sm leading-relaxed text-slate-500 sm:px-6">
+        So far Ferry has run on test networks only: nothing has run on mainnet, NEAR Intents included, and Bitcoin and Litecoin stay on test networks for now.
+        Each Ferry server offers some of these; the app lists the ones you can pick.{" "}
+        <a
+          href={`${REPO_URL}/blob/master/docs/WHAT-IS-REAL.md`}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-0.5 font-medium text-slate-700 underline decoration-slate-300 underline-offset-4 transition-colors hover:text-slate-900 hover:decoration-slate-900"
+        >
+          What has run, and where
+          <ArrowUpRight size={12} weight="bold" aria-hidden />
+        </a>
+      </p>
     </section>
   );
 }
@@ -165,7 +166,7 @@ function How() {
           How it works
         </h2>
         <p data-reveal style={delay(80)} className={`${lede} max-w-[32rem]`}>
-          Three steps, then a wait while both chains confirm: about 15 to 20 minutes with USDC on Base. Ferry runs the swap for you; you can close the page while it finishes.
+          Three steps, then minutes of waiting while both chains confirm; the swap card shows the estimate for your network. Ferry runs the swap for you; you can close the page while it finishes.
         </p>
         <div className="mt-12">
           <Steps />

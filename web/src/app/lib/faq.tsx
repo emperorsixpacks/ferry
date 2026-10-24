@@ -2,7 +2,8 @@ import type { ReactNode } from "react";
 import { Link } from "@/router";
 
 // The questions people ask, answered plainly. Help shows them all by group; the landing page
-// shows the five marked `landing`. Facts follow docs/THREAT-MODEL.md (the /safety page).
+// shows the five marked `landing`. Facts follow docs/THREAT-MODEL.md (the /safety page) and
+// docs/WHAT-IS-REAL.md (what has run, and where).
 
 export interface Faq {
   q: string;
@@ -30,18 +31,19 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
       },
       {
         q: "What is my Ferry node?",
-        a: "The small program that holds your keys and does the swap for you. This app talks to it; your coins never pass through a Ferry server, because there isn't one. On the public demo a node with test coins is run for you, so you can try it without installing anything.",
+        a: "The small program that holds your keys and does the swap for you. This app talks to it; your coins never pass through a Ferry server, because there isn't one. On the public demo we run a node with test coins for you, and the partner on the other side too, so you can try it without installing anything.",
       },
       {
         q: "Why is there no “Connect wallet” button?",
-        a: "Because a swap needs things no wallet can do: one-time keys shared between you and your partner, and someone online at the deadlines to claim or refund. Your Ferry node does both. Connecting a wallet would also tell a website who you are, and Ferry never asks. You still use your own wallet: it works with Zodl. Scan the code on the Wallet page to add funds, and paste your Zodl address in “Receive to” so the ZEC you buy lands there, still shielded. MetaMask and Bitcoin wallets work the same way. For USDC or ETH on your own node, Add funds can also fill the transfer in MetaMask for you (“Pay with MetaMask”). Ferry doesn't keep the address it pays from; the transfer itself is public on its chain, like any payment.",
+        a: "Because a swap needs things no wallet can do: one-time keys shared between you and your partner, and someone online at the deadlines to claim or refund. Your Ferry node does both. Connecting a wallet would also tell a website who you are, and Ferry never asks. You still use your own wallet, such as Zodl: on your own node, scan the code on the Wallet page to add funds, and paste your Zodl address in “Receive to” so the ZEC you buy lands there, still shielded. MetaMask and Bitcoin wallets work the same way. For USDC or ETH on your own node, Add funds can also fill the transfer in MetaMask for you (“Pay with MetaMask”). Ferry doesn't keep the address it pays from; the transfer itself is public on its chain, like any payment.",
       },
       {
         q: "Who is my swap partner?",
         a: (
           <>
             Someone who offers the other coin at a rate they set. Ferry picks the best rate for your amount; to choose another partner, open the settings (the gear above the swap card). A partner can't take
-            your coins: the most they can do is not finish, and then your coins come back.
+            your coins: the most they can do is not finish, and then your coins come back. Today every partner is run by the Ferry team: one per pair on the public demo, at a
+            fixed test rate, and your own node swaps between its own two wallets until outside partners are listed.
           </>
         ),
       },
@@ -53,7 +55,7 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
       {
         q: "Is it really private?",
         landing: true,
-        a: "Yes. Your ZEC stays in Zcash's shielded pool the whole time, so its amount, sender and receiver are encrypted. On Bitcoin and Litecoin a finished swap looks like an ordinary payment; on Ethereum networks it is a call to the swap contract. Nothing on either chain links the two sides.",
+        a: "Yes. Your ZEC stays in Zcash's shielded pool the whole time, so its amount, sender and receiver are encrypted. On Bitcoin and Litecoin a finished swap looks like an ordinary payment; on Base it is a visible call to Ferry's swap contract. Nothing on either chain links the two sides.",
       },
       {
         q: "What does my swap partner learn?",
@@ -67,7 +69,7 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
       {
         q: "What if the other side disappears?",
         landing: true,
-        a: "Every swap has a deadline. If your partner stops before the end, the swap is called off when the deadline passes and your coins come back to your wallet automatically. Nobody can end up with both sides.",
+        a: "Every swap has deadlines. If your partner stops before the end, the swap is called off when a deadline passes, and your Ferry node takes your coins back while it runs. If they stop after you've locked your ZEC, you take their coin instead. Nobody can end up with both sides.",
       },
       {
         q: "My swap says “Cancelling”. Did I lose anything?",
@@ -81,7 +83,8 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
         q: "Is it safe to use with real money?",
         a: (
           <>
-            Not yet. Ferry runs on test networks today and hasn't been independently reviewed. <A to="/safety">Safety details</A> lists every known limit.
+            Not yet. Ferry has run on test networks only (one live swap on public test networks, and local tests) and hasn't been independently reviewed. Its
+            cross-chain proof is unaudited, so a node's mainnet mode caps each swap at 0.02 ZEC. <A to="/safety">Safety details</A> lists every known limit.
           </>
         ),
       },
@@ -93,12 +96,12 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
       {
         q: "How long does it take?",
         landing: true,
-        a: "It follows the two chains' confirmations, mostly Zcash's. On the main networks: about 15 to 20 minutes with USDC or ETH on Base, 45 to 60 with Bitcoin. On the test networks: about 2 to 10 minutes on Base Sepolia, 10 to 20 with Litecoin, 20 to 40 with Bitcoin signet. The swap card shows the estimate for your network.",
+        a: "Minutes, not seconds: each side waits for the other's lock to confirm, mostly Zcash's. On the test networks: about 2 to 10 minutes with USDC on Base Sepolia (our live test swap took about 7), 20 to 40 with Bitcoin on signet, 10 to 20 with Litecoin. On mainnet, where Ferry offers Base only for now, about 15 to 20 minutes. The swap card shows the estimate for your network.",
       },
       {
         q: "What does it cost?",
         landing: true,
-        a: "Ferry charges nothing. Your partner's rate is the price you get, and the swap card shows exactly what you receive. On top there are the usual network fees: a small Bitcoin or Litecoin fee taken from what you get, or a little ETH for gas on Ethereum networks, and a tiny Zcash fee.",
+        a: "Ferry charges nothing. Your partner's rate is the price you get, and the swap card shows exactly what you receive. On top there are the usual network fees: a small Bitcoin or Litecoin fee taken from what you get, or a little ETH for gas on Base, and a tiny Zcash fee.",
       },
       {
         q: "Is there a smallest or largest swap?",
@@ -112,7 +115,7 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
       {
         q: "Which coins and chains?",
         landing: true,
-        a: "Shielded ZEC for Bitcoin, Litecoin, and USDC or ETH on Base, Ethereum, Arbitrum and Optimism. Each server offers some of these; the coin list shows which ones you can pick here.",
+        a: "Shielded ZEC for Bitcoin, Litecoin, and USDC or ETH on Base. Bitcoin and Litecoin stay on test networks for now. Each server offers some of these; the coin list shows which ones you can pick here.",
       },
       {
         q: "Why WETH instead of ETH?",
@@ -120,7 +123,7 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
       },
       {
         q: "What about Solana, USDT, NEAR and the rest?",
-        a: "The coin list ends with “More via NEAR Intents”: about two hundred assets on over thirty chains, reached through NEAR Intents. Ferry swaps your shielded ZEC for a coin it supports, and NEAR Intents carries that on to the asset you picked, or the other way round. See NEAR Intents below.",
+        a: "The coin list ends with “More via NEAR Intents”: assets on many other chains, reached through NEAR Intents. Ferry swaps your shielded ZEC for a coin it supports, and NEAR Intents carries that on to the asset you picked, or the other way round. It works on mainnet only, on your own node, and hasn't been run with real funds yet; the public demo shows its prices only. See NEAR Intents below.",
       },
       {
         q: "Can I buy ZEC instead?",
