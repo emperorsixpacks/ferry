@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/daemon/:role",
-      "destination": "/api/_daemon?role=:role"
+      "destination": "/api/daemon-proxy?role=:role"
     },
     {
       "source": "/api/:path*",
@@ -18,7 +18,7 @@
     }
   ],
   "functions": {
-    "api/_daemon.ts": {
+    "api/daemon-proxy.ts": {
       "maxDuration": 300
     }
   },
