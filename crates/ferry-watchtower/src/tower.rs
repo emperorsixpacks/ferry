@@ -1,13 +1,13 @@
-//! The service: registered packages, chain polling through bitcoind, broadcasting.
+//! The service: registered packages, chain polling through bitcoind or litecoind, broadcasting.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ferry_btc::bitcoin::{Amount, Network, OutPoint, Txid};
+use ferry_btc::bitcoin::{Amount, OutPoint, Txid};
 use ferry_btc::rpc::{BitcoinRpc, RpcError};
-use ferry_btc::Spend;
+use ferry_btc::{Chain, Spend};
 use rand::RngCore;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
@@ -18,7 +18,9 @@ use crate::store::{now, BroadcastLog, PackageView, Record, Store};
 
 #[derive(Clone, Debug)]
 pub struct TowerConfig {
-    pub network: Network,
+    /// The coin and network this tower follows (bitcoind or litecoind). Packages for any other
+    /// chain are refused.
+    pub chain: Chain,
     pub data_dir: PathBuf,
     /// Bearer token required on `/packages*` (None: open, for a tower on a private network).
     pub token: Option<String>,
@@ -34,7 +36,7 @@ pub enum RegisterError {
     Invalid(#[from] PackageError),
     #[error("{0}")]
     Conflict(String),
-    #[error("bitcoind: {0}")]
+    #[error("node: {0}")]
     Node(#[from] RpcError),
     #[error("storage: {0}")]
     Io(#[from] std::io::Error),
@@ -79,13 +81,21 @@ struct Seen {
 
 impl Tower {
     /// Load the stored packages and make sure the watch wallet follows the active ones.
-    /// `rpc` must be built `with_wallet(w).with_watch_wallet(w)` for one watch-only wallet `w`.
+    /// `rpc` must be built `with_wallet(w).with_watch_wallet(w)` for one watch-only wallet `w`,
+    /// and `with_coin(cfg.chain.coin)`. On Litecoin the watch wallet is a legacy watch-only one
+    /// (Litecoin Core 0.21 has no descriptor wallets); `BitcoinRpc` picks that from the coin.
     pub async fn open(cfg: TowerConfig, rpc: BitcoinRpc) -> anyhow::Result<Arc<Tower>> {
+        anyhow::ensure!(
+            rpc.coin() == cfg.chain.coin,
+            "the node client is for {}, the tower for {}",
+            rpc.coin(),
+            cfg.chain.coin
+        );
         let store = Store::open(&cfg.data_dir)?;
         rpc.ensure_watch_wallet().await?;
         let mut entries = BTreeMap::new();
         for record in store.load_all()? {
-            match record.package.validate(cfg.network) {
+            match record.package.validate(cfg.chain) {
                 Ok(armed) => {
                     if record.status != Status::Done {
                         let back = now().saturating_sub(record.created_at) + cfg.rescan_secs;
@@ -109,7 +119,7 @@ impl Tower {
     /// Validate, watch and persist a package. Uploading the same transactions again returns
     /// the existing id; different transactions for the same role and lock are refused.
     pub async fn register(&self, package: Package) -> Result<Registered, RegisterError> {
-        let armed = package.validate(self.cfg.network)?;
+        let armed = package.validate(self.cfg.chain)?;
         let mut entries = self.entries.lock().await;
         if let Some(e) = entries.values().find(|e| {
             e.record.package.role == package.role
@@ -184,8 +194,8 @@ impl Tower {
             let seen = match self.observe(&armed).await {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!(%id, "bitcoind: {e}");
-                    self.note_error(&id, format!("bitcoind: {e}")).await;
+                    tracing::warn!(%id, "node: {e}");
+                    self.note_error(&id, format!("node: {e}")).await;
                     continue;
                 }
             };

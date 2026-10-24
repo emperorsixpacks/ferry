@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use ferry_btc::bitcoin::{Network, OutPoint, Txid};
-use ferry_btc::{Role, Spend};
+use ferry_btc::{Coin, Role, Spend};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{Outcome, Status};
@@ -98,6 +98,7 @@ impl Record {
         PackageView {
             id: self.id.clone(),
             role,
+            coin: self.package.coin,
             network: self.package.network,
             label: self.package.label.clone(),
             status: self.status,
@@ -125,6 +126,9 @@ impl Record {
 pub struct PackageView {
     pub id: String,
     pub role: Role,
+    /// `btc` or `ltc`.
+    #[serde(default)]
+    pub coin: Coin,
     pub network: Network,
     pub label: Option<String>,
     pub status: Status,
@@ -238,9 +242,13 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        let armed = rec.package.validate(Network::Regtest).unwrap();
+        let armed = rec
+            .package
+            .validate(ferry_btc::Chain::bitcoin(Network::Regtest))
+            .unwrap();
         let view = serde_json::to_value(rec.view(&armed)).unwrap();
         assert_eq!(view["status"], "cancel_broadcast");
+        assert_eq!(view["coin"], "btc");
         assert!(view["refund_txid"].is_string() && view["punish_txid"].is_null());
         let text = view.to_string();
         assert!(

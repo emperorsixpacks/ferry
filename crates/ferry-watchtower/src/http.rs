@@ -3,7 +3,7 @@
 //! - `POST /packages`      register a [`Package`] → `201 {id, created, status}` (`200` if the same
 //!   transactions were already registered; `400` invalid, `409` conflicting, `503` node)
 //! - `GET  /packages/{id}` → [`crate::store::PackageView`] (never the transactions themselves)
-//! - `GET  /health`        → `{ok, network}` (no auth)
+//! - `GET  /health`        → `{ok, chain, network}` (no auth)
 //!
 //! With a token configured, `/packages*` need `Authorization: Bearer <token>`.
 
@@ -59,7 +59,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 async fn health(State(t): State<Arc<Tower>>) -> Json<serde_json::Value> {
-    Json(json!({ "ok": true, "network": t.cfg.network.to_string() }))
+    Json(json!({
+        "ok": true,
+        "chain": t.cfg.chain.coin,
+        "network": t.cfg.chain.network.to_string(),
+    }))
 }
 
 async fn register(State(t): State<Arc<Tower>>, body: Bytes) -> Response {

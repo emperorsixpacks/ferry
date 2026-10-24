@@ -1,10 +1,10 @@
 //! Ferry watchtower.
 //!
-//! A swap party hands the tower fully signed, deadline-critical Bitcoin transactions that pay
-//! only itself (B: tx_cancel + completed tx_refund; Z: tx_cancel + tx_punish). The tower
-//! watches bitcoind and broadcasts each one when the timing rules of docs/PROTOCOL.md allow
-//! it, so the party no longer has to stay online until its deadline. It holds no keys.
-//! See docs/WATCHTOWER.md.
+//! A swap party hands the tower fully signed, deadline-critical Bitcoin (or Litecoin)
+//! transactions that pay only itself (B: tx_cancel + completed tx_refund; Z: tx_cancel +
+//! tx_punish). The tower watches the node and broadcasts each one when the timing rules of
+//! docs/PROTOCOL.md allow it, so the party no longer has to stay online until its deadline. It
+//! holds no keys. See docs/WATCHTOWER.md.
 
 pub mod client;
 pub mod engine;

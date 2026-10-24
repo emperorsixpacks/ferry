@@ -292,10 +292,6 @@ impl Cli {
 
     /// Counter-chain coin and network.
     pub fn chain(&self) -> anyhow::Result<Chain> {
-        if self.chain == Coin::Ltc && self.watchtower.is_some() {
-            // ferry-watchtower follows a bitcoind; it would never see a Litecoin lock.
-            anyhow::bail!("--watchtower is Bitcoin-only; it cannot guard a --chain ltc swap");
-        }
         Ok(Chain::new(self.chain, self.network)?)
     }
 
@@ -517,9 +513,10 @@ mod tests {
         assert!(cli(&["--chain", "ltc", "--network", "signet"])
             .chain()
             .is_err());
+        // A Litecoin swap can arm a tower that follows litecoind (ferry-watchtower --chain ltc).
         assert!(cli(&["--chain", "ltc", "--watchtower", "http://t"])
             .chain()
-            .is_err());
+            .is_ok());
         assert!(Cli::try_parse_from([
             "ferryd",
             "--role",

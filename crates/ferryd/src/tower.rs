@@ -3,6 +3,7 @@
 //! swap still ends safely if this daemon goes offline. docs/WATCHTOWER.md.
 
 use ferry_btc::bitcoin::Address;
+use ferry_btc::Chain;
 use ferry_core::Role;
 use ferry_watchtower::{Client, ClientError, Package};
 use serde::{Deserialize, Serialize};
@@ -90,9 +91,13 @@ async fn try_arm(cli: &Cli, rec: &mut SwapRecord, st: &mut TowerState) {
         st.note = "Our payout script has no address form".into();
         return;
     };
+    let chain = Chain {
+        coin: params.coin,
+        network: params.network,
+    };
     let mut package = Package::new(
         role,
-        params.network,
+        chain,
         &txs,
         params.cancel_confirmations,
         params.refund_margin,
@@ -196,8 +201,12 @@ mod tests {
 
     /// Both parties driven to `CancelSigned` (no node: the lock is a stand-in funding tx).
     fn cancel_signed() -> (Swap, Swap) {
+        cancel_signed_on(ferry_btc::Coin::Btc)
+    }
+
+    fn cancel_signed_on(coin: ferry_btc::Coin) -> (Swap, Swap) {
         let params = SwapParams {
-            coin: ferry_btc::Coin::Btc,
+            coin,
             network: Network::Regtest,
             btc_amount: 1_000_000,
             zec_amount: 1_000_000,
@@ -256,24 +265,39 @@ mod tests {
 
     #[test]
     fn both_packages_pass_the_towers_validation() {
-        let (b, z) = cancel_signed();
-        for swap in [&b, &z] {
-            let (txs, cancel, last) = swap.watchtower_txs().unwrap().expect("cancel co-signed");
-            let p = &swap.session().params;
-            let payout = Address::from_script(&last.output[0].script_pubkey, p.network).unwrap();
-            let package = Package::new(
-                swap.role(),
-                p.network,
-                &txs,
-                p.cancel_confirmations,
-                p.refund_margin,
-                &cancel,
-                &last,
-                &[payout],
-            );
-            package
-                .validate(p.network)
-                .unwrap_or_else(|e| panic!("{:?}: {e}", swap.role()));
+        for coin in [ferry_btc::Coin::Btc, ferry_btc::Coin::Ltc] {
+            let (b, z) = cancel_signed_on(coin);
+            for swap in [&b, &z] {
+                let (txs, cancel, last) = swap.watchtower_txs().unwrap().expect("cancel co-signed");
+                let p = &swap.session().params;
+                let chain = Chain::new(p.coin, p.network).unwrap();
+                let payout =
+                    Address::from_script(&last.output[0].script_pubkey, p.network).unwrap();
+                let package = Package::new(
+                    swap.role(),
+                    chain,
+                    &txs,
+                    p.cancel_confirmations,
+                    p.refund_margin,
+                    &cancel,
+                    &last,
+                    &[payout],
+                );
+                assert_eq!(package.coin, coin);
+                package
+                    .validate(chain)
+                    .unwrap_or_else(|e| panic!("{coin} {:?}: {e}", swap.role()));
+                // A tower on the other coin refuses it.
+                let other = Chain::new(
+                    match coin {
+                        ferry_btc::Coin::Btc => ferry_btc::Coin::Ltc,
+                        ferry_btc::Coin::Ltc => ferry_btc::Coin::Btc,
+                    },
+                    p.network,
+                )
+                .unwrap();
+                assert!(package.validate(other).is_err());
+            }
         }
     }
 

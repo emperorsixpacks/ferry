@@ -8,6 +8,7 @@ use anyhow::{bail, Context};
 use clap::Parser;
 use ferry_btc::bitcoin::Network;
 use ferry_btc::rpc::BitcoinRpc;
+use ferry_btc::{Chain, Coin};
 use ferry_watchtower::{Tower, TowerConfig};
 
 /// Watches Ferry swaps for offline owners. Holds no keys.
@@ -26,6 +27,10 @@ struct Cli {
     /// Serve without a token on a non-loopback address (private networks only).
     #[arg(long)]
     open: bool,
+    /// The coin whose node the tower follows: btc (bitcoind) or ltc (litecoind, Core >= 0.21.2).
+    /// The --btc-* options then point at that node.
+    #[arg(long, default_value = "btc")]
+    chain: Coin,
     #[arg(long, default_value = "regtest")]
     network: Network,
     #[arg(long, default_value = "http://127.0.0.1:18543")]
@@ -34,10 +39,11 @@ struct Cli {
     btc_rpc_user: String,
     #[arg(long, default_value = "ferry")]
     btc_rpc_pass: String,
-    /// Read the bitcoind RPC password from this file instead of --btc-rpc-pass.
+    /// Read the node's RPC password from this file instead of --btc-rpc-pass.
     #[arg(long)]
     btc_rpc_pass_file: Option<PathBuf>,
-    /// Watch-only bitcoind wallet (no keys) that tracks the swaps' outputs; created if missing.
+    /// Watch-only node wallet (no keys) that tracks the swaps' outputs; created if missing (a
+    /// descriptor wallet on bitcoind, a legacy one on litecoind).
     #[arg(long, default_value = "ferry-watchtower")]
     btc_watch_wallet: String,
     #[arg(long, default_value_t = 2_000)]
@@ -87,22 +93,27 @@ async fn main() -> anyhow::Result<()> {
             .to_string(),
         None => cli.btc_rpc_pass.clone(),
     };
+    let chain = Chain::new(cli.chain, cli.network)?;
     let rpc = BitcoinRpc::new(&cli.btc_rpc, &cli.btc_rpc_user, pass)
+        .with_coin(chain.coin)
         .with_wallet(&cli.btc_watch_wallet)
         .with_watch_wallet(&cli.btc_watch_wallet);
     let cfg = TowerConfig {
-        network: cli.network,
+        chain,
         data_dir: cli.data_dir.clone(),
         token,
         poll: Duration::from_millis(cli.poll_ms.max(100)),
         rescan_secs: cli.rescan_secs,
     };
-    let tower = Tower::open(cfg, rpc)
-        .await
-        .context("starting the watchtower (is bitcoind up, with wallet support?)")?;
+    let tower = Tower::open(cfg, rpc).await.with_context(|| {
+        format!(
+            "starting the watchtower (is the {} node up, with wallet support?)",
+            chain.coin.name()
+        )
+    })?;
     let listener = tokio::net::TcpListener::bind(cli.listen).await?;
     tracing::info!(
-        network = %cli.network,
+        chain = %chain,
         auth = cli.token_file.is_some(),
         "ferry-watchtower on http://{}",
         cli.listen
