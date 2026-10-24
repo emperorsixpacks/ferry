@@ -311,16 +311,6 @@ funded. `status` adds, per pair, the Litecoin node's sync, each daemon's balance
 token, ETH for gas and ZEC) and its swaps. In the UI, the token picker then offers Litecoin, USDC
 on Base and ETH on Base (WETH).
 
-**Known issue, until a ferryd fix lands:** on Base Sepolia a maker can take longer than the
-taker waits (10 s) to accept a swap, because it locks the tokens before answering. The visitor
-then sees "maker unreachable", and the maker may have locked tokens for a swap it isn't
-following. If that happens, restart that pair's maker; it resumes the swap from its record and
-refunds it at t1 (45 minutes later):
-
-```sh
-ssh <ssh-host> 'cd ferry && infra/deploy/compose restart ferryd-b-usdc-base'   # or ferryd-b-weth-base
-```
-
 ### 7.5 Turning a pair off
 
 ```sh

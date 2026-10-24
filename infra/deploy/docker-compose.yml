@@ -499,6 +499,9 @@ services:
       PORT: "8080"
       FERRY_Z_URL: http://ferryd-z:7101
       FERRY_B_URL: http://ferryd-b:7102
+      # ferryd-b is the operator's maker: visitors must never start swaps on it, even if a Z maker
+      # is ever listed (its BTC would then pay for a visitor's buy). See web/server/prod.mjs.
+      FERRY_B_BUYS: "0"
       FERRY_MAKER_URL: http://ferryd-b:7112
       # The maker list on /app (empty: the one maker above). infra/deploy/compose fills it with
       # every enabled pair's maker unless .env sets it; see web/server/makers.mjs.
