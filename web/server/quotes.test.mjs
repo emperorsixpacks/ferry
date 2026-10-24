@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import test, { after } from "node:test";
 import { bucketFor, marketOf, pairLabel, parseSignedQuote, quoteJson, quoteDesk, signingText, verifySignature } from "./quotes.mjs";
+import { noWorse, standIn } from "./firm.mjs";
 import { bodyOf, fakeDaemon, get, ports, prodServer, sleep } from "./testing.mjs";
 
 const KEY = "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f";
@@ -256,9 +257,33 @@ test("prod.mjs: two visitors who start at once in the same bucket both start, ea
     assert.ok(BigInt(q.min_zat) <= BigInt(st.zec_zat) && BigInt(st.zec_zat) <= BigInt(q.max_zat));
     assert.equal(st.maker, maker.url, "the maker's allowlisted URL, as before");
   }
-  // the guard is still in front: a quote the server never handed out, and the demo's cap
+  // a third visitor a moment later, still naming the quote shown before: a fresh one, not a refusal
+  const third = await start(2_500_000);
+  assert.equal(third.status, 201, third.text);
+  assert.equal(new Set(started.map((s) => s.quote.quote_id)).size, 3);
+  // and the next to ask is shown a fresh quote, not one taken
+  const shownNext = (await ask(2_000_000)).json.quotes[0].quote_id;
+  assert.ok(!started.map((s) => s.quote.quote_id).includes(shownNext));
+  // the guard is still in front: a quote the server never handed out
   const unknown = await get(ui.url + "/daemon/z/api/swaps", { method: "POST", body: JSON.stringify({ maker: "Kestrel", zec_zat: 2_000_000, quote: "f".repeat(32) }) });
   assert.equal(unknown.status, 400);
   assert.match(unknown.json.error, /firm price has expired/);
-  assert.equal(started.length, 2);
+  assert.equal(started.length, 3);
+});
+
+test("a fresh firm price stands in for a gone one only if it is no worse for the person", () => {
+  // selling ZEC (taker Z): at least the rate shown; buying (taker B): at most it; integers exact
+  assert.ok(noWorse(410_000, 410_000, "Z") && noWorse(410_001, 410_000, "Z") && !noWorse(409_999, 410_000, "Z"));
+  assert.ok(noWorse(410_000, 410_000, "B") && noWorse(409_999, 410_000, "B") && !noWorse(410_001, 410_000, "B"));
+  assert.ok(!noWorse("12000000000000000", "12000000000000001", "Z"), "a WETH rate above 2^53 compares exactly");
+  const pressed = { maker: "Kestrel", quote_id: "a".repeat(32), rate_sat_per_zec: 410_000 };
+  const q = (maker, id, rate, min = 0, max = 10_000_000) => ({ maker, quote_id: id.repeat(32), rate_sat_per_zec: rate, min_zat: min, max_zat: max });
+  // the same partner, another quote, covering the amount, no worse
+  assert.equal(standIn([q("Heron", "b", 420_000), q("Kestrel", "c", 410_000)], pressed, 2_000_000, "Z")?.quote_id, "c".repeat(32));
+  assert.equal(standIn([q("Kestrel", "a", 410_000)], pressed, 2_000_000, "Z"), null, "not the one that is gone");
+  assert.equal(standIn([q("Kestrel", "c", 409_000)], pressed, 2_000_000, "Z"), null, "worse: the person sees it first");
+  assert.equal(standIn([q("Kestrel", "c", 411_000, 0, 1_000_000)], pressed, 2_000_000, "Z"), null, "doesn't cover the amount");
+  assert.equal(standIn([q("Heron", "c", 500_000)], pressed, 2_000_000, "Z"), null, "another partner: the person picked this one");
+  assert.equal(standIn([q("Kestrel", "c", 409_000)], pressed, 2_000_000, "B")?.quote_id, "c".repeat(32), "buying: cheaper is fine");
+  assert.equal(standIn(null, pressed, 2_000_000, "Z"), null);
 });

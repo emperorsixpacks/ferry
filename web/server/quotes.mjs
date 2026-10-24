@@ -25,6 +25,7 @@
 import { createPublicKey, verify } from "node:crypto";
 import http from "node:http";
 import https from "node:https";
+import { noWorse } from "./firm.mjs";
 
 // 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100 ZEC (as ferryd's quote::BUCKETS_ZAT)
 export const BUCKETS_ZAT = [10_000_000, 25_000_000, 50_000_000, 100_000_000, 250_000_000, 500_000_000, 1_000_000_000, 2_500_000_000, 5_000_000_000, 10_000_000_000];
@@ -304,9 +305,8 @@ export function quoteDesk(directory, { timeoutMs = 2000, fetcher = postQuote, mi
       const got = await fetchQuote(makerIndex, offer, takerRole, named.q.pair, b.bucket);
       if (!got || got.deadline - Date.now() < MIN_START_MS) return null;
       if (BigInt(zat) < BigInt(got.q.min_zat) || BigInt(zat) > BigInt(got.q.max_zat)) return null;
-      const [fresh, shown] = [BigInt(got.q.rate_sat_per_zec), BigInt(named.q.rate_sat_per_zec)];
-      // Z (selling ZEC) gets at least the rate shown, B (buying) pays at most it
-      if (takerRole === "Z" ? fresh < shown : fresh > shown) return null;
+      // Z (selling ZEC) gets at least the rate shown, B (buying) pays at most it (firm.mjs)
+      if (!noWorse(got.q.rate_sat_per_zec, named.q.rate_sat_per_zec, takerRole)) return null;
       const e = { ...got, index: makerIndex };
       byId.set(`${makerIndex}|${got.q.quote_id}`, e);
       return hold(e);

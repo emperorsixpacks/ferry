@@ -24,7 +24,7 @@ import { pairName } from "../lib/pairs";
 import { following, nearAssetOf, usePathCtx, useSelection, type CardProps, type Side } from "../lib/paths";
 import { plainSummary } from "../lib/progress";
 import { receiveFor, useReceive } from "../lib/receive";
-import { secondsLeft, useQuotes, withFirm } from "../lib/quotes";
+import { firmGone, secondsLeft, standInFor, useQuotes, withFirm } from "../lib/quotes";
 import { isRunning, legSwapIds, routeSummary, useRoutes } from "../lib/routes";
 import { useActivityRows } from "./Activity";
 
@@ -309,12 +309,22 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
     if (problem || blocked || busy || !quote || !daemon) return;
     setBusy(true);
     setFail(null);
+    const start = (quoteId?: string) => startSwap(zat, daemon, maker?.name, quoteId, receiveTo ? (buying ? { sweep_to: receiveTo } : { payout_to: receiveTo }) : undefined);
     try {
-      const { id } = await startSwap(zat, daemon, maker?.name, firm?.quote_id, receiveTo ? (buying ? { sweep_to: receiveTo } : { payout_to: receiveTo }) : undefined);
-      navigate(`/app/swap/${id}`);
+      let started: { id: string };
+      try {
+        started = await start(firm?.quote_id);
+      } catch (e) {
+        // the firm price was gone (another start took it, or it ran out): once more at a fresh one
+        // from the same partner, when it is no worse for the person; else they see the new price
+        const fresh = firm && firmGone((e as Error).message) ? await standInFor(pair, role, zat, firm) : null;
+        if (!fresh) throw e;
+        started = await start(fresh.quote_id);
+      }
+      navigate(`/app/swap/${started.id}`);
     } catch (e) {
       const msg = (e as Error).message;
-      if (/firm (quote|price)/i.test(msg)) quotes.refresh();
+      if (firmGone(msg)) quotes.refresh();
       setFail(plainError(msg, buying, about));
     } finally {
       setBusy(false);
