@@ -15,11 +15,15 @@
 // B serves the peer offers of a few mock B makers and Z those of a few Z makers (mock/makers.mjs)
 // for the maker list, and their firm quotes (POST /peer/quote, signed like ferryd's;
 // MOCK_QUOTE_SECS, default 45).
+//
+// MOCK_ROUTE_PORT (unset: none) also serves a mock ferry-route there, for private swaps: a route
+// runs two of these swaps one after the other (mock/router.mjs).
 
 import http from "node:http";
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { MOCK_MAKERS, mockMakerAt, mockMakerByUrl } from "./makers.mjs";
-import { bucketFor, signingText } from "../server/quotes.mjs";
+import { mockRouter } from "./router.mjs";
+import { bucketFor, marketOf, signingText } from "../server/quotes.mjs";
 
 const SPEED = Number(process.env.MOCK_SPEED ?? 1) || 1;
 const Z_PORT = Number(process.env.MOCK_Z_PORT ?? 7101);
@@ -105,14 +109,18 @@ const makerOf = (makerUrl) => mockMakerByUrl(makerUrl, Z_PORT);
 const rateOf = (makerUrl) => makerOf(makerUrl)?.rate ?? RATE;
 
 // `taker` proposes ("Z" sells ZEC, "B" buys it); the other party is the maker. `rate`: a firm
-// quote's, else the maker's offer
-function newSwap(taker, makerUrl, zec_zat, rate = rateOf(makerUrl)) {
+// quote's, else the maker's offer. A route's swap (mock/router.mjs) carries its label (`route`), may
+// be in another coin's units (`coin`: only BTC moves balances) and sweeps to Z (`sweepTo`).
+function newSwap(taker, makerUrl, zec_zat, rate = rateOf(makerUrl), { route = null, coin = "btc", sweepTo = null } = {}) {
   const btc_sat = Math.round((zec_zat / 1e8) * rate);
   const pts = { Z: { p: hex(32), s: point() }, B: { p: hex(32), s: point() } };
   const s = {
     id: hex(16),
     taker,
     makerUrl,
+    route,
+    coin,
+    sweepTo,
     amounts: { zec_zat, btc_sat },
     keys: { pts, joint_ak: hex(32), sigma: Math.random() < 0.5 ? 1 : -1 },
     addresses: { btc_lock: "bcrt1p" + bech(58), zec_joint: "uregtest1" + bech(104) },
@@ -212,7 +220,7 @@ function stepB(s) {
       }
       return;
     case "CancelSigned": {
-      parties.B.balances.btc_sat -= s.amounts.btc_sat;
+      if (s.coin === "btc") parties.B.balances.btc_sat -= s.amounts.btc_sat;
       const tx = broadcast("btc", "btc_lock", s);
       v.state = "BtcLocked";
       log(s, v, "btc", "btc_lock_broadcast", "Broadcast tx_lock: " + btcAmount(s.amounts.btc_sat) + " to the Taproot lock address", tx);
@@ -255,14 +263,15 @@ function stepB(s) {
     case "BtcRedeemed":
       if (!s.tx.zec_sweep && now() >= f.sweepAt) {
         const tx = broadcast("zec", "zec_sweep", s);
-        log(s, v, "zec", "zec_sweep_broadcast", "Swept the joint note to B's own shielded address, signing with ask = σ(z + b)", tx);
+        const to = s.sweepTo ? `the route's shielded address (${parties[s.sweepTo].name}'s wallet)` : "B's own shielded address";
+        log(s, v, "zec", "zec_sweep_broadcast", `Swept the joint note to ${to}, signing with ask = σ(z + b)`, tx);
         s.observer.zec.push("Ironwood bundle: 2 actions. Only nullifiers, randomized keys (rk) and encrypted notes; nothing in it appears on Bitcoin.");
         return;
       }
       if (s.tx.zec_sweep && mined("zec", s.tx.zec_sweep)) {
         v.state = "ZecSwept";
         v.outcome = "swapped";
-        credit("B", "zec_shielded_zat", s.amounts.zec_zat);
+        credit(s.sweepTo ?? "B", "zec_shielded_zat", s.amounts.zec_zat);
         log(s, v, "local", "swap_complete", "Swap complete. B holds " + zecAmount(s.amounts.zec_zat) + " in its own Ironwood notes");
       }
       return;
@@ -277,7 +286,7 @@ function stepB(s) {
       if (s.tx.refund && mined("btc", s.tx.refund)) {
         v.state = "Refunded";
         v.outcome = "refunded";
-        credit("B", "btc_sat", s.amounts.btc_sat);
+        if (s.coin === "btc") credit("B", "btc_sat", s.amounts.btc_sat);
         log(s, v, "local", "refunded", "BTC is back in B's wallet. Revealing b unlocks nothing for B");
       }
       return;
@@ -389,7 +398,7 @@ function stepZ(s) {
       if (s.tx.btc_redeem && mined("btc", s.tx.btc_redeem)) {
         v.state = "BtcRedeemed";
         v.outcome = "swapped";
-        credit("Z", "btc_sat", s.amounts.btc_sat - FEE_SAT);
+        if (s.coin === "btc") credit("Z", "btc_sat", s.amounts.btc_sat - FEE_SAT);
         log(s, v, "local", "swap_complete", `Swap complete. ${btcAmount(s.amounts.btc_sat - FEE_SAT)} is in Z's wallet`);
         return;
       }
@@ -430,7 +439,7 @@ function stepZ(s) {
       if (s.tx.punish && mined("btc", s.tx.punish)) {
         v.state = "Punished";
         v.outcome = "punished";
-        credit("Z", "btc_sat", s.amounts.btc_sat);
+        if (s.coin === "btc") credit("Z", "btc_sat", s.amounts.btc_sat);
         log(s, v, "local", "punished", "Z holds the BTC. Z's ZEC stays in the joint note, which is B's penalty for not refunding");
       }
       return;
@@ -447,6 +456,10 @@ function cancelZ(s, v) {
   log(s, v, "btc", "cancel_broadcast", "T1 reached without B's redeem signature. Broadcast the presigned tx_cancel", tx);
   s.observer.btc.push(`tx_cancel: spends the lock output through its ${T1}-block CSV leaf into a new P2TR output.`);
 }
+
+// the mock router (mock/router.mjs), when MOCK_ROUTE_PORT is set
+const ROUTE_PORT = process.env.MOCK_ROUTE_PORT ? Number(process.env.MOCK_ROUTE_PORT) : null;
+const router = ROUTE_PORT ? mockRouter({ swaps, newSwap: (...a) => newSwap(...a), chains, parties, inject: (s, role) => inject(s, role), makerOf, ms, speed: SPEED }) : null;
 
 function inject(s, role) {
   const v = s.views[role];
@@ -492,6 +505,8 @@ function swapView(s, role) {
     secrets: v.secrets,
     timeline: v.timeline.map(({ tx, ...e }) => e),
     observer: { btc: [...s.observer.btc], zec: [...s.observer.zec] },
+    // a route's swap: its label, as ferryd stores the one the router sends
+    ...(s.route ? { route: s.route } : {}),
   };
 }
 
@@ -510,6 +525,8 @@ function statusView(role) {
 }
 
 const STARTED = now();
+// the tokens the mock's EVM partners name (Base Sepolia's addresses)
+const MOCK_TOKENS = { usdc: "0x036cbd53842c5426634e7929541ec2318f3dcf7e", weth: "0x4200000000000000000000000000000000000006" };
 
 // ferryd's GET /peer/offer for one mock maker. Live-rate makers refresh every 60 s, like
 // --maker-price-feed; a paused one stopped refreshing before the mock started.
@@ -523,15 +540,21 @@ function peerOffer(m) {
       ? Math.max(0, parties.Z.balances.zec_shielded_zat - ZEC_FEE_RESERVE)
       : Math.max(0, Math.floor(((parties.B.balances.btc_sat - FEE_SAT) * 1e8) / m.rate));
   const liquidity = m.slug === null ? own : m.liquidity;
+  // a private-swap partner (mock/makers.mjs ROUTE_MAKERS) says which coin it swaps, as ferryd does:
+  // an ERC-20 on a local chain (anvil, so the operator's entry names the chain), or Litecoin
+  const evm = m.counter === "usdc" || m.counter === "weth";
+  const counter = evm
+    ? { counter: "evm", token_symbol: m.counter.toUpperCase(), chain_id: 31337, token: MOCK_TOKENS[m.counter], network: "anvil" }
+    : { ...(m.counter === "ltc" ? { coin: "ltc" } : {}), network: chains.btc.network };
   return {
     role: m.role,
-    network: chains.btc.network,
+    ...counter,
     making: !m.paused,
     paused: !!m.paused,
     rate_sat_per_zec: m.rate,
     min_zat: m.min,
     max_zat: m.max,
-    terms: { t1: T1, t2: T2, btc_fee: FEE_SAT, btc_lock_confirmations: BTC_CONFS, zec_confirmations: ZEC_CONFS, cancel_confirmations: CANCEL_CONFS, redeem_margin: DELTA, refund_margin: DELTA, keypath: true },
+    terms: { t1: T1, t2: T2, ...(evm ? {} : { btc_fee: FEE_SAT }), btc_lock_confirmations: BTC_CONFS, zec_confirmations: ZEC_CONFS, cancel_confirmations: CANCEL_CONFS, redeem_margin: DELTA, refund_margin: DELTA, keypath: true },
     rate_source: m.source,
     ...(updated != null ? { rate_updated_at: updated } : {}),
     liquidity: { zec_zat: Math.min(liquidity, m.max) },
@@ -565,7 +588,7 @@ const busy = () => swaps.some((s) => !(s.views.Z.outcome && s.views.B.outcome));
 function peerQuote(m, body) {
   const b = bucketFor(Number(body?.bucket_zat));
   if (!b || b.bucket !== body.bucket_zat) return [400, { error: "firm quotes are asked for by bucket, not by amount" }];
-  if (body.pair !== "ZEC/BTC") return [400, { error: "this maker swaps ZEC/BTC" }];
+  if (body.pair !== m.pair) return [400, { error: `this maker swaps ${m.pair}` }];
   // a B maker quotes Z takers (selling ZEC), a Z maker B takers (buying it)
   const taker = m.role === "Z" ? "B" : "Z";
   if (body.taker_role !== taker) return [400, { error: `this maker quotes takers with role ${taker}` }];
@@ -580,8 +603,8 @@ function peerQuote(m, body) {
   const q = {
     v: 1,
     quote_id: hex(16),
-    pair: "ZEC/BTC",
-    market: `btc:${chains.btc.network}`,
+    pair: m.pair,
+    market: marketOf(offer),
     maker_role: m.role,
     taker_role: taker,
     rate_sat_per_zec: m.rate,
@@ -624,6 +647,7 @@ setInterval(() => {
     stepB(s);
     stepZ(s);
   }
+  router?.tick();
   for (const role of ["Z", "B"]) pushEvents(role);
 }, 200);
 
@@ -702,6 +726,7 @@ function handler(role) {
 
     if (req.method === "POST" && path === "/api/_mock/reset") {
       swaps.length = 0;
+      router?.reset();
       for (const r of ["Z", "B"]) parties[r].balances = { ...START[r] };
       for (const r of ["Z", "B"]) for (const c of clients[r]) c.last = {};
       return send(res, 200, { ok: true });
@@ -782,4 +807,14 @@ for (const role of ["Z", "B"]) {
   http.createServer(handler(role)).listen(port, "127.0.0.1", () => {
     console.log(`mock ferryd ${role} (${parties[role].name}) on http://127.0.0.1:${port}  speed x${SPEED}`);
   });
+}
+
+if (ROUTE_PORT) {
+  http
+    .createServer((req, res) =>
+      router.handler(req, res, readBody).catch(() => {
+        if (!res.headersSent) send(res, 500, { error: "internal error" });
+      }),
+    )
+    .listen(ROUTE_PORT, "127.0.0.1", () => console.log(`mock ferry-route on http://127.0.0.1:${ROUTE_PORT}`));
 }
