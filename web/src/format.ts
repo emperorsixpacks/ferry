@@ -39,7 +39,7 @@ const NETWORKS: Record<string, { name: string; chain: ChainId | null }> = {
 export const chainOfNetwork = (network: string | null | undefined): ChainId | null => (network ? (NETWORKS[network]?.chain ?? null) : null);
 const isCoin = (v: string): v is CoinId => v in COINS;
 
-// a pair's coin when its daemon hasn't said yet (the swap page's pair toggle lists them all)
+// a pair's coin when its daemon hasn't said yet (the swap page's coin picker lists them all)
 export const coinInfo = (id: CoinId): CoinInfo => COINS[id];
 let current: CoinInfo = COINS.btc;
 // A local chain (anvil) doesn't say which chain it stands in for; the UI server's pair does.
@@ -50,23 +50,37 @@ export const setChainHint = (c: ChainId | null) => {
 // A daemon's coin is fixed for its lifetime, so one module-level value is enough: it is set
 // from each status just before the state update that re-renders.
 export const coin = (): CoinInfo => current;
-export function setCoinFrom(
-  status: { chains?: { btc?: { coin?: string; ticker?: string; network?: string } }; offer?: { pair?: string } } | null,
-) {
+type CoinStatus = { chains?: { btc?: { coin?: string; ticker?: string; network?: string } }; offer?: { pair?: string } } | null;
+
+// The coin a daemon's status describes; `hint` names the chain a local EVM chain stands in for.
+// Pure, so a page can describe a pair other than the one followed (Activity lists every pair).
+export function coinOf(status: CoinStatus, hint: ChainId | null = null): CoinInfo {
   // an EVM daemon's own ticker first: it names the token actually configured
   const pairTicker = (status?.offer?.pair ?? "").split("/")[1] ?? "";
   const raw = (status?.chains?.btc?.ticker ?? status?.chains?.btc?.coin ?? pairTicker).toLowerCase();
   const base = COINS[isCoin(raw) ? raw : "btc"];
-  if (base.kind !== "evm") {
-    current = base;
-    return;
-  }
+  if (base.kind !== "evm") return base;
   const network = status?.chains?.btc?.network ?? "";
   const net = NETWORKS[network];
-  const chain = net?.chain ?? chainHint;
+  const chain = net?.chain ?? hint;
   // "Base Sepolia"; a local stand-in: "Arbitrum (local)"
   const name = net?.chain ? net.name : chain ? `${CHAIN_NAMES[chain]} (local)` : (net?.name ?? (network || base.name));
-  current = { ...base, name, chain };
+  return { ...base, name, chain };
+}
+
+export function setCoinFrom(status: CoinStatus) {
+  current = coinOf(status, chainHint);
+}
+
+// A network's plain name for the "Test network" pill: never "regtest" or "anvil".
+const MAINNETS = new Set(["bitcoin", "main", "mainnet", "litecoin", "ethereum", "base", "arbitrum", "optimism"]);
+export const isMainnet = (network: string | null | undefined) => !!network && MAINNETS.has(network);
+export function networkLabel(network: string, kind: "btc" | "ltc" | "evm" | "zec"): string {
+  if (kind === "evm") return NETWORKS[network]?.chain ? NETWORKS[network].name : network === "anvil" ? "Local test chain" : network;
+  const coinName = kind === "zec" ? "Zcash" : kind === "ltc" ? "Litecoin" : "Bitcoin";
+  const names: Record<string, string> = { regtest: "local test network", signet: "Signet", test: "Testnet", testnet: "Testnet", testnet4: "Testnet4" };
+  if (isMainnet(network)) return coinName;
+  return `${coinName} ${names[network] ?? network}`;
 }
 
 export const zec = (zat: number) => (zat / 1e8).toFixed(2);
