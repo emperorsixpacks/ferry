@@ -14,6 +14,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { useLocal } from "../lib/daemon";
 import { STATUS, amounts, direction } from "../lib/swaps";
 import { useWalletCaughtUp } from "../lib/walletSync";
+import { coin } from "@/format";
 
 // /app/swap/:id, laid out like SealPad's SaleDetail: header, banner, progress, details,
 // transactions, and what each chain sees.
@@ -28,7 +29,7 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
   const phase = phaseOf(swap);
   const st = STATUS[phase];
   const a = amounts(swap, status);
-  const mine = swap.role === "Z" ? "ZEC" : "BTC";
+  const mine = swap.role === "Z" ? "ZEC" : coin().ticker;
   const by = unwoundBy(status, swap, bt);
   const live = phase === "progress" || phase === "unwinding";
   const refused = swap.timeline.some((e) => e.kind === "zec_lock_refused");
@@ -59,7 +60,7 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
           </p>
           <p className="mt-1 font-mono text-xs text-slate-600">
             {refused
-              ? "Your wallet couldn't send the ZEC from shielded notes only, so no ZEC moved. The other side takes its bitcoin back after the deadline."
+              ? `Your wallet couldn't send the ZEC from shielded notes only, so no ZEC moved. The other side takes its ${coin().name.toLowerCase()} back after the deadline.`
               : phase === "unwinding"
                 ? "The swap didn't finish in time, so it was called off. The ways back were signed before anything was locked."
                 : swap.watchtower?.status === "armed"
@@ -114,9 +115,9 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
             <Detail label="Started" value={swap.timeline[0] ? new Date(swap.timeline[0].at).toLocaleString() : "–"} />
             <Detail label={swap.role === "Z" ? "You send" : "You pay"} value={<span className="font-mono">{swap.role === "Z" ? a.zec : a.btc}</span>} />
             <Detail label="You receive" value={<span className="font-mono">{swap.role === "Z" ? a.btc : a.zec}</span>} />
-            <Detail label="Network fee" value={<span className="font-mono">{status?.offer.fee_sat != null ? `${status.offer.fee_sat.toLocaleString("en-US")} sat` : "–"}</span>} />
-            <Detail label="Rate" value={<span className="font-mono">{status ? `1 ZEC = ${btcText(status.offer.rate_sat_per_zec)} BTC` : "–"}</span>} />
-            <Detail label="Bitcoin locked at" value={<span className="font-mono">{d.btc_lock_height != null ? `block ${d.btc_lock_height}` : "not yet"}</span>} />
+            <Detail label="Network fee" value={<span className="font-mono">{status?.offer.fee_sat != null ? `${status.offer.fee_sat.toLocaleString("en-US")} ${coin().unit}` : "–"}</span>} />
+            <Detail label="Rate" value={<span className="font-mono">{status ? `1 ZEC = ${btcText(status.offer.rate_sat_per_zec)} ${coin().ticker}` : "–"}</span>} />
+            <Detail label={`${coin().name} locked at`} value={<span className="font-mono">{d.btc_lock_height != null ? `block ${d.btc_lock_height}` : "not yet"}</span>} />
             <Detail
               label="Called off at the latest"
               value={<span className="font-mono">{d.btc_lock_height != null ? `block ${d.btc_lock_height + d.t1_blocks}` : `${d.t1_blocks} blocks after the lock`}</span>}
@@ -145,7 +146,7 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
                   <TableRow key={t.txid}>
                     <TableCell>
                       <StatusBadge variant={t.chain === "zec" ? "default" : "secondary"} className={t.chain === "zec" ? "bg-slate-900" : ""}>
-                        {t.chain === "zec" ? "Zcash" : "Bitcoin"}
+                        {t.chain === "zec" ? "Zcash" : coin().name}
                       </StatusBadge>
                     </TableCell>
                     <TableCell className="font-medium">{t.label}</TableCell>
@@ -206,7 +207,7 @@ function Outcome({ swap, status }: { swap: SwapView; status: Status | null }) {
     settled: {
       icon: <CheckCircle size={28} weight="duotone" className="mx-auto text-brand-500" />,
       title: `You received ${a.btc}`,
-      note: `The other side stopped responding, so after the deadline the Bitcoin was released to you. Your ${a.zec} stays locked: you were paid for it.`,
+      note: `The other side stopped responding, so after the deadline the ${coin().name} was released to you. Your ${a.zec} stays locked: you were paid for it.`,
     },
     refunded: {
       icon: <ArrowCounterClockwise size={28} weight="duotone" className="mx-auto text-slate-500" />,
@@ -289,7 +290,7 @@ function ChainsSee({ swap }: { swap: SwapView }) {
         </div>
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <Label>Bitcoin</Label>
+            <Label>{coin().name}</Label>
             <StatusBadge variant="secondary">Public</StatusBadge>
           </div>
           {swap.observer.btc.length ? (
@@ -308,7 +309,7 @@ function ChainsSee({ swap }: { swap: SwapView }) {
         </div>
         <div className="rounded border border-slate-200 bg-slate-50 p-4 text-sm md:col-span-2">
           <Label>Can the two be linked?</Label>
-          <p className="mt-2 text-slate-700">No. The ZEC amount is encrypted, the shielded address was made for this swap and never published, and the Bitcoin side carries none of your Zcash keys.</p>
+          <p className="mt-2 text-slate-700">No. The ZEC amount is encrypted, the shielded address was made for this swap and never published, and the {coin().name} side carries none of your Zcash keys.</p>
         </div>
       </CardContent>
     </Card>

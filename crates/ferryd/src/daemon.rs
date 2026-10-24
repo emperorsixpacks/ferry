@@ -10,6 +10,7 @@ use futures_util::FutureExt;
 
 use ferry_btc::bitcoin::{Address, Amount, Network, Transaction, Txid};
 use ferry_btc::rpc::{BitcoinRpc, RpcError};
+use ferry_btc::Chain;
 use ferry_core::{
     accept, ChainEvent, Envelope, Event, Message, Policy, Proposal, Role, SendFailure, Spend, Swap,
     ZecLeg, ZecNote,
@@ -170,16 +171,18 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             .unwrap_or_else(|| format!("{wallet}-watch"));
         let rpc = BitcoinRpc::new(&cli.btc_rpc, &cli.btc_rpc_user, &cli.btc_rpc_pass)
             .with_wallet(wallet)
-            .with_watch_wallet(watch);
+            .with_watch_wallet(watch)
+            .with_coin(cli.chain);
         rpc.ensure_wallet().await?;
         rpc.ensure_watch_wallet().await?;
-        let policy = Policy::for_network(cli.network, cli.dev_policy)
+        let chain = cli.chain()?;
+        let policy = Policy::for_chain(chain, cli.dev_policy)
             .map_err(|e| anyhow::anyhow!("{e} (pass --dev-policy for a local regtest setup)"))?;
         let offer = cli.offer();
         if offer.making {
             offer
                 .terms
-                .params(cli.network, offer.max_zat, offer.btc_for(offer.max_zat))
+                .params(chain, offer.max_zat, offer.btc_for(offer.max_zat))
                 .check_policy(&policy)
                 .map_err(|e| anyhow::anyhow!("our own maker terms: {e}"))?;
         }
@@ -231,6 +234,14 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         self.cli.network
     }
 
+    /// Checked in [`Daemon::new`].
+    fn chain(&self) -> Chain {
+        Chain {
+            coin: self.cli.chain,
+            network: self.cli.network,
+        }
+    }
+
     /// Persist `rec` durably; false (and logged) if that failed. Actions only run after a
     /// successful save of the state that queued them.
     fn save(&self, rec: &SwapRecord) -> bool {
@@ -258,6 +269,8 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             balances,
             chains: view::Chains {
                 btc: view::BtcChain {
+                    coin: self.cli.chain,
+                    ticker: self.cli.chain.ticker(),
                     network: self.network().to_string(),
                     height: self.rpc.block_count().await?,
                 },
@@ -336,6 +349,13 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 offer.network
             )));
         }
+        if offer.coin != self.cli.chain {
+            return Err(ApiError::bad(format!(
+                "the counterparty swaps {}, we swap ZEC/{}",
+                offer.pair(),
+                self.cli.chain.ticker()
+            )));
+        }
         if zec_zat < offer.min_zat || zec_zat > offer.max_zat {
             return Err(ApiError::bad(format!(
                 "Amount must be between {} and {}",
@@ -345,7 +365,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         }
         let params = offer
             .terms
-            .params(self.network(), zec_zat, offer.btc_for(zec_zat));
+            .params(self.chain(), zec_zat, offer.btc_for(zec_zat));
         params
             .check_policy(&self.policy)
             .map_err(|e| ApiError::bad(format!("The maker's terms are not acceptable: {e}")))?;
@@ -434,7 +454,11 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         Ok(serde_json::json!({
             "role": self.role,
             "name": self.cli.name,
-            "btc": { "network": self.network().to_string(), "address": btc.to_string() },
+            "btc": {
+                "coin": self.cli.chain,
+                "network": self.network().to_string(),
+                "address": self.chain().encode_address(&btc),
+            },
             "zec": { "address": self.leg.receive_address() },
         }))
     }
@@ -546,9 +570,10 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 self.role.peer().as_str()
             )));
         }
-        if params.network != self.network() {
+        if params.network != self.network() || params.coin != self.cli.chain {
             return Err(ApiError::bad(format!(
-                "this maker runs on {}",
+                "this maker swaps {} on {}",
+                self.offer.pair(),
                 self.network()
             )));
         }

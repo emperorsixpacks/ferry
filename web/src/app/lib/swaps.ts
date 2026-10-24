@@ -1,7 +1,7 @@
 // How a swap is labelled in lists, badges and headers, from this party's side.
 
 import type { Role, Status, SwapView } from "@/api";
-import { zec } from "@/format";
+import { coin, zec } from "@/format";
 import { btcFor, btcText } from "@/swap/shared";
 import { phaseOf, stepsOf, type Phase } from "@/swap/steps";
 
@@ -20,11 +20,11 @@ export const STATUS: Record<Phase, { label: string; tone: BadgeTone }> = {
 export function amounts(v: SwapView, status: Status | null) {
   return {
     zec: `${zec(v.amounts.zec_zat)} ZEC`,
-    btc: `${btcText(btcFor(v.role, v.amounts.btc_sat, status))} BTC`,
+    btc: `${btcText(btcFor(v.role, v.amounts.btc_sat, status))} ${coin().ticker}`,
   };
 }
 
-export const direction = (role: Role) => (role === "Z" ? "ZEC → BTC" : "BTC → ZEC");
+export const direction = (role: Role) => (role === "Z" ? `ZEC → ${coin().ticker}` : `${coin().ticker} → ZEC`);
 
 // one plain line under a list row or header
 export function summary(v: SwapView, status: Status | null): string {

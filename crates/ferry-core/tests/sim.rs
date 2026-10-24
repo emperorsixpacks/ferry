@@ -15,6 +15,7 @@ use rand_core::OsRng;
 
 fn params() -> SwapParams {
     SwapParams {
+        coin: ferry_btc::Coin::Btc,
         network: Network::Regtest,
         btc_amount: 100_000_000,
         zec_amount: 5_000_000_000,

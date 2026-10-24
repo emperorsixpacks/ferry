@@ -6,9 +6,27 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE="${FERRY_DEMO_DIR:-$ROOT/.demo}"
 
-CONTAINER="${BITCOIND_CONTAINER:-ferry-bitcoind}"
-IMAGE="${BITCOIND_IMAGE:-bitcoin/bitcoin:28.1}"
-BTC_RPC_PORT="${BTC_RPC_PORT:-18643}"
+# CHAIN=ltc swaps ZEC against Litecoin: litecoind regtest instead of bitcoind (infra/demo-ltc.sh).
+CHAIN="${CHAIN:-btc}"
+case "$CHAIN" in
+  btc)
+    TICKER=BTC
+    CONTAINER="${BITCOIND_CONTAINER:-ferry-bitcoind}"
+    IMAGE="${BITCOIND_IMAGE:-bitcoin/bitcoin:28.1}"
+    BTC_RPC_PORT="${BTC_RPC_PORT:-18643}"
+    NODE_RPC_PORT=18443 # inside the container
+    ADDR_TYPE=bech32m ;;
+  ltc)
+    TICKER=LTC
+    CONTAINER="${BITCOIND_CONTAINER:-ferry-litecoind}"
+    # Litecoin Core 0.21.5.6 (Taproot + MWEB), pinned like infra/ltc/regtest.sh.
+    IMAGE="${BITCOIND_IMAGE:-uphold/litecoin-core:0.21@sha256:46ebcaa617f66f3f35be4d7c2fe46bb07f037fd9f4482c4e1d1b044997d30b1c}"
+    BTC_RPC_PORT="${BTC_RPC_PORT:-19643}"
+    NODE_RPC_PORT=19443
+    # Litecoin Core's wallet has no bech32m type.
+    ADDR_TYPE=bech32 ;;
+  *) echo "CHAIN must be btc or ltc" >&2; exit 2 ;;
+esac
 BTC_RPC="http://127.0.0.1:$BTC_RPC_PORT"
 Z_PORT="${Z_PORT:-7101}"           # control API (/api/*, loopback)
 B_PORT="${B_PORT:-7102}"
@@ -46,7 +64,8 @@ FERRYD="${FERRYD:-$ROOT/target/debug/ferryd}"
 
 usage() {
   cat <<EOF
-Ferry local demo: shielded ZEC <-> BTC atomic swap between two daemons on one machine.
+Ferry local demo: shielded ZEC <-> $TICKER atomic swap between two daemons on one machine.
+CHAIN=ltc (or infra/demo-ltc.sh) runs it against litecoind instead of bitcoind.
 
   infra/demo.sh up       start bitcoind (regtest, Docker container $CONTAINER), build ferryd,
                          start Z ($Z_NAME, :$Z_PORT) and B ($B_NAME, :$B_PORT, maker at $RATE sat/ZEC),
@@ -81,6 +100,7 @@ The same swap through the API:
   curl -XPOST -H "\$AUTH" localhost:$Z_PORT/api/swaps/<id>/fault -H 'content-type: application/json' -d '{"fault":"stall"}'
 
 Environment (defaults in brackets):
+  CHAIN [btc|ltc, $CHAIN]  BITCOIND_CONTAINER [$CONTAINER]  BITCOIND_IMAGE
   BLOCK_SECS [$BLOCK_SECS]  FAST_BLOCK_SECS [$FAST_BLOCK_SECS]  BTC_RPC_PORT [$BTC_RPC_PORT]
   Z_PORT [$Z_PORT]  B_PORT [$B_PORT]  Z_PEER_PORT [$Z_PEER_PORT]  B_PEER_PORT [$B_PEER_PORT]
   UI_ORIGINS [$UI_ORIGINS] (browser origins allowed on the API)  RATE [$RATE sat/ZEC]  B_FUND_BTC [$B_FUND_BTC]
@@ -133,9 +153,9 @@ stop_pid() {
 
 start_bitcoind() {
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  log "starting bitcoind ($IMAGE) on 127.0.0.1:$BTC_RPC_PORT"
-  docker run -d --name "$CONTAINER" -p "127.0.0.1:$BTC_RPC_PORT:18443" "$IMAGE" \
-    -regtest -server -txindex -printtoconsole \
+  log "starting the $TICKER node ($IMAGE) on 127.0.0.1:$BTC_RPC_PORT"
+  docker run -d --name "$CONTAINER" -p "127.0.0.1:$BTC_RPC_PORT:$NODE_RPC_PORT" "$IMAGE" \
+    -regtest -server -txindex -printtoconsole -rpcport="$NODE_RPC_PORT" \
     -rpcuser=ferry -rpcpassword=ferry -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0 \
     -fallbackfee=0.0002 >/dev/null
   for _ in $(seq 1 60); do
@@ -143,7 +163,21 @@ start_bitcoind() {
     sleep 0.5
   done
   docker logs --tail 30 "$CONTAINER" >&2
-  die "bitcoind did not come up"
+  die "the $TICKER node did not come up"
+}
+
+# Litecoin: activate MWEB as on mainnet. It locks in by BIP9 signalling at block 431; every
+# later block needs a HogEx, and the first HogEx needs a peg-in, so without this the block
+# producer would fail past block 431 with "bad-txns-vin-empty".
+activate_mweb() { # activate_mweb <miner address>
+  rpc "" generatetoaddress "[431, \"$1\"]" >/dev/null
+  local mweb
+  mweb=$(rpc miner getnewaddress '["", "mweb"]' | result)
+  rpc miner sendtoaddress "[\"$mweb\", 1]" >/dev/null
+  rpc "" generatetoaddress "[1, \"$1\"]" >/dev/null
+  rpc "" getblockchaininfo | python3 -c 'import json,sys; sys.exit(json.load(sys.stdin)["result"]["softforks"]["mweb"]["bip9"]["status"] != "active")' \
+    || die "MWEB did not activate"
+  log "MWEB active at height $(rpc "" getblockcount | result)"
 }
 
 start_ferryd() { # start_ferryd <key> <role> <name> <api port> <peer port> [extra args...]
@@ -167,7 +201,7 @@ start_ferryd() { # start_ferryd <key> <role> <name> <api port> <peer port> [extr
   for o in $UI_ORIGINS; do origins+=(--ui-origin "$o"); done
   "$FERRYD" --role "$role" --name "$name" --api-listen "127.0.0.1:$port" --listen "127.0.0.1:$peer_port" \
     --data-dir "$STATE/$key" --demo-faults --dev-policy ${origins[@]+"${origins[@]}"} \
-    --btc-rpc "$BTC_RPC" --btc-wallet "$name" "${zec_args[@]}" \
+    --chain "$CHAIN" --btc-rpc "$BTC_RPC" --btc-wallet "$name" "${zec_args[@]}" \
     --t1 "$T1" --t2 "$T2" --delta "$DELTA" --btc-lock-confs "$BTC_LOCK_CONFS" --zec-confs "$ZEC_CONFS" \
     --poll-ms "$POLL_MS" "$@" ${extra[@]+"${extra[@]}"} >>"$STATE/logs/$key.log" 2>&1 &
   echo $! >"$STATE/$key.pid"
@@ -404,9 +438,13 @@ cmd_up() {
 
   rpc "" createwallet '["miner"]' >/dev/null
   local miner
-  miner=$(rpc miner getnewaddress '["", "bech32m"]' | result)
-  rpc "" generatetoaddress "[101, \"$miner\"]" >/dev/null
-  log "mined 101 blocks to the miner wallet"
+  miner=$(rpc miner getnewaddress "[\"\", \"$ADDR_TYPE\"]" | result)
+  if [ "$CHAIN" = ltc ]; then
+    activate_mweb "$miner"
+  else
+    rpc "" generatetoaddress "[101, \"$miner\"]" >/dev/null
+    log "mined 101 blocks to the miner wallet"
+  fi
 
   log "starting B ($B_NAME, maker at $RATE sat/ZEC): API :$B_PORT, peer :$B_PEER_PORT"
   # shellcheck disable=SC2086
@@ -427,10 +465,10 @@ export FERRY_B_TOKEN=$(cat "$STATE/b/api-token")
 ENV
 
   local b_addr
-  b_addr=$(rpc "$B_NAME" getnewaddress '["", "bech32m"]' | result)
+  b_addr=$(rpc "$B_NAME" getnewaddress "[\"\", \"$ADDR_TYPE\"]" | result)
   rpc miner sendtoaddress "[\"$b_addr\", $B_FUND_BTC]" >/dev/null
   rpc "" generatetoaddress "[1, \"$miner\"]" >/dev/null
-  log "funded $B_NAME with $B_FUND_BTC BTC"
+  log "funded $B_NAME with $B_FUND_BTC $TICKER"
 
   producer "$miner" >>"$STATE/logs/miner.log" 2>&1 &
   echo $! >"$STATE/miner.pid"
@@ -439,7 +477,7 @@ ENV
     echo $! >"$STATE/zec-miner.pid"
   fi
 
-  log "ready: Z http://127.0.0.1:$Z_PORT  B http://127.0.0.1:$B_PORT (maker $MAKER_URL)  bitcoind $BTC_RPC  (ZEC: $ZEC_BACKEND, a block every ${BLOCK_SECS}s)"
+  log "ready (ZEC/$TICKER): Z http://127.0.0.1:$Z_PORT  B http://127.0.0.1:$B_PORT (maker $MAKER_URL)  $TICKER node $BTC_RPC  (ZEC: $ZEC_BACKEND, a block every ${BLOCK_SECS}s)"
   log "API tokens and UI settings: $STATE/env"
   log "UI: cd web && source $STATE/env && pnpm dev:ui"
 }
@@ -505,7 +543,7 @@ cmd_logs() {
 
 cmd_mine() {
   local miner
-  miner=$(rpc miner getnewaddress '["", "bech32m"]' | result) || die "bitcoind is not up"
+  miner=$(rpc miner getnewaddress "[\"\", \"$ADDR_TYPE\"]" | result) || die "the $TICKER node is not up"
   rpc "" generatetoaddress "[${1:-1}, \"$miner\"]" >/dev/null
   echo "height $(rpc "" getblockcount | result)"
 }

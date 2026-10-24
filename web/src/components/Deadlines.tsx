@@ -1,4 +1,5 @@
 import type { Deadlines as D, Path } from "../derive";
+import { coin } from "../format";
 
 // The two relative timelocks as a chart scale bar in Bitcoin block heights.
 export function Deadlines({ d, height, path, t1Blocks, t2Blocks }: { d: D | null; height: number | null; path: Path; t1Blocks: number; t2Blocks: number }) {
@@ -35,7 +36,7 @@ export function Deadlines({ d, height, path, t1Blocks, t2Blocks }: { d: D | null
         </div>
       </div>
 
-      <div className="scale" role="img" aria-label={`Bitcoin height ${height}. T1 at ${d.t1}, T2 at ${d.t2}.`}>
+      <div className="scale" role="img" aria-label={`${coin().name} height ${height}. T1 at ${d.t1}, T2 at ${d.t2}.`}>
         {blocks.map((h) => (
           <i key={h} className={h <= height ? (h % 2 ? "b-past b-odd" : "b-past") : h % 2 ? "b-odd" : undefined} />
         ))}
@@ -48,7 +49,7 @@ export function Deadlines({ d, height, path, t1Blocks, t2Blocks }: { d: D | null
         <Mark at={pct(d.t2)} title={d.t2Projected ? "T2, earliest" : "T2"} h={d.t2} end />
       </div>
       <p className="deadlines-now">
-        Bitcoin height <span className="mono">{height}</span>
+        {coin().name} height <span className="mono">{height}</span>
         {height < d.t1 ? <> with <span className="mono">{d.t1 - height}</span> blocks to T1</> : null}
         {height >= d.t1 && height < d.t2 ? <> with <span className="mono">{d.t2 - height}</span> blocks to T2</> : null}
       </p>

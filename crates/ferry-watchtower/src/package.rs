@@ -214,7 +214,9 @@ impl Package {
             .filter(|f| *f > Amount::ZERO)
             .ok_or_else(|| PackageError("cancel_tx pays more than the lock holds".into()))?;
         let scripts = SwapScripts::new(self.kb, self.kz, self.t1, self.t2, self.keypath);
+        // The tower follows bitcoind only (ferryd refuses --watchtower with --chain ltc).
         let txs = SwapTxs::new(
+            ferry_btc::Coin::Btc,
             scripts,
             self.lock_outpoint,
             lock_amount,
@@ -377,6 +379,7 @@ pub mod testkit {
             z_payout: &Address,
         ) -> SwapTxs {
             SwapTxs::new(
+                ferry_btc::Coin::Btc,
                 SwapScripts::new(kb.xonly(), kz.xonly(), t1, t2, true),
                 lock,
                 amount,

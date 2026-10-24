@@ -181,6 +181,7 @@ impl Session {
     pub fn txs(&self, outpoint: OutPoint) -> Result<SwapTxs, Error> {
         let z = self.address(Role::Z).script_pubkey();
         Ok(SwapTxs::new(
+            self.params.coin,
             self.scripts(),
             outpoint,
             self.params.btc_amount(),

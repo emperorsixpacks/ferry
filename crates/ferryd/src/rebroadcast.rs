@@ -73,6 +73,7 @@ mod tests {
 
     fn fixture() -> (SwapParams, SwapTxs, Txid) {
         let params = SwapParams {
+            coin: ferry_btc::Coin::Btc,
             network: Network::Regtest,
             btc_amount: 1_000_000,
             zec_amount: 1,
@@ -89,6 +90,7 @@ mod tests {
         let (b, z) = (BtcKey::random(), BtcKey::random());
         let lock = Txid::from_byte_array([7; 32]);
         let txs = SwapTxs::new(
+            ferry_btc::Coin::Btc,
             SwapScripts::new(b.xonly(), z.xonly(), 12, 12, false),
             OutPoint {
                 txid: lock,

@@ -24,7 +24,7 @@ The `maker` URL in `POST /api/swaps` is the maker's **peer** listener (demo: `ht
 exported as `FERRY_MAKER_URL`), not its control API.
 
 Peer protocol (JSON `Envelope`s from ferry-core; the taker initiates every request):
-`GET /peer/offer` (rate, role, network, terms, and the live-rate fields below), `POST /peer/swaps` (`{envelope: Propose, taker_url}`
+`GET /peer/offer` (rate, role, coin, network, terms, and the live-rate fields below), `POST /peer/swaps` (`{envelope: Propose, taker_url}`
 → the `Accept` envelope), `POST /peer/swaps/:id/messages` (one taker envelope; a retry of the same
 envelope is not applied twice) and `GET /peer/swaps/:id/messages?after=n` (the maker's envelopes
 from index n). A stalled party answers `503`.
@@ -79,7 +79,7 @@ fetch a URL of its choosing.
   "name": "zoe",
   "balances": { "zec_shielded_zat": 500000000, "btc_sat": 0 },
   "chains": {
-    "btc": { "network": "regtest", "height": 412 },
+    "btc": { "coin": "btc", "ticker": "BTC", "network": "regtest", "height": 412 },
     "zec": { "network": "regtest", "height": 233, "pool": "ironwood" }
   },
   "offer": { "pair": "ZEC/BTC", "rate_sat_per_zec": 410000, "min_zat": 10000000, "max_zat": 1000000000,
@@ -88,6 +88,14 @@ fetch a URL of its choosing.
   // path pays two: cancel + refund). t1/t2 in BTC blocks; confirmations Z/B wait for.
 }
 ```
+
+**Litecoin.** A daemon started with `--chain ltc` swaps ZEC against LTC (docs/LITECOIN.md). Then
+`chains.btc` is `{ "coin": "ltc", "ticker": "LTC", … }`, `offer.pair` is `"ZEC/LTC"` and every
+`btc_*`/`*_sat` field holds litoshis (1e-8 LTC): the field names stay the same for either coin.
+Swap views carry `"coin": "ltc"`, addresses are Litecoin-encoded (`rltc1…`), and timeline labels
+and observer lines name the coin ("0.5 LTC", "fee 2000 lit", "the Litecoin transaction").
+A taker refuses a maker whose offer is for another coin, and a maker refuses a Propose for
+another coin; the coin is part of `SwapParams` and so of the transcript.
 
 ## POST /api/swaps
 
@@ -104,6 +112,7 @@ Start a swap as taker against a maker.
 ```json
 {
   "id": "f3c1…",
+  "coin": "btc",                    // the coin swapped against ZEC: "btc" | "ltc"
   "role": "Z",
   "counterparty": "http://127.0.0.1:7102",
   "state": "ZecLocked",             // see state list below

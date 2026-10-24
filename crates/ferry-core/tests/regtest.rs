@@ -18,8 +18,17 @@ use ferry_core::{
 };
 use rand_core::{OsRng, RngCore};
 
+/// `FERRY_CHAIN`: btc (default) or ltc.
+fn chain_coin() -> Coin {
+    std::env::var("FERRY_CHAIN")
+        .unwrap_or_else(|_| "btc".into())
+        .parse()
+        .unwrap()
+}
+
 fn params() -> SwapParams {
     SwapParams {
+        coin: chain_coin(),
         network: Network::Regtest,
         btc_amount: 50_000_000,
         zec_amount: 1_000_000_000,
@@ -165,10 +174,7 @@ fn idx(role: Role) -> usize {
 
 impl World {
     async fn new(faults: Faults) -> World {
-        let coin: Coin = std::env::var("FERRY_CHAIN")
-            .unwrap_or_else(|_| "btc".into())
-            .parse()
-            .unwrap();
+        let coin = chain_coin();
         let default_url = match coin {
             Coin::Btc => "http://127.0.0.1:18543",
             Coin::Ltc => "http://127.0.0.1:19443",

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getMakers, type Maker } from "@/api";
+import { coin } from "@/format";
 
 // The UI server's maker directory (GET /api/makers), polled. The server caches each maker's offer
 // for a few seconds, so polling often costs the makers nothing extra.
@@ -58,12 +59,12 @@ export const quoteOf = (m: Maker): Quote | null =>
     ? { rate: m.rate_sat_per_zec, min: m.min_zat, max: m.max_zat, fee: m.fee_sat, liquidity: m.liquidity_zat }
     : null;
 
-// The pairs this app can swap today.
-export const SWAPPABLE = new Set(["ZEC/BTC"]);
+// The pair this app can swap: the one its daemon runs (ZEC/BTC, or ZEC/LTC with --chain ltc).
+export const swappable = (pair: string) => pair === `ZEC/${coin().ticker}`;
 
 // A maker this party can start a swap with: it takes swaps now, trades a pair the form supports,
 // and holds the other side.
-export const selectable = (m: Maker, role: "Z" | "B") => m.available && SWAPPABLE.has(m.pair) && (m.role == null || m.role !== role);
+export const selectable = (m: Maker, role: "Z" | "B") => m.available && swappable(m.pair) && (m.role == null || m.role !== role);
 
 // "20s ago", "4m ago", "2h ago"
 export function ago(seconds: number): string {

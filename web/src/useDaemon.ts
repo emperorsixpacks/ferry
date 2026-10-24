@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { DAEMONS, getStatus, getSwaps, type Role, type Status, type SwapView } from "./api";
+import { setCoinFrom } from "./format";
 
 export interface Daemon {
   connected: boolean;
@@ -26,6 +27,7 @@ export function useDaemon(role: Role): Daemon {
       try {
         const [status, list] = await Promise.all([getStatus(role), getSwaps(role)]);
         if (!alive) return;
+        setCoinFrom(status);
         setState((s) => ({ ...s, error: null, status, swaps: { ...s.swaps, ...Object.fromEntries(list.map((x) => [x.id, x])) } }));
       } catch (e) {
         if (alive) setState((s) => ({ ...s, connected: false, error: (e as Error).message }));
@@ -48,6 +50,7 @@ export function useDaemon(role: Role): Daemon {
       };
       es.addEventListener("status", (e) => {
         const status = JSON.parse((e as MessageEvent).data) as Status;
+        setCoinFrom(status);
         setState((s) => ({ ...s, status }));
       });
       es.addEventListener("swap", (e) => {

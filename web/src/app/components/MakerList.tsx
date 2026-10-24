@@ -5,7 +5,7 @@ import { btcText } from "@/swap/shared";
 import { Label } from "./Layout";
 import { StatusBadge } from "./ui/badge";
 import { cn } from "../lib/utils";
-import { SWAPPABLE, ago, selectable } from "../lib/makers";
+import { ago, selectable, swappable } from "../lib/makers";
 
 // The makers this UI server lists, as SealPad-style bordered rows: pick one and the swap form
 // quotes its rate and range.
@@ -70,7 +70,7 @@ function MakerRow({ m, role, active, onSelect, age }: { m: Maker; role: Role; ac
   if (active) badge = <StatusBadge>Selected</StatusBadge>;
   else if (!m.online) badge = <StatusBadge variant="destructive">Offline</StatusBadge>;
   else if (m.paused) badge = <StatusBadge variant="outline" className="border-amber-300 bg-amber-50 text-amber-700">Paused</StatusBadge>;
-  else if (!SWAPPABLE.has(m.pair)) badge = <StatusBadge variant="outline">Soon</StatusBadge>;
+  else if (!swappable(m.pair)) badge = <StatusBadge variant="outline">Soon</StatusBadge>;
   else if (!m.available) badge = <StatusBadge variant="outline">Closed</StatusBadge>;
   else badge = <StatusBadge variant="outline" className="border-brand-200 bg-brand-50/40 text-brand-700">Online</StatusBadge>;
 

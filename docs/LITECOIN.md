@@ -77,5 +77,28 @@ transactions and are not affected by MWEB.
 Litecoin form, request `bech32` wallet addresses and use the legacy watch-only wallet. Every
 other RPC call is identical on litecoind.
 
-Not yet wired: ferryd `--chain ltc`, the pair in offers and status, `SwapParams` carrying the
-coin (so both peers agree on it), dust validation per chain, and the UI.
+## ferryd, demo and UI
+
+- **Parameters.** `SwapParams` carries `coin` (serde default `btc`, omitted from the JSON for
+  BTC, so BTC swaps hash into the transcript exactly as before). An LTC `Propose` therefore
+  binds the coin into the transcript. A peer that predates the field drops it and gets a
+  transcript mismatch, so it fails safe. `SwapParams::validate` rejects LTC on signet and
+  amounts below the coin's P2PKH dust (BTC 546, LTC 5460).
+- **Transactions.** `SwapTxs::new(coin, …)` checks every output against that coin's dust for
+  its own script type (`Coin::dust`, i.e. Core's `GetDustThreshold` at 3 or 30 sat/vB).
+- **Policy.** `Policy::for_chain` keeps BTC's minimums in wall-clock terms on the faster chain:
+  Δ ×4 and lock/cancel confirmations ≥ the chain default (LTC mainnet 8, testnet 2). `--dev-policy`
+  on regtest is unchanged.
+- **ferryd.** `--chain ltc` (default `btc`) points the `--btc-*` options at litecoind. The
+  offer and status report `ZEC/LTC`, and a taker and maker on different coins refuse each other
+  (`the counterparty swaps ZEC/LTC, we swap ZEC/BTC`). The daemon's narration still says
+  "BTC"; the view layer swaps whole words (`BTC`, `Bitcoin`, `sat`) for the coin's when it serves
+  timeline labels and observer lines.
+- **Demo.** `infra/demo-ltc.sh up` (or `CHAIN=ltc infra/demo.sh up`) runs the whole demo against
+  litecoind regtest: container `ferry-litecoind`, RPC `127.0.0.1:19643`, MWEB activated first.
+- **UI.** `web/src/format.ts` `coin()` holds the daemon's coin (set from `/api/status`); every
+  BTC/Bitcoin/sat label in the app and the inspector reads from it.
+
+Wire note: the payout addresses inside `Setup` messages stay in rust-bitcoin's text form
+(`bcrt1…`) for either coin. They are typed scriptPubKeys between two Ferry daemons. Litecoin
+encoding is used only toward the node, the API and the UI.

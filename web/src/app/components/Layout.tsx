@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Warning } from "@phosphor-icons/react";
 import { Link, usePath } from "@/router";
-import { zec } from "@/format";
+import { coin, zec } from "@/format";
 import { btcText } from "@/swap/shared";
 import { useLocal } from "../lib/daemon";
 import { Wordmark } from "./LogoMark";
@@ -53,7 +53,7 @@ export function Layout({ children, wide }: { children: ReactNode; wide?: boolean
             <span className="inline-flex h-10 items-center gap-3 bg-slate-900 px-4 font-mono text-xs text-white">
               <span className="font-sans font-semibold">{d.status?.name ?? (d.role === "Z" ? "Z" : "B")}</span>
               <span className="text-slate-400">{d.status ? `${zec(d.status.balances.zec_shielded_zat)} ZEC` : "–"}</span>
-              <span className="text-slate-400">{d.status ? `${btcText(d.status.balances.btc_sat)} BTC` : "–"}</span>
+              <span className="text-slate-400">{d.status ? `${btcText(d.status.balances.btc_sat)} ${coin().ticker}` : "–"}</span>
             </span>
           </div>
         </div>

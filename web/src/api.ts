@@ -8,7 +8,8 @@ export interface Status {
   name: string;
   balances: { zec_shielded_zat: number; btc_sat: number };
   chains: {
-    btc: { network: string; height: number };
+    // the coin swapped against ZEC ("btc" | "ltc"); older daemons leave it out (btc)
+    btc: { network: string; height: number; coin?: "btc" | "ltc"; ticker?: string };
     zec: { network: string; height: number; pool: string };
   };
   offer: {
@@ -42,6 +43,7 @@ export interface TimelineEntry {
 
 export interface SwapView {
   id: string;
+  coin?: "btc" | "ltc";
   role: Role;
   counterparty: string;
   state: string;

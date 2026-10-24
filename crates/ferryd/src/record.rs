@@ -331,6 +331,7 @@ pub(crate) mod tests {
             )
         };
         let params = SwapParams {
+            coin: ferry_btc::Coin::Btc,
             network: Network::Regtest,
             btc_amount: 1_000_000,
             zec_amount: 1_000_000,

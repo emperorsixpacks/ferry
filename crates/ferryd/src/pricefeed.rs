@@ -707,6 +707,7 @@ mod tests {
     fn offer(role: ferry_core::Role) -> Offer {
         Offer {
             role,
+            coin: ferry_btc::Coin::Btc,
             network: Network::Regtest,
             making: true,
             rate_sat_per_zec: 410_000,

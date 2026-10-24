@@ -197,6 +197,7 @@ mod tests {
     /// Both parties driven to `CancelSigned` (no node: the lock is a stand-in funding tx).
     fn cancel_signed() -> (Swap, Swap) {
         let params = SwapParams {
+            coin: ferry_btc::Coin::Btc,
             network: Network::Regtest,
             btc_amount: 1_000_000,
             zec_amount: 1_000_000,

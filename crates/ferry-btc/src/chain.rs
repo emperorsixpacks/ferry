@@ -17,8 +17,8 @@ use std::str::FromStr;
 use bitcoin::address::{Address, NetworkUnchecked};
 use bitcoin::bech32::{self, Fe32, Hrp};
 use bitcoin::hashes::Hash;
-use bitcoin::script::ScriptBuf;
-use bitcoin::{Amount, Network, PubkeyHash, ScriptHash, WitnessProgram, WitnessVersion};
+use bitcoin::script::{Script, ScriptBuf};
+use bitcoin::{Amount, FeeRate, Network, PubkeyHash, ScriptHash, WitnessProgram, WitnessVersion};
 use serde::{Deserialize, Serialize};
 
 /// The coin on the non-Zcash side of the swap.
@@ -73,6 +73,30 @@ impl Coin {
             Coin::Ltc => 150,
         }
     }
+
+    pub fn is_btc(&self) -> bool {
+        *self == Coin::Btc
+    }
+
+    /// The node's default `-dustrelayfee`: 3 sat/vB on Bitcoin Core, 30 lit/vB on Litecoin Core
+    /// (measured with `testmempoolaccept` on litecoind 0.21.5.6).
+    pub fn dust_relay_fee(self) -> FeeRate {
+        match self {
+            Coin::Btc => FeeRate::from_sat_per_vb_u32(3),
+            Coin::Ltc => FeeRate::from_sat_per_vb_u32(30),
+        }
+    }
+
+    /// Smallest value the node relays in an output paying to `spk`
+    /// (BTC: P2TR 330, P2WPKH 294, P2PKH 546; LTC ten times that).
+    pub fn dust(self, spk: &Script) -> Amount {
+        spk.minimal_non_dust_custom(self.dust_relay_fee())
+    }
+
+    /// Dust floor of every standard output type: that of P2PKH, the largest (BTC 546, LTC 5460).
+    pub fn dust_limit(self) -> Amount {
+        self.dust(&ScriptBuf::new_p2pkh(&PubkeyHash::all_zeros()))
+    }
 }
 
 impl fmt::Display for Coin {
@@ -116,10 +140,6 @@ pub struct Chain {
     pub coin: Coin,
     pub network: Network,
 }
-
-/// Litecoin dust floor (lit). litecoind's `-dustrelayfee` default is 30 lit/vB, ten times
-/// Bitcoin's, which makes a P2PKH output (the largest standard one) dust below 182·30 = 5460.
-pub const LTC_DUST_LIMIT: Amount = Amount::from_sat(5_460);
 
 impl Chain {
     pub fn new(coin: Coin, network: Network) -> Result<Chain, ChainError> {
@@ -171,10 +191,7 @@ impl Chain {
 
     /// Smallest output value the node relays for any standard output we may pay to.
     pub fn dust_limit(&self) -> Amount {
-        match self.coin {
-            Coin::Btc => crate::tx::DUST_LIMIT,
-            Coin::Ltc => LTC_DUST_LIMIT,
-        }
+        self.coin.dust_limit()
     }
 
     /// Default confirmations to wait for on a lock or cancel transaction: about 20 minutes of
@@ -296,6 +313,35 @@ mod tests {
     }
 
     #[test]
+    fn dust_matches_the_nodes() {
+        let secp = Secp256k1::new();
+        let k = crate::BtcKey::random().xonly();
+        let p2tr = ScriptBuf::new_p2tr(&secp, k, None);
+        let p2wpkh = ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::all_zeros());
+        let p2pkh = ScriptBuf::new_p2pkh(&PubkeyHash::all_zeros());
+        let sat = |c: Coin, s: &ScriptBuf| c.dust(s).to_sat();
+        // Bitcoin Core defaults
+        assert_eq!(
+            [
+                sat(Coin::Btc, &p2tr),
+                sat(Coin::Btc, &p2wpkh),
+                sat(Coin::Btc, &p2pkh)
+            ],
+            [330, 294, 546]
+        );
+        // litecoind 0.21.5.6 testmempoolaccept: smallest accepted value per type
+        assert_eq!(
+            [
+                sat(Coin::Ltc, &p2tr),
+                sat(Coin::Ltc, &p2wpkh),
+                sat(Coin::Ltc, &p2pkh)
+            ],
+            [3300, 2940, 5460]
+        );
+        assert_eq!(Coin::Ltc.dust_limit(), Amount::from_sat(5460));
+    }
+
+    #[test]
     fn coin_names() {
         assert_eq!("LTC".parse::<Coin>().unwrap(), Coin::Ltc);
         assert_eq!("bitcoin".parse::<Coin>().unwrap(), Coin::Btc);
@@ -389,6 +435,6 @@ mod tests {
             .parse_address(&a.to_string())
             .is_err());
         assert_eq!(c.wallet_address_type(), "bech32m");
-        assert_eq!(c.dust_limit(), crate::tx::DUST_LIMIT);
+        assert_eq!(c.dust_limit(), Amount::from_sat(546));
     }
 }

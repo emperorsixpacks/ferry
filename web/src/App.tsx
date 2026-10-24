@@ -5,7 +5,7 @@ import { Deadlines } from "./components/Deadlines";
 import { Observer } from "./components/Observer";
 import { PartyPanel } from "./components/PartyPanel";
 import { deriveCrossing, deriveDeadlines, latestEvent } from "./derive";
-import { btcShort, zec } from "./format";
+import { btcShort, coin, zec } from "./format";
 import { Layout, PageHeader } from "./app/components/Layout";
 import "./styles.css";
 import "./inspector.css";
@@ -110,7 +110,7 @@ export default function App() {
           <span id="quote" className="quote">
             {quote != null ? (
               <>
-                for <span className="mono">{btcShort(quote)}</span> BTC at {offer!.rate_sat_per_zec.toLocaleString("en-US")} sat per ZEC
+                for <span className="mono">{btcShort(quote)}</span> {coin().ticker} at {offer!.rate_sat_per_zec.toLocaleString("en-US")} {coin().unit} per ZEC
               </>
             ) : offer ? (
               <>Between {zec(offer.min_zat)} and {zec(offer.max_zat)} ZEC</>
@@ -133,7 +133,7 @@ export default function App() {
             {stalled.Z
               ? "Z stopped responding. B cancels after T1 and refunds, which lets Z reclaim its ZEC."
               : stalled.B
-                ? "B stopped responding. Z cancels after T1 and, with no refund by T2, takes the BTC."
+                ? `B stopped responding. Z cancels after T1 and, with no refund by T2, takes the ${coin().ticker}.`
                 : "Stall a party mid-swap to see the timelocks take over."}
           </p>
         </div>
@@ -152,7 +152,7 @@ export default function App() {
                   <b>{last.who}</b> {last.e.label}
                 </>
               ) : (
-                "B locks BTC first, so Z never puts ZEC into an unfunded swap."
+                `B locks ${coin().ticker} first, so Z never puts ZEC into an unfunded swap.`
               )}
             </p>
           </div>
