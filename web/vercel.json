@@ -3,6 +3,10 @@
     {
       "source": "/daemon/:role",
       "destination": "/api/daemon?role=:role"
+    },
+    {
+      "source": "/:path((?!api|daemon|assets|vite|index|favicon).*)",
+      "destination": "/index.html"
     }
   ],
   "functions": {
