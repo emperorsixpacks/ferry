@@ -598,9 +598,11 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         );
         rec.pending
             .extend(actions.into_iter().map(EvmPending::from));
+        // In memory and on disk before anything moves funds: B's lock is sent by the tick loop,
+        // so a caller that gives up on this request (it can take a public chain several blocks)
+        // can't orphan it.
         let mut st = self.state.lock().await;
-        self.drive_pending(&mut rec).await;
-        self.save(&rec);
+        self.drive_local(&mut rec).await;
         st.swaps.insert(id.clone(), rec);
         self.publish(&mut st);
         Ok(id)
@@ -806,7 +808,11 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         );
         rec.pending
             .extend(actions.into_iter().map(EvmPending::from));
-        self.drive_pending(&mut rec).await;
+        // Only the Accept goes out from here. A B maker's lock (approve + lock, waiting for both
+        // receipts) is sent by the tick loop once the record is in memory: done here, it could
+        // outlast the taker's request, and a dropped handler would leave the lock on chain with
+        // nobody tracking it.
+        self.drive_local(&mut rec).await;
         let reply = rec
             .outbox
             .first()
@@ -857,7 +863,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             return Err(ApiError(429, "too many messages for this swap".into()));
         }
         let name = env.message.name();
-        let result = self.process(rec, EvmEvent::Peer(env)).await;
+        let result = self.process_local(rec, EvmEvent::Peer(env)).await;
         match &result {
             Ok(()) => rec.received.push(digest),
             Err(e) => {
@@ -942,6 +948,43 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
     async fn process(&self, rec: &mut EvmRecord, event: EvmEvent) -> Result<(), ferry_core::Error> {
         self.apply(rec, event)?;
         self.drive_pending(rec).await;
+        Ok(())
+    }
+
+    /// Run the pending actions at the head of the queue that need no chain, node or wallet (the
+    /// messages to send, or signing Ready), and stop at the first one that does. Peer and API handlers use
+    /// this instead of `drive_pending`: a handler's future is dropped when its caller gives up,
+    /// so it must never be the one to move funds. Locks, broadcasts and sends of ZEC run in the
+    /// tick loop, on a record that is already in memory and on disk.
+    async fn drive_local(&self, rec: &mut EvmRecord) {
+        while rec.pending.first().is_some_and(EvmPending::is_local) {
+            if rec.stalled || !self.save(rec) {
+                break;
+            }
+            let p = rec.pending[0].clone();
+            match self.execute(rec, p).await {
+                Ok(ev) => {
+                    rec.pending.remove(0);
+                    if let Some(ev) = ev {
+                        if let Err(e) = self.apply(rec, ev) {
+                            tracing::warn!(id = %rec.id, "follow-up event rejected: {e}");
+                        }
+                    }
+                }
+                Err(Retry) => break,
+            }
+        }
+        self.save(rec);
+    }
+
+    /// A peer handler's [`Self::process`]: apply the event, run only the local actions.
+    async fn process_local(
+        &self,
+        rec: &mut EvmRecord,
+        event: EvmEvent,
+    ) -> Result<(), ferry_core::Error> {
+        self.apply(rec, event)?;
+        self.drive_local(rec).await;
         Ok(())
     }
 

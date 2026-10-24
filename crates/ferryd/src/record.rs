@@ -37,6 +37,14 @@ pub enum Pending {
     SweepZec { fvk: String, ask: Secret32 },
 }
 
+impl Pending {
+    /// Needs no chain, node or wallet: a message to the peer. The only kind a peer or API
+    /// handler runs itself (see `Daemon::drive_local`).
+    pub fn is_local(&self) -> bool {
+        matches!(self, Pending::Send { .. })
+    }
+}
+
 impl From<Action> for Pending {
     fn from(a: Action) -> Pending {
         match a {

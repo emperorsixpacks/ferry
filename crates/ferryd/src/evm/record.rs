@@ -49,6 +49,12 @@ pub enum EvmPending {
 }
 
 impl EvmPending {
+    /// Needs no chain, node or wallet: a message to the peer, or signing Ready(id) with our key.
+    /// The only kinds a peer or API handler runs itself (see `EvmDaemon::drive_local`).
+    pub fn is_local(&self) -> bool {
+        matches!(self, EvmPending::Send { .. } | EvmPending::SignReady { .. })
+    }
+
     pub fn is_zec(&self) -> bool {
         matches!(
             self,

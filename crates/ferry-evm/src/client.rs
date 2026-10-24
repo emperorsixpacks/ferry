@@ -25,6 +25,10 @@ const RPC_COMPUTE_UNITS: u64 = 200;
 /// (or allowance) first, so a retry never repeats a transaction that landed; one still pending
 /// can be sent again with the next nonce, and that copy reverts without revealing anything new.
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
+/// How often a sent transaction's receipt (and new blocks) are polled on a remote node. alloy's
+/// default for a remote transport is 7 s, which on a 2 s chain (Base) adds seconds to every lock,
+/// claim and refund; a local node keeps alloy's 250 ms.
+const REMOTE_POLL: Duration = Duration::from_secs(1);
 
 /// `FerryLock.State`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,7 +104,8 @@ pub struct EvmClient {
 impl EvmClient {
     /// HTTP provider signing with `signer` (gas, nonce and chain id filled automatically).
     /// Requests time out after 30 s, and rate-limited ones are retried with a backoff, since
-    /// public endpoints such as https://sepolia.base.org throttle.
+    /// public endpoints such as https://sepolia.base.org throttle. Receipts are polled every
+    /// second on a remote node (every 250 ms on a local one).
     pub fn connect_http(
         rpc_url: &str,
         contract: Address,
@@ -120,6 +125,11 @@ impl EvmClient {
                 RPC_COMPUTE_UNITS,
             ))
             .transport(transport, local);
+        let client = if local {
+            client
+        } else {
+            client.with_poll_interval(REMOTE_POLL)
+        };
         let from = signer.address();
         // The nonce comes from the node on every send. alloy's default cache counts a nonce as
         // used even when the send then fails, which on a flaky public RPC would leave every
@@ -427,4 +437,25 @@ fn mined<R: ReceiptResponse>(receipt: R) -> Result<TxInfo, Error> {
             .block_number()
             .ok_or_else(|| Error::Rpc("receipt without block".into()))?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A remote node's receipts are polled every second, not alloy's 7 s (which made a lock on
+    /// Base take far longer than a taker waits); a local node keeps 250 ms. Nothing is sent.
+    #[test]
+    fn receipt_poll_interval() {
+        let key = PrivateKeySigner::random();
+        let poll = |url: &str| {
+            EvmClient::connect_http(url, Address::ZERO, key.clone())
+                .unwrap()
+                .provider()
+                .client()
+                .poll_interval()
+        };
+        assert_eq!(poll("https://sepolia.base.org"), REMOTE_POLL);
+        assert_eq!(poll("http://127.0.0.1:8545"), Duration::from_millis(250));
+    }
 }
