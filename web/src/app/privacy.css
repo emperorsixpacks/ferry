@@ -1,0 +1,55 @@
+/* ======================================================================
+   /privacy, "What the world sees". The page is static apart from one
+   gentle motion: once a card is on screen, a public link draws itself
+   as an ink line from one chain to the other, and the name it gives
+   away fades in after. Cards without a public link draw nothing.
+   Reduced motion shows the finished state at once.
+   ====================================================================== */
+
+.pv-line {
+  transform: scaleY(0);
+  transform-origin: top;
+}
+.pv-card[data-on] .pv-line {
+  transform: scaleY(1);
+  transition: transform 1100ms cubic-bezier(0.65, 0, 0.35, 1) var(--pv-delay, 0ms);
+}
+
+.pv-dot {
+  opacity: 0;
+  transform: scale(0.4);
+}
+.pv-card[data-on] .pv-dot {
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity 250ms ease var(--pv-delay, 0ms),
+    transform 350ms cubic-bezier(0.16, 1, 0.3, 1) var(--pv-delay, 0ms);
+}
+.pv-card[data-on] .pv-dot-end {
+  transition-delay: calc(var(--pv-delay, 0ms) + 1000ms);
+}
+
+/* what the link gives away (Alice's name on the far side) */
+.pv-reveal {
+  opacity: 0;
+  transform: scale(0.85);
+}
+.pv-card[data-on] .pv-reveal {
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity 400ms ease,
+    transform 450ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition-delay: calc(var(--pv-delay, 0ms) + 1100ms);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pv-line,
+  .pv-dot,
+  .pv-reveal {
+    opacity: 1;
+    transform: none;
+    transition: none !important;
+  }
+}
