@@ -24,10 +24,12 @@ The `maker` URL in `POST /api/swaps` is the maker's **peer** listener (demo: `ht
 exported as `FERRY_MAKER_URL`), not its control API.
 
 Peer protocol (JSON `Envelope`s from ferry-core; the taker initiates every request):
-`GET /peer/offer` (rate, role, coin, network, terms, and the live-rate fields below), `POST /peer/swaps` (`{envelope: Propose, taker_url}`
-→ the `Accept` envelope), `POST /peer/swaps/:id/messages` (one taker envelope; a retry of the same
-envelope is not applied twice) and `GET /peer/swaps/:id/messages?after=n` (the maker's envelopes
-from index n). A stalled party answers `503`.
+`GET /peer/offer` (rate, role, coin, network, terms, and the live-rate fields below), `POST /peer/quote`
+(a signed firm quote for an amount bucket; see [Firm quotes](#firm-quotes)), `POST /peer/swaps`
+(`{envelope: Propose, taker_url, quote_id?}` → the `Accept` envelope), `POST /peer/swaps/:id/messages`
+(one taker envelope; a retry of the same envelope is not applied twice) and
+`GET /peer/swaps/:id/messages?after=n` (the maker's envelopes from index n). A stalled party answers
+`503`.
 
 ### Live maker rate and the offer's extra fields
 
@@ -50,7 +52,8 @@ then carry:
   "paused": false }
 ```
 
-All four are optional for a taker: an older maker leaves them out.
+All four are optional for a taker: an older maker leaves them out. A maker (any daemon started with
+`--maker-offer`) also publishes `"quote_key": "02…"`, the key it signs firm quotes with.
 
 ## Maker directory (UI server, not ferryd)
 
@@ -70,6 +73,104 @@ The browser starts a swap with `POST /daemon/z/api/swaps {"maker": "Kestrel" | 0
 the UI server replaces `maker` with that entry's allowlisted URL (leaving it out picks the first
 maker). Any other value, a URL included, is refused with `400`, so a client can never make a daemon
 fetch a URL of its choosing.
+
+## Firm quotes
+
+The user says what they want (pair, direction, amount); partners answer with firm prices; the best
+one is taken; settlement is the same atomic swap, so nobody holds funds in between. The plain-language
+account, with what a partner learns, is in [ARCHITECTURE.md](ARCHITECTURE.md#firm-quotes).
+
+**Buckets.** A quote request never carries the amount, only the bucket it rounds UP into: 0.1, 0.25,
+0.5, 1, 2.5, 5, 10, 25, 50 or 100 ZEC (`10000000` … `10000000000` zat). A quote for a bucket covers
+the amounts from the bucket below it (0 for the first) up to the bucket, within the maker's
+`min_zat`/`max_zat` and what its balance fills now. Above 100 ZEC there is no firm quote.
+
+### POST /peer/quote (maker)
+
+```json
+{ "pair": "ZEC/BTC", "taker_role": "Z", "bucket_zat": 100000000 }
+```
+→ `200`
+```json
+{ "v": 1, "quote_id": "4ca9993e262d936bd8b8137e704a3c96", "pair": "ZEC/BTC",
+  "market": "btc:regtest", "maker_role": "B", "taker_role": "Z",
+  "rate_sat_per_zec": 412350, "min_zat": 50000000, "max_zat": 100000000,
+  "issued_at": 1792488310, "expires_at": 1792488355,
+  "maker_key": "02163f51…", "sig": "8a1cc8bb…" }
+```
+
+- `taker_role`: `Z` sells ZEC, `B` buys it. A maker quotes only the side opposite its own role, so this
+  works the same for a B maker (today) and a Z maker.
+- `market`: `btc:<network>`, `ltc:<network>`, or `evm:<chain id>:<token address>` (lowercase).
+- `rate_sat_per_zec`: counter-coin base units per ZEC, as in the offer (WETH: wei, so it can pass
+  2^53; read it as an exact integer).
+- Lifetime: `--maker-quote-secs` (default 45, 5 to 300). The maker enforces it with its own clock;
+  `expires_at - issued_at` tells a taker how long it has without comparing clocks.
+- Signature: ECDSA over secp256k1 with the key in the offer's `quote_key` (compressed, hex); `sig` is
+  the compact r‖s (hex) over SHA-256 of these lines joined with `\n`:
+  `ferry-quote/1`, `v=1`, `quote_id=…`, `pair=…`, `market=…`, `maker_role=…`, `taker_role=…`,
+  `rate_sat_per_zec=…`, `min_zat=…`, `max_zat=…`, `issued_at=…`, `expires_at=…`. String fields are
+  plain tokens (`[A-Za-z0-9/:._-]`), so no two quotes share a text. The key is `<data-dir>/quote-key`
+  (mode 0600), made on first start; it signs quotes only and holds no funds.
+- Refusals (`{"error"}`): `400` not a bucket, another pair, the same side as the maker, outside the
+  maker's range; `403` not making offers; `409` busy with another swap (ferryd runs one at a time, so
+  it quotes none meanwhile), not enough liquidity for the bucket, too many open quotes (6 per
+  requesting address, 32 in all); `429` more than 20 requests a minute from one address, or 240 in
+  all. Behind a reverse proxy every request has the proxy's address, so the per-address limits act
+  as one more overall limit.
+
+### Proposing with a quote
+
+The taker's `Propose` request names it: `POST /peer/swaps {envelope, taker_url, "quote_id": "4ca9…"}`.
+The maker then holds the proposal to the quote instead of the offer's current rate: the quote must be
+one it issued, for the proposer's side, not yet used, the ZEC amount within `min_zat`..`max_zat`,
+the counter amount exactly `zec × rate / 10^8` rounded as for the offer, and the proposal must arrive
+before the quote expires. Otherwise `400` with `the firm quote expired; get a new one`,
+`the firm quote was already used for another swap`, `the amount is outside the firm quote's range`,
+`the amount does not match the firm quote's rate`, `the firm quote is for the other side of the swap`
+or `unknown firm quote (…)`. A quote is used once the swap is accepted (a proposal that fails for
+another reason gives it back). A maker that restarts forgets its quotes and refuses them.
+
+### POST /api/swaps with a quote (taker)
+
+```json
+{ "maker": "http://127.0.0.1:7112", "zec_zat": 70000000, "quote": { …the signed quote as returned… } }
+```
+
+Before proposing, the taker fetches the maker's offer and checks the quote: signed by the offer's
+`quote_key`, for its pair, market and role and our side, and covering `zec_zat`; the swap is then
+built at the quote's rate. Expiry is the maker's call. A refusal comes back as
+`400 {"error": "The maker refused: the firm quote expired; get a new one"}`.
+
+### POST /api/quotes (UI server, not ferryd)
+
+```json
+{ "pair": "btc", "direction": "sell", "zec_zat": 70000000 }
+```
+→ `200`
+```json
+{ "bucket_zat": 100000000,
+  "quotes": [ { "maker": "Kestrel", "index": 1, "quote_id": "4ca9…", "rate_sat_per_zec": 412350,
+                "min_zat": 50000000, "max_zat": 100000000, "expires_in_ms": 44977 } ] }
+```
+
+`pair` is the UI's pair id (`btc`, `ltc`, `usdc-base`, `weth-arbitrum`…), `direction` `sell` or `buy`
+(ZEC). The server rounds the amount up to its bucket and asks every allowlisted maker for that pair
+on the other side, in parallel (2 s timeout), with `POST <url>/peer/quote` and nothing else: no
+cookie, user agent, browser address or swap id. It keeps the answers whose signature checks against
+that maker's offer, whose pair, market and roles match, and that cover the exact amount, sorted best
+first (selling: highest rate; buying: lowest). No URLs, keys or errors reach the browser, and the
+amount is not logged. A quote is reused for other requests while it has 20 s left, and a refusal
+for 10 s, so a maker hears from one server at most about once per bucket per 25 s. `prod.mjs`
+limits requests to `DEMO_QUOTES_PER_MIN` (30) per client IP and `DEMO_QUOTES_PER_MIN_TOTAL` (600) in
+all, refuses amounts above `DEMO_MAX_ZAT`, and clamps each quote's range to the demo limits.
+
+A swap start may name one: `POST /daemon/z/api/swaps {"maker": "Kestrel", "zec_zat": 70000000,
+"quote": "4ca9…"}`. The server looks the signed quote up (it only forwards quotes it got itself from
+that maker), refuses one it doesn't hold or that has under 5 s left
+(`That firm price has expired. Get a new one.`), and forwards
+`{maker: <allowlisted URL>, zec_zat, quote: <signed quote>}` to the daemon. A quote is handed out for
+one swap start only.
 
 ## GET /api/status
 
@@ -133,6 +234,9 @@ Start a swap as taker against a maker.
 { "maker": "http://127.0.0.1:7112", "zec_zat": 100000000 }
 ```
 → `201 { "id": "f3c1…" }`
+
+An optional `quote` (a firm quote from that maker) fixes the rate: see
+[POST /api/swaps with a quote](#post-apiswaps-with-a-quote-taker).
 
 ## GET /api/swaps  → `[SwapView]`
 ## GET /api/swaps/:id → `SwapView`
