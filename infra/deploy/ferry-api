@@ -1,6 +1,10 @@
 #!/bin/sh
 # ferry-api <path>: GET this container's ferryd control API, authenticating with the token file.
 # The token never appears on a command line (printf is a shell builtin; curl reads it via -K -).
+# It gives up after 20 s: the healthcheck runs it every 30 s and docker doesn't stop a check that
+# overruns, so without a limit a busy daemon (a slow wallet sync) collects hung checks, and
+# `deploy.sh status` waits on it forever.
 set -eu
 token=$(cat "${FERRY_TOKEN_FILE:?}")
-printf 'header = "authorization: Bearer %s"\n' "$token" | curl -sf -K - "http://127.0.0.1:${FERRY_API_PORT:?}$1"
+printf 'header = "authorization: Bearer %s"\n' "$token" |
+  curl -sf --max-time 20 -K - "http://127.0.0.1:${FERRY_API_PORT:?}$1"
