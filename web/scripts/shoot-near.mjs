@@ -173,7 +173,7 @@ await nearList(desk).getByRole("option", { name: /^SOL.*Solana/ }).click();
 await desk.getByRole("button", { name: "Sell ZEC for SOL" }).waitFor();
 await desk.waitForFunction(() => /1 ZEC ≈ [\d.]+ SOL\s*· at least [\d.]+ SOL/.test(document.body.innerText), null, { timeout: 15_000 });
 const route = await desk.locator("[data-near-route]").textContent();
-check(/Ferry.*BTC.*NEAR Intents · about \d+ min/.test(route), `the card shows the route: Ferry → BTC → NEAR Intents, and the time (${route})`);
+check(/Ferry.*BTC.*NEAR Intents · about \d+–\d+ min/.test(route), `the card shows the route: Ferry → BTC → NEAR Intents, and the time as a range (${route})`);
 const q = await (await post(DEV, "/api/near/quote", { direction: "sell", zec_zat: 100_000_000, asset: SOL_ID, exact: true })).json();
 check(q.via === "btc" && q.maker === "Kestrel" && q.near.verified, `the quote goes through the best Ferry partner for BTC, then NEAR Intents, signature checked (${q.maker})`);
 const out = await desk.locator("output").textContent();
