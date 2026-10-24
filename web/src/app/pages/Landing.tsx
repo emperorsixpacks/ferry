@@ -1,222 +1,210 @@
-import { useState, type ReactNode } from "react";
-import { ArrowCounterClockwise, ArrowDown, ArrowRight, CaretDown, EyeSlash, HandCoins } from "@phosphor-icons/react";
+import { useRef, type CSSProperties, type ReactNode } from "react";
+import { ArrowDown, ArrowRight } from "@phosphor-icons/react";
 import { Link } from "@/router";
-import { coin } from "@/format";
-import { btcText } from "@/swap/shared";
 import { FaqList } from "../components/FaqList";
-import { SiteFooter, SiteHeader } from "../components/Layout";
-import { PairLogo, TokenLogo } from "../components/Logos";
-import { TokenPicker } from "../components/TokenPicker";
-import { useLocal } from "../lib/daemon";
+import { SiteHeader } from "../components/Layout";
+import { ChainLogo, type ChainMarkId } from "../components/Logos";
+import { BTC, CoinMark, LTC, eth, usdc } from "../components/landing/coins";
+import { Crossing } from "../components/landing/Crossing";
+import { FirmDemo, QuoteDemo, RouteDemo, SafetyDemo } from "../components/landing/Demos";
+import { useReveal } from "../components/landing/motion";
+import { Orbit } from "../components/landing/Orbit";
+import { Submerged } from "../components/landing/Submerged";
 import { LANDING_FAQ } from "../lib/faq";
-import { counterFor, liveQuote, useMakers } from "../lib/makers";
-import { pairName } from "../lib/pairs";
+import { useMakers } from "../lib/makers";
+import { cn } from "../lib/utils";
+import "../landing.css";
 
-// `/`: what Ferry does in one line, a live quote with the one button that matters, three
-// promises, three steps and five answers. The depth lives in Help, /how-it-works and /safety.
+// `/`: the crossing. A light page whose one dark thing is Zcash's shielded pool: coins sink into it
+// on the left and come out on the right as other coins. Then Ferry in four facts, four things it
+// does (each with a small live demo built from the app's parts), the chains around shielded ZEC,
+// five answers, and the name itself half under the surface. Headings and paragraphs sharpen from
+// a blur as they scroll in (useReveal).
 export function Landing() {
+  const root = useRef<HTMLDivElement>(null);
+  useReveal(root);
   return (
-    <div className="flex min-h-screen flex-col bg-white text-slate-900">
+    <div ref={root} className="flex min-h-screen flex-col bg-white text-slate-900">
       <SiteHeader />
       <main className="flex-1">
         <Hero />
-        <Promises />
-        <Steps />
+        <Facts />
+        <How />
+        <Chains />
         <Questions />
+        <Closing />
       </main>
-      <SiteFooter />
+      <Submerged />
     </div>
   );
 }
+
+const delay = (ms: number) => ({ "--lp-delay": `${ms}ms` }) as CSSProperties;
 
 function Hero() {
-  const { role } = useLocal();
-  const z = role === "Z";
   return (
-    <section className="mx-auto grid max-w-6xl grid-cols-1 items-center gap-12 px-4 pt-14 pb-20 sm:px-6 md:pt-20 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)] lg:gap-14 lg:pt-24 lg:pb-28">
-      <div>
-        <div className="inline-flex items-center gap-2.5 rounded-full border border-slate-200 bg-white py-1 pr-3.5 pl-1.5 text-[13px] text-slate-600">
-          <span className="flex -space-x-1.5" aria-hidden>
-            {(["btc", "ltc", "usdc", "eth"] as const).map((t) => (
-              <span key={t} className="rounded-full bg-white p-px">
-                <TokenLogo id={t} size={20} />
-              </span>
-            ))}
-          </span>
-          Bitcoin, Litecoin, USDC and ETH
-        </div>
-        <h1 className="mt-7 text-[44px] leading-[1.04] font-semibold tracking-[-0.03em] text-slate-900 sm:text-6xl lg:text-[64px]">
-          {z ? "Swap shielded ZEC." : "Buy shielded ZEC."}
-          <br />
-          <span className="text-slate-500">Privately.</span>
+    <section aria-labelledby="hero-title" className="overflow-hidden">
+      <div className="mx-auto max-w-6xl px-4 pt-12 text-center sm:px-6 sm:pt-16 lg:pt-20">
+        <h1 id="hero-title" data-reveal className="mx-auto max-w-[15ch] text-[42px] leading-[1.02] font-semibold tracking-[-0.035em] text-slate-900 sm:text-6xl lg:text-[72px]">
+          Swap across chains, privately.
         </h1>
-        <p className="mt-6 max-w-[34rem] text-lg leading-relaxed text-slate-600">
-          {z ? "Sell it for Bitcoin, Litecoin, USDC or ETH, or buy it with them." : "Pay with Bitcoin, Litecoin, USDC or ETH, and get shielded ZEC."} No account. No bridge. Nobody holds your coins.
+        <p data-reveal style={delay(150)} className="mx-auto mt-6 max-w-[37rem] text-[17px] leading-relaxed text-slate-600 sm:text-lg">
+          Swap shielded ZEC with Bitcoin, Litecoin, USDC or ETH, or go from one of them to another through Zcash's shielded pool. No account. No bridge. Nobody holds your coins.
         </p>
-        <a href="#how" className="mt-7 inline-flex items-center gap-1.5 rounded text-[15px] font-medium text-slate-700 transition-colors hover:text-slate-900">
-          See how it works
-          <ArrowDown size={14} weight="bold" aria-hidden />
-        </a>
+        <div data-reveal style={delay(300)} className="mt-8 flex flex-wrap items-center justify-center gap-3">
+          <Link to="/app" className="inline-flex h-12 items-center justify-center rounded-full bg-slate-900 px-7 text-[15px] font-semibold text-white transition-colors hover:bg-slate-800">
+            Start a swap
+          </Link>
+          <a
+            href="#how"
+            className="inline-flex h-12 items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white px-6 text-[15px] font-medium text-slate-700 transition-[color,border-color,box-shadow] hover:border-accent-300 hover:text-slate-900 hover:shadow-[0_0_0_4px_var(--color-accent-100)]"
+          >
+            See how it works
+            <ArrowDown size={14} weight="bold" aria-hidden />
+          </a>
+        </div>
       </div>
-      <QuoteCard />
+      <Crossing className="mt-12 sm:mt-14" />
     </section>
   );
 }
 
-// 1 ZEC at the best partner's rate for the coin on screen; the coin can be changed right here.
-function QuoteCard() {
-  const d = useLocal();
-  const makers = useMakers();
-  const [picker, setPicker] = useState(false);
-  const { maker, quote } = liveQuote(makers, d.status, d.role, 1e8);
-  const online = d.connected || !!d.status;
-  const out = quote ? counterFor(quote, 1e8, d.role) : 0;
-  const name = pairName(d.pair);
-  const z = d.role === "Z";
-  const zecSide = (
-    <QuotePanel label={z ? "You sell" : "You get"} pill={<ZecPill />}>
-      <span className="text-slate-900">1</span>
-    </QuotePanel>
-  );
-  const coinSide = (
-    <QuotePanel
-      label={z ? "You get" : "You pay"}
-      pill={
-        <button
-          type="button"
-          onClick={() => setPicker(true)}
-          aria-haspopup="dialog"
-          aria-label={`${name.noun}. Choose another coin`}
-          className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-slate-200 bg-white pr-3 pl-1.5 shadow-[0_1px_2px_rgba(24,24,27,0.06)] transition-colors hover:border-slate-300 hover:bg-slate-50"
-        >
-          <PairLogo pair={d.pair} size={28} />
-          <span className="text-[15px] font-semibold text-slate-900">{name.label}</span>
-          <CaretDown size={14} weight="bold" className="text-slate-500" aria-hidden />
-        </button>
-      }
-    >
-      <span className={out ? "text-slate-900" : "text-slate-300"}>{out ? `≈ ${btcText(out)}` : "–"}</span>
-    </QuotePanel>
-  );
-  return (
-    <div className="w-full rounded-[28px] border border-slate-200 bg-white p-2 shadow-[0_24px_64px_-32px_rgba(24,24,27,0.22)] lg:justify-self-end lg:max-w-[440px]">
-      <div className="flex flex-col">
-        {z ? zecSide : coinSide}
-        <div className="relative z-10 -my-[18px] flex justify-center" aria-hidden>
-          <span className="flex h-10 w-10 items-center justify-center rounded-2xl border-4 border-white bg-slate-100 text-slate-700">
-            <ArrowDown size={16} weight="bold" />
-          </span>
-        </div>
-        {z ? coinSide : zecSide}
-      </div>
-      <p className="px-3 pt-3 pb-1 text-[13px] text-slate-500" aria-live="polite">
-        {!online
-          ? "Can't reach your Ferry node right now."
-          : quote
-            ? `1 ZEC = ${btcText(quote.rate)} ${coin().ticker}${maker ? ` · best rate, from ${maker.name}` : ""}`
-            : makers.list === undefined
-              ? "Finding the best rate…"
-              : "No partner is taking swaps for this coin right now."}
-      </p>
-      <Link to="/app" className="mt-2 flex h-14 w-full items-center justify-center gap-2 rounded-2xl bg-slate-900 text-base font-semibold text-white transition-colors hover:bg-slate-800">
-        Start a swap
-        <ArrowRight size={16} weight="bold" aria-hidden />
-      </Link>
-      <TokenPicker open={picker} onClose={() => setPicker(false)} makers={makers} role={d.role} />
-    </div>
-  );
-}
+// --- four facts, only ones the code holds to --------------------------------------------------------
+const COIN_MARKS = [BTC, LTC, usdc("ethereum"), eth("ethereum")].map((c) => ({ ...c, chain: undefined }));
+const CHAIN_MARKS: ChainMarkId[] = ["bitcoin", "litecoin", "ethereum", "base", "arbitrum", "optimism"];
 
-function ZecPill() {
-  return (
-    <span className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-slate-200 bg-white pr-3.5 pl-1.5 shadow-[0_1px_2px_rgba(24,24,27,0.06)]">
-      <TokenLogo id="zec" size={28} />
-      <span className="text-[15px] font-semibold text-slate-900">ZEC</span>
-    </span>
-  );
-}
-
-function QuotePanel({ label, pill, children }: { label: string; pill: ReactNode; children: ReactNode }) {
-  return (
-    <div className="rounded-3xl bg-slate-50 px-5 py-4">
-      <p className="text-xs font-medium tracking-wider text-slate-500 uppercase">{label}</p>
-      <div className="mt-2 flex items-center gap-3">
-        <span className="min-w-0 flex-1 truncate text-[28px] leading-tight font-medium tracking-tight tabular-nums sm:text-[34px]">{children}</span>
-        {pill}
-      </div>
-    </div>
-  );
-}
-
-const promises = [
+const FACTS: { n: string; unit: string; body: string; marks?: ReactNode }[] = [
   {
-    icon: <EyeSlash size={22} weight="regular" />,
-    title: "Private",
-    body: "Your ZEC stays shielded the whole time. Nothing on either chain links the two sides of the swap.",
+    n: "4",
+    unit: "coins",
+    body: "Bitcoin, Litecoin, USDC and ETH, each for shielded ZEC.",
+    marks: COIN_MARKS.map((c) => (
+      <span key={c.ticker} className="inline-flex rounded-full bg-white p-[2px]">
+        <CoinMark coin={c} size={22} />
+      </span>
+    )),
   },
   {
-    icon: <HandCoins size={22} weight="regular" />,
-    title: "Nobody holds your coins",
-    body: "Each side locks its own coins, and the swap releases them together. There is no exchange or bridge in the middle.",
+    n: "6",
+    unit: "chains",
+    body: "Bitcoin, Litecoin, Ethereum, Base, Arbitrum and Optimism.",
+    marks: CHAIN_MARKS.map((c) => (
+      <span key={c} className="inline-flex rounded-full bg-white p-[2px]">
+        <ChainLogo id={c} size={22} />
+      </span>
+    )),
   },
-  {
-    icon: <ArrowCounterClockwise size={22} weight="regular" />,
-    title: "Safe if anything goes wrong",
-    body: "If the other side disappears, a deadline sends your coins back to you automatically.",
-  },
+  { n: "0", unit: "custodians", body: "No exchange, bridge or server ever holds your coins." },
+  { n: "0", unit: "ZEC amounts on chain", body: "Your ZEC never leaves the shielded pool." },
 ];
 
-function Promises() {
+function Facts() {
   return (
-    <section className="border-t border-slate-100 bg-slate-50/60">
-      <div className="mx-auto grid max-w-6xl gap-5 px-4 py-14 sm:py-20 sm:px-6 md:grid-cols-3 lg:py-24">
-        {promises.map((p) => (
-          <div key={p.title} className="rounded-3xl border border-slate-200/80 bg-white p-6 sm:p-7">
-            <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-slate-100 text-slate-800" aria-hidden>
-              {p.icon}
-            </span>
-            <h2 className="mt-5 text-lg font-semibold tracking-tight text-slate-900">{p.title}</h2>
-            <p className="mt-2 leading-relaxed text-slate-600">{p.body}</p>
+    <section aria-label="Ferry in numbers" className="mx-auto max-w-6xl px-4 pt-14 sm:px-6 sm:pt-20">
+      <dl className="lp-edge grid grid-cols-2 rounded-[28px] lg:grid-cols-4">
+        {FACTS.map((f, i) => (
+          <div
+            key={f.unit}
+            className={cn("flex flex-col border-slate-100 p-5 sm:p-7", i % 2 === 1 && "border-l", i >= 2 && "border-t lg:border-t-0", i === 2 && "lg:border-l")}
+          >
+            <dt className="order-2 mt-1 text-[15px] font-medium text-slate-900">{f.unit}</dt>
+            <dd data-reveal style={delay(i * 120)} className="order-1 text-[44px] leading-none font-semibold tracking-[-0.04em] text-slate-900 tabular-nums sm:text-[56px]">
+              {f.n}
+            </dd>
+            <dd className="order-3 mt-2 text-sm leading-relaxed text-slate-500">{f.body}</dd>
+            {f.marks ? (
+              <dd className="order-4 mt-4 flex -space-x-1.5" aria-hidden>
+                {f.marks}
+              </dd>
+            ) : null}
           </div>
         ))}
+      </dl>
+    </section>
+  );
+}
+
+// --- four things Ferry does, each with a demo -------------------------------------------------------
+function How() {
+  const makers = useMakers();
+  return (
+    <section id="how" aria-labelledby="how-title" className="scroll-mt-20">
+      <div className="mx-auto max-w-6xl px-4 pt-24 pb-10 sm:px-6 sm:pt-32">
+        <h2 id="how-title" data-reveal className="text-[34px] leading-tight font-semibold tracking-[-0.03em] text-slate-900 sm:text-5xl">
+          How it works
+        </h2>
+        <Feature title="Choose two coins. Ferry does the rest." demo={<QuoteDemo makers={makers} />}>
+          <p>
+            Pick what you have, what you want and how much. Ferry asks its swap partners, takes the best rate for your amount, and runs the swap for you. Each side locks its own
+            coins and the swap releases both together.
+          </p>
+          <p>You can close the page while it finishes. Your Ferry node does the rest.</p>
+        </Feature>
+        <Feature title="From one coin to another, through the shielded pool." demo={<RouteDemo />} flip>
+          <p>
+            To go from Bitcoin to USDC, Ferry runs two swaps with shielded ZEC in between, and waits a random pause before the second. No transaction links the coin you sell to the coin
+            you get.
+          </p>
+          <p>
+            The two swaps themselves are public, so their amounts and timing could still hint that they belong together. The pause blurs the timing.
+          </p>
+        </Feature>
+        <Feature title="A price that holds still." demo={<FirmDemo makers={makers} />}>
+          <p>
+            Before you swap, partners send a signed price. It stays firm for the seconds shown, and a swap started in that time gets exactly that rate.
+          </p>
+          <p>To give a price, partners are told a size range, never your exact amount.</p>
+        </Feature>
+        <Feature title="If anything goes wrong, your coins come back." demo={<SafetyDemo />} flip>
+          <p>
+            Every swap has a deadline, signed before anything is locked. If your partner stops halfway, the swap is called off when the deadline passes and your coins return on their
+            own. Nobody can end up with both sides.
+          </p>
+          <p>Keep your Ferry node running until the swap is done, or let a watchtower keep the deadlines for you.</p>
+          <p>
+            <Link to="/safety" className="inline-flex items-center gap-1.5 rounded font-medium text-accent-700 underline-offset-4 hover:underline">
+              Safety details and known limits
+              <ArrowRight size={14} weight="bold" aria-hidden />
+            </Link>
+          </p>
+        </Feature>
       </div>
     </section>
   );
 }
 
-function Steps() {
-  const { role } = useLocal();
-  const steps =
-    role === "Z"
-      ? [
-          { title: "Choose what you want", body: "Type how much ZEC to sell and pick Bitcoin, Litecoin, USDC or ETH." },
-          { title: "Confirm", body: "Press Sell ZEC. Ferry finds the best rate, and both sides lock their coins." },
-          { title: "Receive", body: "Your coins arrive in a few minutes. If anything stalls, your ZEC comes back." },
-        ]
-      : [
-          { title: "Choose what you pay with", body: "Type how much ZEC to buy and pick Bitcoin, Litecoin, USDC or ETH to pay." },
-          { title: "Confirm", body: "Press Buy ZEC. Ferry finds the best rate; you lock your coins first, then your partner locks the ZEC." },
-          { title: "Receive", body: "Shielded ZEC arrives in a few minutes. If anything stalls, your coins come back." },
-        ];
+function Feature({ title, children, demo, flip }: { title: string; children: ReactNode; demo: ReactNode; flip?: boolean }) {
   return (
-    <section id="how" className="scroll-mt-20 border-t border-slate-100">
-      <div className="mx-auto max-w-6xl px-4 py-14 sm:py-20 sm:px-6 lg:py-24">
-        <h2 className="text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">How it works</h2>
-        <ol className="mt-10 grid gap-8 md:grid-cols-3 md:gap-10">
-          {steps.map((s, i) => (
-            <li key={s.title}>
-              <span className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-900 text-sm font-semibold text-white tabular-nums" aria-hidden>
-                {i + 1}
-              </span>
-              <h3 className="mt-5 text-lg font-semibold tracking-tight text-slate-900">{s.title}</h3>
-              <p className="mt-2 leading-relaxed text-slate-600">{s.body}</p>
-            </li>
-          ))}
-        </ol>
-        <Link to="/how-it-works" className="mt-10 inline-flex items-center gap-1.5 rounded font-medium text-accent-700 underline-offset-4 hover:underline">
-          The full explanation
-          <ArrowRight size={14} weight="bold" aria-hidden />
-        </Link>
+    <div data-feature className="grid items-center gap-10 py-14 sm:py-20 lg:grid-cols-2 lg:gap-20">
+      <div className={cn(flip && "lg:order-last")}>
+        <h3 data-reveal className="max-w-[20ch] text-[28px] leading-[1.12] font-semibold tracking-[-0.025em] text-slate-900 sm:text-[36px]">
+          {title}
+        </h3>
+        <div data-reveal style={delay(120)} className="mt-5 max-w-[34rem] space-y-4 text-[17px] leading-relaxed text-slate-600">
+          {children}
+        </div>
+      </div>
+      <div className={cn("flex justify-center", flip ? "lg:justify-start" : "lg:justify-end")}>{demo}</div>
+    </div>
+  );
+}
+
+// --- the chains --------------------------------------------------------------------------------------
+function Chains() {
+  return (
+    <section aria-labelledby="chains-title" className="overflow-x-clip border-t border-slate-100 bg-slate-50/70">
+      <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6 sm:py-28">
+        <Orbit>
+          <div>
+            <h2 id="chains-title" data-reveal className="max-w-[16ch] text-[34px] leading-tight font-semibold tracking-[-0.03em] text-slate-900 sm:text-5xl">
+              Six chains around one shielded middle.
+            </h2>
+            <p data-reveal style={delay(120)} className="mt-5 max-w-[34rem] text-[17px] leading-relaxed text-slate-600">
+              Bitcoin and Litecoin, and USDC or ETH on Ethereum, Base, Arbitrum and Optimism. Every swap goes through shielded ZEC. Each Ferry server offers some of these; the app
+              lists the ones you can pick.
+            </p>
+          </div>
+        </Orbit>
       </div>
     </section>
   );
@@ -224,17 +212,44 @@ function Steps() {
 
 function Questions() {
   return (
-    <section className="border-t border-slate-100 bg-slate-50/60">
-      <div className="mx-auto grid max-w-6xl gap-10 px-4 py-14 sm:py-20 sm:px-6 lg:grid-cols-[1fr_1.6fr] lg:py-24">
+    <section aria-labelledby="faq-title" className="border-t border-slate-100">
+      <div className="mx-auto grid max-w-6xl gap-10 px-4 py-20 sm:px-6 sm:py-28 lg:grid-cols-[1fr_1.6fr]">
         <div>
-          <h2 className="text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">Questions</h2>
-          <p className="mt-3 text-slate-600">The short answers. There are more in Help.</p>
+          <h2 id="faq-title" data-reveal className="text-[34px] leading-tight font-semibold tracking-[-0.03em] text-slate-900 sm:text-5xl">
+            Questions
+          </h2>
+          <p data-reveal style={delay(120)} className="mt-4 text-[17px] text-slate-600">
+            The short answers. There are more in Help.
+          </p>
           <Link to="/help" className="mt-5 inline-flex items-center gap-1.5 rounded font-medium text-accent-700 underline-offset-4 hover:underline">
             All questions
             <ArrowRight size={14} weight="bold" aria-hidden />
           </Link>
         </div>
         <FaqList items={LANDING_FAQ} />
+      </div>
+    </section>
+  );
+}
+
+function Closing() {
+  return (
+    <section aria-labelledby="closing-title" className="border-t border-slate-100">
+      <div className="mx-auto flex max-w-6xl flex-col items-center px-4 pt-20 pb-6 text-center sm:px-6 sm:pt-28">
+        <h2 id="closing-title" data-reveal className="text-[34px] leading-tight font-semibold tracking-[-0.03em] text-slate-900 sm:text-5xl">
+          Ready when you are.
+        </h2>
+        <p data-reveal style={delay(120)} className="mt-4 max-w-[30rem] text-[17px] text-slate-600">
+          No account to make. Pick your coins and press swap.
+        </p>
+        <Link
+          to="/app"
+          data-reveal
+          style={delay(240)}
+          className="mt-8 inline-flex h-12 items-center justify-center rounded-full bg-slate-900 px-7 text-[15px] font-semibold text-white transition-colors hover:bg-slate-800"
+        >
+          Start a swap
+        </Link>
       </div>
     </section>
   );

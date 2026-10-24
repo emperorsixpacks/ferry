@@ -188,13 +188,16 @@ function OfflineBanner({ error }: { error: string | null }) {
   );
 }
 
+// the footer's pages (the landing's closing footer shows the same ones)
+export const FOOTER_LINKS: [string, string][] = [
+  ["Help", "/help"],
+  ["Safety details", "/safety"],
+  ["How it works in depth", "/how-it-works"],
+  ["For developers", "/inspect"],
+];
+
 export function SiteFooter() {
-  const links: [string, string][] = [
-    ["Help", "/help"],
-    ["Safety details", "/safety"],
-    ["How it works in depth", "/how-it-works"],
-    ["For developers", "/inspect"],
-  ];
+  const links = FOOTER_LINKS;
   return (
     <footer className="border-t border-slate-200/80 bg-white">
       <div className="mx-auto flex max-w-6xl flex-col gap-5 px-4 py-10 sm:px-6 md:flex-row md:items-center md:justify-between">

@@ -1,0 +1,477 @@
+/* ======================================================================
+   The landing page (/): the shielded pool and the motion around it.
+   The pool is the page's one dark thing: near-black ink with a quiet
+   indigo depth, a drifting lattice and a sheen along its surface. Every
+   animation here pauses under .lp-paused (off screen or a hidden tab)
+   and stops under prefers-reduced-motion.
+   ====================================================================== */
+
+/* --- the pool -------------------------------------------------------- */
+.lp-pool {
+  background: linear-gradient(180deg, var(--color-pool-800) 0%, var(--color-pool-900) 36%, var(--color-pool-950) 100%);
+  box-shadow: inset 0 1px 0 rgb(170 177 214 / 0.16);
+}
+/* a lattice of tiny points, drifting with the current (left to right) */
+.lp-lattice {
+  position: absolute;
+  inset: 0 0 0 -36px;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='36' height='36'%3E%3Cpath d='M0 18L18 0L36 18L18 36Z' fill='none' stroke='%23aab1d6' stroke-opacity='.07'/%3E%3Ccircle cx='18' cy='0' r='1' fill='%23aab1d6' fill-opacity='.28'/%3E%3Ccircle cx='0' cy='18' r='1' fill='%23aab1d6' fill-opacity='.28'/%3E%3Ccircle cx='36' cy='18' r='1' fill='%23aab1d6' fill-opacity='.28'/%3E%3Ccircle cx='18' cy='36' r='1' fill='%23aab1d6' fill-opacity='.28'/%3E%3C/svg%3E");
+  background-size: 36px 36px;
+  mask-image: linear-gradient(180deg, rgb(0 0 0 / 0.35), #000 35%, rgb(0 0 0 / 0.55));
+  animation: lp-drift 10s linear infinite;
+}
+@keyframes lp-drift {
+  to {
+    transform: translateX(36px);
+  }
+}
+/* depth: an indigo glow where the coins cross */
+.lp-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse 36% 70% at 50% 40%, rgb(95 105 168 / 0.34), transparent 72%);
+  animation: lp-breathe 7s ease-in-out infinite alternate;
+}
+@keyframes lp-breathe {
+  from {
+    opacity: 0.65;
+  }
+  to {
+    opacity: 1;
+  }
+}
+/* light running along the surface */
+.lp-sheen {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  overflow: hidden;
+  pointer-events: none;
+}
+.lp-sheen::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -40%;
+  width: 40%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgb(208 212 234 / 0.75), transparent);
+  animation: lp-sheen 9s ease-in-out infinite;
+}
+@keyframes lp-sheen {
+  to {
+    transform: translateX(350%);
+  }
+}
+/* a ring on the surface where a coin goes through it */
+.lp-ripple {
+  position: absolute;
+  left: 0;
+  width: 116px;
+  height: 14px;
+  margin: -7px 0 0 -58px;
+  border: 1px solid rgb(170 177 214 / 0.75);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+}
+.lp-ripple-go {
+  animation: lp-ripple 1.7s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+}
+@keyframes lp-ripple {
+  from {
+    transform: scale(0.3);
+    opacity: 0.9;
+  }
+  to {
+    transform: scale(1.5);
+    opacity: 0;
+  }
+}
+
+/* the closing wordmark floats on the surface */
+.lp-bob {
+  animation: lp-bob 6s ease-in-out infinite alternate;
+}
+@keyframes lp-bob {
+  from {
+    transform: translateY(-6px);
+  }
+  to {
+    transform: translateY(6px);
+  }
+}
+
+/* --- the chain orbit --------------------------------------------------- */
+.lp-orbit {
+  animation: lp-spin 90s linear infinite;
+}
+.lp-orbit-upright {
+  animation: lp-spin 90s linear infinite reverse;
+}
+.lp-orbit-hold .lp-orbit,
+.lp-orbit-hold .lp-orbit-upright {
+  animation-play-state: paused;
+}
+@keyframes lp-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --- small loops in the feature demos ----------------------------------- */
+.lp-loop {
+  animation-duration: var(--lp-loop, 9s);
+  animation-iteration-count: infinite;
+  animation-timing-function: cubic-bezier(0.45, 0, 0.25, 1);
+  animation-fill-mode: both;
+}
+
+/* a private swap (9 s): swap 1 lights up, a dot runs down into the pool, the pause fills, a dot
+   runs out, swap 2 lights up */
+.lp-route-a {
+  animation-name: lp-route-a;
+}
+.lp-route-c {
+  animation-name: lp-route-c;
+}
+@keyframes lp-route-a {
+  0%,
+  14% {
+    border-color: var(--color-accent-300);
+    background-color: #fff;
+    box-shadow: 0 0 0 4px var(--color-accent-100);
+  }
+  24%,
+  100% {
+    border-color: var(--color-slate-200);
+    background-color: var(--color-slate-50);
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+@keyframes lp-route-c {
+  0%,
+  70% {
+    border-color: var(--color-slate-200);
+    background-color: var(--color-slate-50);
+    box-shadow: 0 0 0 0 transparent;
+  }
+  78%,
+  94% {
+    border-color: var(--color-accent-300);
+    background-color: #fff;
+    box-shadow: 0 0 0 4px var(--color-accent-100);
+  }
+  100% {
+    border-color: var(--color-slate-200);
+    background-color: var(--color-slate-50);
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+.lp-route-dot1,
+.lp-route-dot2 {
+  top: -4px;
+  opacity: 0;
+}
+.lp-route-dot1 {
+  animation-name: lp-dot1;
+}
+.lp-route-dot2 {
+  animation-name: lp-dot2;
+}
+@keyframes lp-dot1 {
+  0%,
+  12% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  14% {
+    opacity: 1;
+  }
+  20% {
+    transform: translateY(20px);
+    opacity: 1;
+  }
+  22%,
+  100% {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+}
+@keyframes lp-dot2 {
+  0%,
+  64% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  66% {
+    opacity: 1;
+  }
+  72% {
+    transform: translateY(20px);
+    opacity: 1;
+  }
+  74%,
+  100% {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+}
+.lp-route-pause {
+  animation-name: lp-pause;
+}
+@keyframes lp-pause {
+  0%,
+  22% {
+    stroke-dashoffset: 100;
+  }
+  62%,
+  92% {
+    stroke-dashoffset: 0;
+  }
+  100% {
+    stroke-dashoffset: 100;
+  }
+}
+
+/* the safety net (10 s): the coin goes into the lock, the partner goes quiet, the clock runs to
+   the deadline, the coin comes home; one line says what is happening */
+.lp-safe-coin {
+  --lp-loop: 10s;
+  animation-name: lp-safe-coin;
+}
+@keyframes lp-safe-coin {
+  0%,
+  5% {
+    left: 14px;
+  }
+  15%,
+  70% {
+    left: calc(50% - 14px);
+  }
+  82%,
+  100% {
+    left: 14px;
+  }
+}
+.lp-safe-partner {
+  --lp-loop: 10s;
+  animation-name: lp-safe-partner;
+}
+@keyframes lp-safe-partner {
+  0%,
+  26% {
+    opacity: 1;
+  }
+  32%,
+  92% {
+    opacity: 0.4;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+.lp-safe-dot {
+  --lp-loop: 10s;
+  background-color: #10b981;
+  animation-name: lp-safe-dot;
+}
+@keyframes lp-safe-dot {
+  0%,
+  26% {
+    background-color: #10b981;
+  }
+  30%,
+  94% {
+    background-color: var(--color-slate-300);
+  }
+  100% {
+    background-color: #10b981;
+  }
+}
+.lp-safe-bar {
+  --lp-loop: 10s;
+  transform: scaleX(0.6);
+  animation-name: lp-safe-bar;
+}
+@keyframes lp-safe-bar {
+  0%,
+  12% {
+    transform: scaleX(0);
+    opacity: 1;
+  }
+  60%,
+  90% {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+  98% {
+    transform: scaleX(1);
+    opacity: 0;
+  }
+  100% {
+    transform: scaleX(0);
+    opacity: 0;
+  }
+}
+.lp-safe-flag {
+  --lp-loop: 10s;
+  animation-name: lp-safe-flag;
+}
+@keyframes lp-safe-flag {
+  0%,
+  56% {
+    color: var(--color-slate-300);
+    transform: scale(1);
+  }
+  60%,
+  90% {
+    color: var(--color-accent-500);
+    transform: scale(1.15);
+  }
+  100% {
+    color: var(--color-slate-300);
+    transform: scale(1);
+  }
+}
+.lp-safe-say1,
+.lp-safe-say2,
+.lp-safe-say3,
+.lp-safe-say4 {
+  --lp-loop: 10s;
+  opacity: 0;
+}
+.lp-safe-say1 {
+  animation-name: lp-say1;
+}
+.lp-safe-say2 {
+  animation-name: lp-say2;
+}
+.lp-safe-say3 {
+  animation-name: lp-say3;
+}
+.lp-safe-say4 {
+  animation-name: lp-say4;
+}
+@keyframes lp-say1 {
+  0%,
+  22% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  26%,
+  97% {
+    opacity: 0;
+    filter: blur(6px);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+@keyframes lp-say2 {
+  0%,
+  24% {
+    opacity: 0;
+    filter: blur(6px);
+  }
+  28%,
+  46% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  50%,
+  100% {
+    opacity: 0;
+    filter: blur(6px);
+  }
+}
+@keyframes lp-say3 {
+  0%,
+  48% {
+    opacity: 0;
+    filter: blur(6px);
+  }
+  52%,
+  68% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  72%,
+  100% {
+    opacity: 0;
+    filter: blur(6px);
+  }
+}
+@keyframes lp-say4 {
+  0%,
+  70% {
+    opacity: 0;
+    filter: blur(6px);
+  }
+  74%,
+  94% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  98%,
+  100% {
+    opacity: 0;
+    filter: blur(6px);
+  }
+}
+
+/* --- pausing and reduced motion ----------------------------------------- */
+.lp-paused,
+.lp-paused *,
+.lp-paused *::before,
+.lp-paused *::after {
+  animation-play-state: paused !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lp-lattice,
+  .lp-glow,
+  .lp-sheen::before,
+  .lp-ripple-go,
+  .lp-bob,
+  .lp-orbit,
+  .lp-orbit-upright,
+  .lp-loop {
+    animation: none !important;
+  }
+}
+
+/* --- text that sharpens as it scrolls in --------------------------------- */
+.lp-reveal [data-reveal] {
+  opacity: 0;
+  filter: blur(12px);
+  transform: translateY(6px);
+  transition:
+    opacity 900ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    filter 1100ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    transform 900ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  transition-delay: var(--lp-delay, 0ms);
+}
+.lp-reveal [data-reveal][data-shown] {
+  opacity: 1;
+  filter: blur(0);
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lp-reveal [data-reveal] {
+    opacity: 1;
+    filter: none;
+    transform: none;
+    transition: none;
+  }
+}
+
+/* --- the facts card's hairline: neutral, warming to the accent at one corner */
+.lp-edge {
+  border: 1px solid transparent;
+  background:
+    linear-gradient(#fff, #fff) padding-box,
+    linear-gradient(135deg, var(--color-accent-300) 0%, var(--color-slate-200) 30%, var(--color-slate-200) 70%, var(--color-accent-200) 100%) border-box;
+}
