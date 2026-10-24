@@ -1,6 +1,6 @@
 [package]
 name = "ferry-watchtower"
-description = "Ferry watchtower: broadcasts a party's presigned cancel/refund/punish on time while the party is offline"
+description = "Ferry watchtower: broadcasts a party's presigned cancel/refund/punish on time while the party is offline, or calls FerryLock refund/punish for it"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,9 @@ path = "src/main.rs"
 
 [dependencies]
 ferry-btc = { path = "../ferry-btc", features = ["rpc"] }
+ferry-evm = { path = "../ferry-evm" }
+# serde for ferry-evm's Address / B256 / U256 in EVM packages.
+alloy-primitives = { version = "1.7", default-features = false, features = ["std", "serde"] }
 anyhow = "1"
 axum = "0.8"
 clap = { version = "4.5", features = ["derive"] }
@@ -24,6 +27,9 @@ thiserror.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "signal", "net"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zeroize.workspace = true
 
 [dev-dependencies]
+# tests/anvil.rs: spawn anvil and deploy FerryLock + MockUSDC.
+alloy = { version = "~2.1", default-features = false, features = ["node-bindings", "provider-http", "signer-local", "contract"] }
 tempfile = "3"

@@ -38,6 +38,9 @@ pub enum RegisterError {
     Conflict(String),
     #[error("node: {0}")]
     Node(#[from] RpcError),
+    /// The node is unreachable, or does not show the swap yet: try again later.
+    #[error("{0}")]
+    Unavailable(String),
     #[error("storage: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -47,7 +50,7 @@ impl RegisterError {
         match self {
             RegisterError::Invalid(_) => 400,
             RegisterError::Conflict(_) => 409,
-            RegisterError::Node(_) => 503,
+            RegisterError::Node(_) | RegisterError::Unavailable(_) => 503,
             RegisterError::Io(_) => 500,
         }
     }
@@ -94,7 +97,7 @@ impl Tower {
         let store = Store::open(&cfg.data_dir)?;
         rpc.ensure_watch_wallet().await?;
         let mut entries = BTreeMap::new();
-        for record in store.load_all()? {
+        for record in store.load_all::<Record>()? {
             match record.package.validate(cfg.chain) {
                 Ok(armed) => {
                     if record.status != Status::Done {
