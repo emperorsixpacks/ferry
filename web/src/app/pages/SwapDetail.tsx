@@ -1,6 +1,6 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ArrowLeft, ArrowRight, CircleNotch, Lock, ShieldCheck, ShieldSlash } from "@phosphor-icons/react";
-import { directionOf, isMine, type Status, type SwapView } from "@/api";
+import { directionOf, getSwaps, isMine, type Direction, type PairId, type Status, type SwapView } from "@/api";
 import { CHAIN_NAMES, coin } from "@/format";
 import { Link } from "@/router";
 import { btcText } from "@/swap/shared";
@@ -15,6 +15,7 @@ import { ToneBadge } from "../components/ui/badge";
 import { Fold } from "../components/ui/fold";
 import { useLocal } from "../lib/daemon";
 import { aboutText } from "../lib/paths";
+import { usePoll, useWaited } from "../lib/poll";
 import { STATUS_WORD, lockedMine, plainSteps, swapAmounts, wordsFor, type Tone } from "../lib/progress";
 import { shortAddress } from "../lib/receive";
 import { useWalletCaughtUp } from "../lib/walletSync";
@@ -34,6 +35,16 @@ export function SwapDetail({ id }: { id: string }) {
     if (other && swap) d.chooseDirection(directionOf(swap.role));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [other]);
+  // A swap of another pair: follow its pair and direction, as Activity does when a row is opened.
+  const { home, gone } = useSwapHome(id, !!swap);
+  const [moved, setMoved] = useState(false);
+  useEffect(() => {
+    if (!home) return;
+    if (home.pair !== d.pair) d.choosePair(home.pair, home.dir);
+    if (home.dir !== d.dir) d.chooseDirection(home.dir);
+    setMoved(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [home?.pair, home?.dir]);
   return (
     <Layout>
       <div className="mx-auto w-full max-w-[480px]">
@@ -43,6 +54,11 @@ export function SwapDetail({ id }: { id: string }) {
         </Link>
         {swap ? (
           <Body swap={swap} status={d.status} />
+        ) : gone && !moved ? (
+          <div className="rounded-3xl border border-slate-200 bg-white px-6 py-14 text-center">
+            <p className="font-medium text-slate-900">This swap isn't on this server</p>
+            <p className="mt-2 text-sm text-slate-600">No Ferry node here has a swap with this id. It may have run on another server, or the link may be incomplete.</p>
+          </div>
         ) : (
           <div className="rounded-3xl border border-slate-200 bg-white px-6 py-14 text-center">
             <CircleNotch size={28} weight="bold" className="mx-auto animate-spin text-slate-400 motion-reduce:animate-none" aria-hidden />
@@ -52,6 +68,41 @@ export function SwapDetail({ id }: { id: string }) {
       </div>
     </Layout>
   );
+}
+
+const SEARCH_MS = 10_000;
+
+// Where a swap not on the pair on screen lives. A link, a reload or another device opens the page on
+// the pair last picked in this browser (BTC in a new one), whose daemons hold only that pair's swaps.
+// Every daemon this server fronts is asked for its swaps, each on its own (lib/poll), and the one
+// holding the person's own side (not a maker's copy of it) gives the pair and direction. `gone`:
+// they have all answered (the followed one too, so a slow start isn't taken for a missing swap), a
+// moment has passed, and none has it.
+function useSwapHome(id: string, here: boolean): { home: { pair: PairId; dir: Direction } | null; gone: boolean } {
+  const d = useLocal();
+  const sources: { pair: PairId; daemon: string }[] = [];
+  if (!here && d.known)
+    for (const p of d.pairs)
+      for (const dir of ["sell", "buy"] as const) {
+        const daemon = p[dir].daemon;
+        if (daemon && !sources.some((x) => x.daemon === daemon)) sources.push({ pair: p.id, daemon });
+      }
+  const polled = usePoll(
+    sources.map((x) => x.daemon),
+    getSwaps,
+    { every: SEARCH_MS },
+  );
+  let home: { pair: PairId; dir: Direction } | null = null;
+  for (const x of sources) {
+    const s = polled.data[x.daemon]?.find((v) => v.id === id && isMine(v));
+    if (s) {
+      home = { pair: x.pair, dir: directionOf(s.role) };
+      break;
+    }
+  }
+  const answered = sources.every((x) => x.daemon in polled.data || x.daemon in polled.errors);
+  const waited = useWaited(here ? "" : id, 4_000);
+  return { home, gone: !here && !home && d.known && answered && waited };
 }
 
 function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
