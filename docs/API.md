@@ -386,15 +386,16 @@ created itself, on a daemon whose status lists `"payout"`.
 
 ### Route legs
 
-`ferry-route` (crates/ferry-route) starts each leg of a route (coin A → shielded ZEC → coin C)
-with these extra fields, all optional:
+`ferry-route` (crates/ferry-route) starts each part of a route (coin A → shielded ZEC → coin C;
+by default each leg is split into parts of standard sizes, each one swap) with these extra fields,
+all optional:
 
 ```json
-{ "maker": "http://maker1:7112", "zec_zat": 100000000,
-  "route": "r9f3a0c2d4e5b6a71/1",    // a label: 1-80 chars of [a-z0-9/-], stored and shown as SwapView.route
+{ "maker": "http://maker1:7112", "zec_zat": 25000000,
+  "route": "r9f3a0c2d4e5b6a71/1/2",  // a label: 1-80 chars of [a-z0-9/-], stored and shown as SwapView.route
   "sweep_to": "utest1…",             // role B only: where B's sweep pays the ZEC (default: our own wallet)
-  "max_counter": 412500,             // role B only: refuse if the maker asks more counter units for zec_zat
-  "min_counter": 39200000 }          // role Z only: refuse if the maker pays fewer
+  "max_counter": 103125,             // role B only: refuse if the maker asks more counter units for zec_zat
+  "min_counter": 9800000 }           // role Z only: refuse if the maker pays fewer
 ```
 
 - **`route`** is stored in the swap record before its first save, so a router that lost the

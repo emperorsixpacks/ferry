@@ -10,10 +10,11 @@ use tokio::sync::broadcast;
 
 use crate::legs::{self, find_labelled, verify, DaemonStatus, Ferryd, Role};
 use crate::route::{
-    step, Command, ContinueReq, Ctx, Leg, Maker, NewRoute, Obs, Phase, Policy, Refused, Route, Unit,
+    step, Command, ContinueReq, Ctx, Leg, Maker, NewRoute, Obs, Part, PartStatus, Policy, Refused,
+    Route, Unit, DENOMINATIONS_ZAT, MAX_PARTS,
 };
 use crate::store::Store;
-use crate::view::{route_view, RouteView};
+use crate::view::{plan_view, route_view, PlanView, RouteView};
 
 /// An API error: HTTP status and a plain message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,16 +26,22 @@ impl HubError {
     }
 }
 
-/// Limits on what a route request may ask for.
+/// Limits on what a route request may ask for, and how routes are split.
 #[derive(Clone, Debug)]
 pub struct Settings {
-    /// The privacy pause when a request names none (Standard: 5–30 min).
+    /// The gap before each part when a request names none (Standard: 5–30 min).
     pub default_delay_secs: [u64; 2],
     pub max_delay_secs: u64,
-    /// Most ZEC jitter a route may keep back (basis points of X).
+    /// Most ZEC jitter a route may keep back (basis points of X; standard amounts off only).
     pub max_keep_bps: u32,
-    /// Allow the same maker (name or host) for both legs.
+    /// Allow the same maker (name or host) on both legs.
     pub allow_same_partner: bool,
+    /// Split routes into standard amounts unless a request says otherwise.
+    pub standard_amounts: bool,
+    /// The standard sizes (checked by [`crate::route::check_denominations`]).
+    pub denominations: Vec<u64>,
+    /// Most parts per leg.
+    pub max_parts: usize,
 }
 
 impl Default for Settings {
@@ -44,6 +51,9 @@ impl Default for Settings {
             max_delay_secs: 24 * 3600,
             max_keep_bps: 200,
             allow_same_partner: false,
+            standard_amounts: true,
+            denominations: DENOMINATIONS_ZAT.to_vec(),
+            max_parts: MAX_PARTS,
         }
     }
 }
@@ -92,17 +102,35 @@ impl MakerArg {
     }
 }
 
-/// `POST /api/routes`.
+/// One maker, or a list (leg 1's parts take turns).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum Makers {
+    One(MakerArg),
+    Many(Vec<MakerArg>),
+}
+
+impl Makers {
+    fn resolve(self) -> Result<Vec<Maker>, HubError> {
+        match self {
+            Makers::One(m) => Ok(vec![m.resolve()?]),
+            Makers::Many(list) => list.into_iter().map(MakerArg::resolve).collect(),
+        }
+    }
+}
+
+/// `POST /api/routes` (and `/api/routes/plan`).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateRoute {
     pub from: String,
     pub to: String,
     pub zec_zat: u64,
-    pub maker1: MakerArg,
+    /// Leg 1's maker, or a list of them (part n starts with the n-th).
+    pub maker1: Makers,
     pub maker2: Vec<MakerArg>,
     pub max_in: u64,
-    /// The least coin C for the ZEC leg 2 sells before jitter (`zec_zat` − fees − reserve).
+    /// The least coin C for `zec_zat` − fees − reserve (a rate: each part's floor follows it).
     pub min_out: u64,
     #[serde(default)]
     pub delay_secs: Option<[u64; 2]>,
@@ -112,6 +140,10 @@ pub struct CreateRoute {
     /// address, say). Leg 2's ferryd checks it for its chain before it contacts a maker.
     #[serde(default)]
     pub payout_to: Option<String>,
+    /// Split into standard amounts (default: the router's setting, on unless
+    /// `--standard-amounts off`).
+    #[serde(default)]
+    pub standard_amounts: Option<bool>,
 }
 
 /// `POST /api/routes/:id/continue`.
@@ -124,6 +156,21 @@ pub struct ContinueArg {
     pub min_out: Option<u64>,
     #[serde(default)]
     pub zec_zat: Option<u64>,
+}
+
+/// A request that passed the checks that need no daemon.
+struct Valid {
+    from: String,
+    to: String,
+    zec_zat: u64,
+    maker1: Vec<Maker>,
+    maker2: Vec<Maker>,
+    max_in: u64,
+    min_out: u64,
+    delay: [u64; 2],
+    keep_bps: u32,
+    payout_to: Option<String>,
+    standard: bool,
 }
 
 pub struct Hub<F: Ferryd> {
@@ -233,20 +280,20 @@ impl<F: Ferryd> Hub<F> {
         if next != *current {
             self.commit(&next)?;
         }
-        let Some(Command::Start { n, request }) = cmd else {
+        let Some(Command::Start { leg, part, request }) = cmd else {
             return Ok(next);
         };
-        let Ok(leg) = self.leg_of(&next, n) else {
+        let Ok(daemon) = self.leg_of(&next, leg) else {
             // observe() found the daemon, so this does not happen. Nothing was sent; the start
             // stays in flight and the next lookup decides.
             return Ok(next);
         };
-        tracing::info!(route = %next.id, leg = n, label = %request.route, "starting leg {n}");
-        let result = leg.start(&request).await;
+        tracing::info!(route = %next.id, leg, part, label = %request.route, zec_zat = request.zec_zat, "starting a part");
+        let result = daemon.start(&request).await;
         if let Err(e) = &result {
-            tracing::warn!(route = %next.id, leg = n, "start: {e}");
+            tracing::warn!(route = %next.id, leg, part, "start: {e}");
         }
-        let (after, _) = step(&next, &Obs::Started { n, result }, &self.ctx())
+        let (after, _) = step(&next, &Obs::Started { leg, part, result }, &self.ctx())
             .map_err(|Refused(m)| HubError(409, m))?;
         // If this save fails, the route on disk (and in memory) still says the start is in
         // flight: the next pass looks the swap up by its label instead of starting another.
@@ -254,86 +301,121 @@ impl<F: Ferryd> Hub<F> {
         Ok(after)
     }
 
-    /// What the daemons say about `r` now.
-    async fn observe(&self, r: &Route) -> Obs {
-        let unreachable = |n: u8, e: String| Obs::Unreachable { n, error: e };
-        match r.phase {
-            Phase::Leg1Starting | Phase::Leg2Starting => {
-                let n = r.starting_leg();
-                let leg = match self.leg_of(r, n) {
-                    Ok(l) => l,
-                    Err(e) => return unreachable(n, e),
-                };
-                if r.start_due(self.now(), &self.policy) {
-                    // About to start: make sure this is still the daemon the route needs.
-                    let l = &r.legs[usize::from(n - 1)];
-                    match leg.status().await {
-                        Err(e) => return unreachable(n, e.to_string()),
-                        Ok(s) => {
-                            if let Err(e) = verify(&s, &l.pair, l.role) {
-                                return unreachable(n, e);
-                            }
-                            // A daemon replaced by an older one since the route was created
-                            // would pay its own wallet: hold off instead.
-                            if n == 2 && r.payout_to.is_some() {
-                                if let Err(e) = legs::verify_payout(&s, &l.pair) {
-                                    return unreachable(n, e);
-                                }
-                            }
+    /// Before starting a part: is its daemon still the one the route needs, and does a swap
+    /// with the part's label exist?
+    async fn lookup(&self, r: &Route, p: &Part) -> Obs {
+        let unreachable = |e: String| Obs::Unreachable {
+            leg: p.leg,
+            error: e,
+        };
+        let daemon = match self.leg_of(r, p.leg) {
+            Ok(d) => d,
+            Err(e) => return unreachable(e),
+        };
+        if p.start_due(self.now(), &self.policy) {
+            let l = &r.legs[usize::from(p.leg - 1)];
+            match daemon.status().await {
+                Err(e) => return unreachable(e.to_string()),
+                Ok(s) => {
+                    if let Err(e) = verify(&s, &l.pair, l.role) {
+                        return unreachable(e);
+                    }
+                    // A daemon replaced by an older one since the route was created would pay
+                    // its own wallet: hold off instead.
+                    if p.leg == 2 && r.payout_to.is_some() {
+                        if let Err(e) = legs::verify_payout(&s, &l.pair) {
+                            return unreachable(e);
                         }
                     }
                 }
-                match leg.swaps().await {
-                    Ok(list) => Obs::Lookup {
-                        n,
-                        swap: find_labelled(list, &r.label(n)),
-                    },
-                    Err(e) => unreachable(n, e.to_string()),
-                }
             }
-            Phase::Leg1 | Phase::Leg2 => {
-                let n = if r.phase == Phase::Leg1 { 1 } else { 2 };
-                let id = r.legs[usize::from(n - 1)]
-                    .swap_id
-                    .clone()
-                    .unwrap_or_default();
-                let leg = match self.leg_of(r, n) {
-                    Ok(l) => l,
-                    Err(e) => return unreachable(n, e),
-                };
-                match leg.swap(&id).await {
-                    Ok(swap) => Obs::Swap { n, swap },
-                    Err(e) => unreachable(n, e.to_string()),
-                }
-            }
-            Phase::Settling => {
-                let id = r.legs[0].swap_id.clone().unwrap_or_default();
-                let (l1, l2) = match (self.leg_of(r, 1), self.leg_of(r, 2)) {
-                    (Ok(l1), Ok(l2)) => (l1, l2),
-                    (Err(e), _) => return unreachable(1, e),
-                    (_, Err(e)) => return unreachable(2, e),
-                };
-                let leg1 = match l1.swap(&id).await {
-                    Ok(s) => s,
-                    Err(e) => return unreachable(1, e.to_string()),
-                };
-                let s1 = match l1.status().await {
-                    Ok(s) => s,
-                    Err(e) => return unreachable(1, e.to_string()),
-                };
-                let s2 = match l2.status().await {
-                    Ok(s) => s,
-                    Err(e) => return unreachable(2, e.to_string()),
-                };
-                // The more cautious tip of the two: L2's spendability is what matters.
-                Obs::Settle {
-                    leg1,
-                    zec_tip: s1.zec_height.min(s2.zec_height),
-                    spendable_zat: s2.spendable_zat,
-                }
-            }
-            Phase::Pausing | Phase::Done | Phase::Holding | Phase::Failed => Obs::Tick,
         }
+        match daemon.swaps().await {
+            Ok(list) => Obs::Lookup {
+                leg: p.leg,
+                part: p.n,
+                swap: find_labelled(list, &p.label),
+            },
+            Err(e) => unreachable(e.to_string()),
+        }
+    }
+
+    /// The Zcash tip (the lower of both daemons') and what L2 can spend.
+    async fn zec(&self, r: &Route) -> Obs {
+        let (l1, l2) = match (self.leg_of(r, 1), self.leg_of(r, 2)) {
+            (Ok(l1), Ok(l2)) => (l1, l2),
+            (Err(e), _) => return Obs::Unreachable { leg: 1, error: e },
+            (_, Err(e)) => return Obs::Unreachable { leg: 2, error: e },
+        };
+        let s1 = match l1.status().await {
+            Ok(s) => s,
+            Err(e) => {
+                return Obs::Unreachable {
+                    leg: 1,
+                    error: e.to_string(),
+                }
+            }
+        };
+        let s2 = match l2.status().await {
+            Ok(s) => s,
+            Err(e) => {
+                return Obs::Unreachable {
+                    leg: 2,
+                    error: e.to_string(),
+                }
+            }
+        };
+        // The more cautious tip of the two: L2's spendability is what matters.
+        Obs::Zec {
+            tip: s1.zec_height.min(s2.zec_height),
+            spendable_zat: s2.spendable_zat,
+        }
+    }
+
+    /// What the daemons say about `r` now: every running part's swap (and leg 1's settling
+    /// sweeps), the ZEC side when leg 2 waits on it, and a lookup for every part being started.
+    async fn observe(&self, r: &Route) -> Vec<Obs> {
+        let mut out = vec![];
+        for p in r.parts.iter().filter(|p| p.followed()) {
+            let Some(id) = p.swap_id.clone() else {
+                continue;
+            };
+            out.push(match self.leg_of(r, p.leg) {
+                Err(e) => Obs::Unreachable {
+                    leg: p.leg,
+                    error: e,
+                },
+                Ok(d) => match d.swap(&id).await {
+                    Ok(swap) => Obs::Swap {
+                        leg: p.leg,
+                        part: p.n,
+                        swap,
+                    },
+                    Err(e) => Obs::Unreachable {
+                        leg: p.leg,
+                        error: e.to_string(),
+                    },
+                },
+            });
+        }
+        let settling = r
+            .parts
+            .iter()
+            .any(|p| p.leg == 1 && p.status == PartStatus::Swapped && !p.spendable);
+        let selling = r
+            .parts
+            .iter()
+            .any(|p| p.leg == 2 && p.status == PartStatus::Planned);
+        if settling || selling {
+            out.push(self.zec(r).await);
+        }
+        for p in r.parts.iter().filter(|p| p.status == PartStatus::Starting) {
+            out.push(self.lookup(r, p).await);
+        }
+        if out.is_empty() {
+            out.push(Obs::Tick);
+        }
+        out
     }
 
     async fn drive_locked(&self, id: &str) -> Result<Route, HubError> {
@@ -343,8 +425,28 @@ impl<F: Ferryd> Hub<F> {
         if !r.phase.is_active() {
             return Ok(r);
         }
-        let obs = self.observe(&r).await;
-        self.apply(&r, obs).await
+        let looked: Vec<(u8, u32)> = r
+            .parts
+            .iter()
+            .filter(|p| p.status == PartStatus::Starting)
+            .map(|p| (p.leg, p.n))
+            .collect();
+        let mut cur = r;
+        for obs in self.observe(&cur).await {
+            cur = self.apply(&cur, obs).await?;
+        }
+        // A part scheduled just now (no gap left) starts in this pass, not the next.
+        let fresh: Vec<Part> = cur
+            .parts
+            .iter()
+            .filter(|p| p.status == PartStatus::Starting && !looked.contains(&(p.leg, p.n)))
+            .cloned()
+            .collect();
+        for p in fresh {
+            let obs = self.lookup(&cur, &p).await;
+            cur = self.apply(&cur, obs).await?;
+        }
+        Ok(cur)
     }
 
     /// One pass over every active route.
@@ -388,12 +490,15 @@ impl<F: Ferryd> Hub<F> {
         Ok(s)
     }
 
-    fn check_partners(&self, m1: &Maker, m2: &[Maker]) -> Result<(), HubError> {
+    fn check_partners(&self, m1: &[Maker], m2: &[Maker]) -> Result<(), HubError> {
+        if m1.is_empty() || m1.len() > 8 {
+            return Err(HubError::bad("maker1 must list 1 to 8 partners"));
+        }
         if m2.is_empty() || m2.len() > 8 {
             return Err(HubError::bad("maker2 must list 1 to 8 partners"));
         }
         if !self.settings.allow_same_partner {
-            if let Some(m) = m2.iter().find(|m| m.same_partner(m1)) {
+            if let Some(m) = m2.iter().find(|m| m1.iter().any(|a| m.same_partner(a))) {
                 return Err(HubError::bad(format!(
                     "{} can't take both swaps: the same partner on both legs could link them",
                     m.display()
@@ -403,8 +508,8 @@ impl<F: Ferryd> Hub<F> {
         Ok(())
     }
 
-    /// `POST /api/routes`: validate, persist, and start leg 1 right away.
-    pub async fn create(&self, req: CreateRoute) -> Result<Route, HubError> {
+    /// The checks that need no daemon.
+    fn validate(&self, req: CreateRoute) -> Result<Valid, HubError> {
         let (from, to) = (req.from.trim().to_lowercase(), req.to.trim().to_lowercase());
         for p in [&from, &to] {
             if !legs::is_pair(p) {
@@ -435,7 +540,15 @@ impl<F: Ferryd> Hub<F> {
                 self.settings.max_delay_secs
             )));
         }
+        let standard = req
+            .standard_amounts
+            .unwrap_or(self.settings.standard_amounts);
         let keep_bps = req.keep_bps.unwrap_or(0);
+        if keep_bps > 0 && standard {
+            return Err(HubError::bad(
+                "keep_bps applies only with standard amounts off: with standard amounts, swap 2 sells standard sizes and what doesn't fit stays in your wallet anyway",
+            ));
+        }
         if keep_bps > self.settings.max_keep_bps {
             return Err(HubError::bad(format!(
                 "keep_bps is at most {}",
@@ -446,22 +559,27 @@ impl<F: Ferryd> Hub<F> {
         if let Some(p) = &payout_to {
             legs::check_payout(p).map_err(HubError::bad)?;
         }
+        Ok(Valid {
+            from,
+            to,
+            zec_zat: req.zec_zat,
+            maker1,
+            maker2,
+            max_in: req.max_in,
+            min_out: req.min_out,
+            delay,
+            keep_bps,
+            payout_to,
+            standard,
+        })
+    }
 
-        let _g = self.drive.lock().await;
-        let busy = self.routes.lock().unwrap().values().any(|r| {
-            r.phase.is_active()
-                && ((r.from == from && r.legs[0].role == Role::B)
-                    || (r.to == to && r.legs[1].role == Role::Z))
-        });
-        if busy {
-            return Err(HubError(
-                409,
-                "Another route is already using one of these daemons".into(),
-            ));
-        }
+    /// Ask both daemons, and make the route (not saved).
+    async fn build(&self, v: Valid) -> Result<Route, HubError> {
+        let (from, to) = (v.from.clone(), v.to.clone());
         let s1 = self.status_of(&from, Role::B).await?;
         let s2 = self.status_of(&to, Role::Z).await?;
-        if payout_to.is_some() {
+        if v.payout_to.is_some() {
             legs::verify_payout(&s2, &to).map_err(HubError::bad)?;
         }
         if s1.zec_network != s2.zec_network {
@@ -481,13 +599,24 @@ impl<F: Ferryd> Hub<F> {
                     "your {to} daemon has no shielded address to receive swap 1's ZEC"
                 ))
             })?;
+        // What the leg-2 wallet can spend besides the ZEC other routes left there for their
+        // users to decide on (holding): this route may pay its fees from it.
+        let others: u64 = self
+            .routes
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|r| !r.phase.is_final() && r.to == to && r.legs[1].role == Role::Z)
+            .map(|r| r.held_zat)
+            .sum();
+        let spare = s2.spendable_zat.saturating_sub(others);
 
         let now = self.now();
-        let keep_zat = if keep_bps == 0 {
+        let keep_zat = if v.keep_bps == 0 {
             0
         } else {
-            let bps = (self.random)() % (u64::from(keep_bps) + 1);
-            u64::try_from(u128::from(req.zec_zat) * u128::from(bps) / 10_000).unwrap_or(0)
+            let bps = (self.random)() % (u64::from(v.keep_bps) + 1);
+            u64::try_from(u128::from(v.zec_zat) * u128::from(bps) / 10_000).unwrap_or(0)
         };
         let leg = |pair: &str, role, s: &DaemonStatus| Leg {
             pair: pair.to_string(),
@@ -497,7 +626,6 @@ impl<F: Ferryd> Hub<F> {
                 decimals: s.decimals,
             },
             wallet: s.name.clone(),
-            ..Leg::default()
         };
         let id = {
             let taken = self.routes.lock().unwrap();
@@ -511,29 +639,62 @@ impl<F: Ferryd> Hub<F> {
                 .find(|id| !taken.contains_key(id))
                 .expect("a free id")
         };
-        let route = Route::new(
+        Route::new(
             NewRoute {
-                id: id.clone(),
+                id,
                 now,
+                rand: (self.random)(),
                 from: leg(&from, Role::B, &s1),
                 to: leg(&to, Role::Z, &s2),
-                zec_zat: req.zec_zat,
+                zec_zat: v.zec_zat,
+                denominations: if v.standard {
+                    self.settings.denominations.clone()
+                } else {
+                    vec![]
+                },
+                max_parts: self.settings.max_parts,
+                spare_zat: spare,
                 keep_zat,
-                max_in: req.max_in,
-                min_out: req.min_out,
-                delay_secs: delay,
+                max_in: v.max_in,
+                min_out: v.min_out,
+                delay_secs: v.delay,
                 sweep_to,
-                payout_to,
-                maker1,
-                maker2,
+                payout_to: v.payout_to,
+                maker1: v.maker1,
+                maker2: v.maker2,
             },
             &self.policy,
         )
-        .map_err(HubError::bad)?;
+        .map_err(HubError::bad)
+    }
+
+    /// `POST /api/routes`: validate, persist, and start leg 1's first part right away.
+    pub async fn create(&self, req: CreateRoute) -> Result<Route, HubError> {
+        let v = self.validate(req)?;
+        let _g = self.drive.lock().await;
+        let busy = self.routes.lock().unwrap().values().any(|r| {
+            r.phase.is_active()
+                && ((r.from == v.from && r.legs[0].role == Role::B)
+                    || (r.to == v.to && r.legs[1].role == Role::Z))
+        });
+        if busy {
+            return Err(HubError(
+                409,
+                "Another route is already using one of these daemons".into(),
+            ));
+        }
+        let route = self.build(v).await?;
+        let id = route.id.clone();
         self.commit(&route)?;
-        tracing::info!(route = %id, %from, %to, "route created");
+        tracing::info!(route = %id, from = %route.from, to = %route.to, parts = route.parts.len(), "route created");
         // Start leg 1 now, so a refusal shows up in the answer.
         self.drive_locked(&id).await
+    }
+
+    /// `POST /api/routes/plan`: how a request would be split, without starting anything.
+    pub async fn plan(&self, req: CreateRoute) -> Result<PlanView, HubError> {
+        let v = self.validate(req)?;
+        Ok(plan_view(&self.build(v).await?))
     }
 
     /// `continue` or `stop`.
@@ -578,6 +739,7 @@ pub(crate) mod tests {
     use crate::fake::FakeFerryd;
     use crate::legs::{StartError, SwapEntry};
     use crate::route::tests::T0;
+    use crate::route::{draw, Phase};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     pub(crate) struct Rig {
@@ -628,14 +790,26 @@ pub(crate) mod tests {
         }
     }
 
+    /// One swap each way (`standard_amounts: false`), as routes ran before standard amounts.
     pub(crate) fn request() -> CreateRoute {
         serde_json::from_value(serde_json::json!({
             "from": "btc", "to": "usdc-base", "zec_zat": 100_000_000,
             "maker1": {"url": "http://127.0.0.1:7111", "name": "Kestrel"},
             "maker2": ["http://127.0.0.1:7912", {"url": "http://127.0.0.1:7913", "name": "Egret"}],
-            "max_in": 412_500, "min_out": 39_200_000, "delay_secs": [300, 1800]
+            "max_in": 412_500, "min_out": 39_200_000, "delay_secs": [300, 1800],
+            "standard_amounts": false
         }))
         .unwrap()
+    }
+
+    /// The router's default: standard amounts.
+    fn std_request(zec_zat: u64, delay: [u64; 2]) -> CreateRoute {
+        CreateRoute {
+            zec_zat,
+            delay_secs: Some(delay),
+            standard_amounts: None,
+            ..request()
+        }
     }
 
     fn sweep(height: u64) -> SwapEntry {
@@ -647,6 +821,10 @@ pub(crate) mod tests {
         }
     }
 
+    fn gap(r: &Route) -> u64 {
+        r.parts.iter().filter_map(|p| p.not_before).max().unwrap()
+    }
+
     #[tokio::test]
     async fn a_whole_route_through_the_driver() {
         let rig = Rig::new();
@@ -656,13 +834,13 @@ pub(crate) mod tests {
         assert_eq!(r.phase, Phase::Leg1);
         let starts = rig.l1.starts();
         assert_eq!(starts.len(), 1);
-        assert_eq!(starts[0].route, format!("{}/1", r.id));
+        assert_eq!(starts[0].route, format!("{}/1/1", r.id));
         assert_eq!(starts[0].sweep_to.as_deref(), Some("utest1user-z"));
         assert_eq!(
             (starts[0].max_counter, starts[0].zec_zat),
             (Some(412_500), 100_000_000)
         );
-        let id1 = r.legs[0].swap_id.clone().unwrap();
+        let id1 = r.parts[0].swap_id.clone().unwrap();
 
         hub.tick().await;
         assert_eq!(hub.route(&r.id).unwrap().phase, Phase::Leg1);
@@ -670,35 +848,37 @@ pub(crate) mod tests {
         rig.l1.push_timeline(&id1, sweep(100));
         rig.l1.set_zec(105, 0);
         rig.l2.set_zec(105, 0);
-        hub.tick().await; // leg 1 → settling
-        hub.tick().await; // 6 confirmations
+        hub.tick().await; // leg 1 → settling, 6 confirmations
+        hub.tick().await;
         let r = hub.route(&r.id).unwrap();
-        assert_eq!((r.phase, r.zec.sweep_confs), (Phase::Settling, 6));
+        assert_eq!(
+            (r.phase, hub.view(&r).zec.sweep_confs),
+            (Phase::Settling, 6)
+        );
 
         rig.l1.set_zec(109, 0);
         rig.l2.set_zec(109, 99_990_000);
         hub.tick().await;
         let r = hub.route(&r.id).unwrap();
         assert_eq!(r.phase, Phase::Pausing);
-        let not_before = r.not_before.unwrap();
-        assert_eq!(not_before, T0 + 300 + 42);
+        let not_before = gap(&r);
+        assert_eq!(not_before, T0 + draw(42, (2 << 32) | 1, [300, 1800]));
         hub.tick().await;
         assert!(rig.l2.starts().is_empty(), "no leg 2 during the pause");
 
-        rig.advance(342);
-        hub.tick().await; // pause over → leg2_starting
-        hub.tick().await; // lookup → start
+        rig.advance(not_before - T0);
+        hub.tick().await; // pause over → started in the same pass
         let r = hub.route(&r.id).unwrap();
         assert_eq!(r.phase, Phase::Leg2);
         let starts = rig.l2.starts();
         assert_eq!(starts.len(), 1);
-        assert_eq!(starts[0].route, format!("{}/2", r.id));
+        assert_eq!(starts[0].route, format!("{}/2/1", r.id));
         assert_eq!(
             (starts[0].min_counter, starts[0].zec_zat),
             (Some(39_200_000), 99_940_000)
         );
         assert_eq!(starts[0].maker, "http://127.0.0.1:7912");
-        let id2 = r.legs[1].swap_id.clone().unwrap();
+        let id2 = r.parts[1].swap_id.clone().unwrap();
 
         rig.l2.set_state(&id2, "Claimed", Some("swapped"));
         hub.tick().await;
@@ -734,16 +914,16 @@ pub(crate) mod tests {
         assert_eq!(r.payout_to.as_deref(), Some(PAY));
         assert_eq!(hub.view(&r).payout_to.as_deref(), Some(PAY));
         assert_eq!(rig.l1.starts()[0].payout_to, None, "leg 1 never gets it");
-        let id1 = r.legs[0].swap_id.clone().unwrap();
+        let id1 = r.parts[0].swap_id.clone().unwrap();
         rig.l1.set_state(&id1, "ZecSwept", Some("swapped"));
         rig.l1.push_timeline(&id1, sweep(100));
         rig.l1.set_zec(109, 0);
         rig.l2.set_zec(109, 99_990_000);
-        hub.tick().await; // settling
-        hub.tick().await; // pausing
-        rig.advance(342);
+        hub.tick().await; // settled: pausing
+        let r = hub.route(&r.id).unwrap();
+        assert_eq!(r.phase, Phase::Pausing);
+        rig.advance(gap(&r) - T0);
         rig.l2.set_features(vec!["route".into()]);
-        hub.tick().await; // leg2_starting
         hub.tick().await; // the daemon no longer takes payout_to: no start
         let r = hub.route(&r.id).unwrap();
         assert_eq!(r.phase, Phase::Leg2Starting);
@@ -761,7 +941,7 @@ pub(crate) mod tests {
         let starts = rig.l2.starts();
         assert_eq!(starts.len(), 1);
         assert_eq!(starts[0].payout_to.as_deref(), Some(PAY));
-        let id2 = r.legs[1].swap_id.clone().unwrap();
+        let id2 = r.parts[1].swap_id.clone().unwrap();
         rig.l2.set_state(&id2, "Claimed", Some("swapped"));
         hub.tick().await;
         let r = hub.route(&r.id).unwrap();
@@ -777,7 +957,7 @@ pub(crate) mod tests {
         rig.l1.lose_next_answer();
         let r = rig.hub().create(request()).await.unwrap();
         assert_eq!(r.phase, Phase::Leg1Starting);
-        assert!(r.starting.inflight_since.is_some());
+        assert!(r.parts[0].starting.inflight_since.is_some());
         let hub = rig.hub();
         hub.tick().await;
         let r = hub.route(&r.id).unwrap();
@@ -815,22 +995,20 @@ pub(crate) mod tests {
         let rig = Rig::new();
         let hub = rig.hub();
         let r = hub.create(request()).await.unwrap();
-        let id1 = r.legs[0].swap_id.clone().unwrap();
+        let id1 = r.parts[0].swap_id.clone().unwrap();
         rig.l1.set_state(&id1, "ZecSwept", Some("swapped"));
         rig.l1.push_timeline(&id1, sweep(100));
         rig.l1.set_zec(120, 0);
         rig.l2.set_zec(120, 99_990_000);
         hub.tick().await;
-        hub.tick().await;
-        let drawn = hub.route(&r.id).unwrap().not_before.unwrap();
+        let drawn = gap(&hub.route(&r.id).unwrap());
         drop(hub);
-        rig.rand.store(1000, std::sync::atomic::Ordering::SeqCst);
+        rig.rand.store(1000, Ordering::SeqCst);
         let hub = rig.hub();
         hub.tick().await;
         let r = hub.route(&r.id).unwrap();
-        assert_eq!((r.phase, r.not_before), (Phase::Pausing, Some(drawn)));
+        assert_eq!((r.phase, gap(&r)), (Phase::Pausing, drawn));
         rig.advance(drawn - T0);
-        hub.tick().await;
         hub.tick().await;
         assert_eq!(hub.route(&r.id).unwrap().phase, Phase::Leg2);
         assert_eq!(rig.l2.starts().len(), 1);
@@ -843,17 +1021,15 @@ pub(crate) mod tests {
         let rig = Rig::new();
         let hub = rig.hub();
         let r = hub.create(request()).await.unwrap();
-        let id1 = r.legs[0].swap_id.clone().unwrap();
+        let id1 = r.parts[0].swap_id.clone().unwrap();
         rig.l1.set_state(&id1, "ZecSwept", Some("swapped"));
         rig.l1.push_timeline(&id1, sweep(100));
         rig.l1.set_zec(120, 0);
         rig.l2.set_zec(120, 99_990_000);
-        rig.rand.store(0, std::sync::atomic::Ordering::SeqCst);
         hub.tick().await;
-        hub.tick().await;
-        hub.tick().await; // pause drawn and leg2_starting reached? Not yet: 300 s pause.
-        assert_eq!(hub.route(&r.id).unwrap().phase, Phase::Pausing);
-        rig.advance(300);
+        let r = hub.route(&r.id).unwrap();
+        assert_eq!(r.phase, Phase::Pausing);
+        rig.advance(gap(&r) - T0);
         let routes = rig.dir.path().join("routes");
         std::fs::set_permissions(&routes, std::fs::Permissions::from_mode(0o500)).unwrap();
         for _ in 0..3 {
@@ -866,7 +1042,6 @@ pub(crate) mod tests {
         );
         assert!(rig.l2.starts().is_empty());
         std::fs::set_permissions(&routes, std::fs::Permissions::from_mode(0o700)).unwrap();
-        hub.tick().await;
         hub.tick().await;
         assert_eq!(hub.route(&r.id).unwrap().phase, Phase::Leg2);
         assert_eq!(rig.l2.starts().len(), 1);
@@ -883,7 +1058,7 @@ pub(crate) mod tests {
             })
             .await
             .unwrap();
-        let id1 = r.legs[0].swap_id.clone().unwrap();
+        let id1 = r.parts[0].swap_id.clone().unwrap();
         rig.l1.set_state(&id1, "ZecSwept", Some("swapped"));
         rig.l1.push_timeline(&id1, sweep(100));
         rig.l1.set_zec(120, 0);
@@ -916,20 +1091,16 @@ pub(crate) mod tests {
         );
         assert_eq!(rig.l2.swap_count(), 0);
 
-        // The maker is back: continue, and leg 2 runs.
+        // The maker is back: continue, and leg 2 runs at once (the pause already ran).
         rig.l2.accept_starts();
         let r = hub.resume(&r.id, ContinueArg::default()).await.unwrap();
-        assert_eq!(
-            r.phase,
-            Phase::Pausing,
-            "the pause already ran: straight through"
-        );
-        hub.tick().await;
-        hub.tick().await;
-        let r = hub.route(&r.id).unwrap();
         assert_eq!(r.phase, Phase::Leg2);
         assert_eq!(rig.l2.swap_count(), 1);
-        // Stop is refused now.
+        assert_eq!(
+            rig.l2.starts().last().unwrap().route,
+            format!("{}/2/2", r.id)
+        );
+        // Stop is refused now: nothing is left to stop.
         assert_eq!(hub.user(&r.id, Obs::Stop).await.unwrap_err().0, 409);
     }
 
@@ -960,8 +1131,18 @@ pub(crate) mod tests {
             ..request()
         };
         assert!(code(hub.create(same_maker).await).1.contains("both swaps"));
+        let in_list: CreateRoute = serde_json::from_value(serde_json::json!({
+            "from": "btc", "to": "usdc-base", "zec_zat": 100_000_000,
+            "maker1": ["http://127.0.0.1:7111", "http://127.0.0.1:7912"],
+            "maker2": ["http://127.0.0.1:7912"], "max_in": 1, "min_out": 1
+        }))
+        .unwrap();
+        assert!(
+            code(hub.create(in_list).await).1.contains("both swaps"),
+            "any partner of leg 1"
+        );
         let bad_url = CreateRoute {
-            maker1: MakerArg::Url("file:///etc".into()),
+            maker1: Makers::One(MakerArg::Url("file:///etc".into())),
             ..request()
         };
         assert_eq!(code(hub.create(bad_url).await).0, 400);
@@ -980,6 +1161,19 @@ pub(crate) mod tests {
             ..request()
         };
         assert!(code(hub.create(tiny).await).1.contains("too little"));
+        // With standard amounts: no jitter (the parts are the sizes), and at least 0.1 ZEC.
+        let std_jitter = CreateRoute {
+            keep_bps: Some(100),
+            standard_amounts: Some(true),
+            ..request()
+        };
+        assert!(code(hub.create(std_jitter).await)
+            .1
+            .contains("standard amounts off"));
+        let small = std_request(5_000_000, [0, 0]);
+        assert!(code(hub.create(small).await)
+            .1
+            .contains("smallest standard amount"));
 
         rig.l2.set_address(None);
         assert!(code(hub.create(request()).await)
@@ -1003,7 +1197,7 @@ pub(crate) mod tests {
         assert_eq!(
             r2.phase,
             Phase::Leg1,
-            "leg 1 runs on; stop only cancels leg 2"
+            "leg 1 runs on; stop only cancels what hasn't started"
         );
         assert!(r2.stop_requested);
     }
@@ -1039,17 +1233,13 @@ pub(crate) mod tests {
             })
             .await
             .unwrap();
-        let id1 = r.legs[0].swap_id.clone().unwrap();
+        let id1 = r.parts[0].swap_id.clone().unwrap();
+        // Someone (a previous router process) already started leg 2 under its label.
+        rig.l2.insert_swap(&format!("{}/2/1", r.id), 99_940_000);
         rig.l1.set_state(&id1, "ZecSwept", Some("swapped"));
         rig.l1.push_timeline(&id1, sweep(100));
         rig.l1.set_zec(120, 0);
         rig.l2.set_zec(120, 99_990_000);
-        hub.tick().await; // settling
-        hub.tick().await; // pausing
-        hub.tick().await; // leg2_starting
-
-        // Someone (a previous router process) already started leg 2 under this label.
-        rig.l2.insert_swap(&format!("{}/2", r.id), 99_940_000);
         hub.tick().await;
         let r = hub.route(&r.id).unwrap();
         assert_eq!(r.phase, Phase::Leg2);
@@ -1060,15 +1250,15 @@ pub(crate) mod tests {
     async fn a_leg_dropped_from_the_config_is_a_problem_not_a_crash() {
         let rig = Rig::new();
         let r = rig.hub().create(request()).await.unwrap();
-        let id1 = r.legs[0].swap_id.clone().unwrap();
+        let id1 = r.parts[0].swap_id.clone().unwrap();
         rig.l1.set_state(&id1, "ZecSwept", Some("swapped"));
         // Restarted with only the leg-1 daemon configured.
         let hub = rig.hub_with(BTreeMap::from([(
             ("btc".to_string(), Role::B),
             rig.l1.clone(),
         )]));
-        hub.tick().await; // leg 1 → settling
-        hub.tick().await; // settling needs the leg-2 daemon
+        hub.tick().await; // leg 1 → settling; the ZEC side needs the leg-2 daemon
+        hub.tick().await;
         let r = hub.route(&r.id).unwrap();
         assert_eq!(r.phase, Phase::Settling);
         assert!(
@@ -1079,5 +1269,200 @@ pub(crate) mod tests {
             "{:?}",
             r.problem
         );
+    }
+
+    // ------------------------------------------------------------ standard amounts
+
+    /// Drive every leg-1 swap to its sweep, and every leg-2 swap to its claim, a tick at a time,
+    /// with the Zcash tip and L2's spendable balance following, until the route stops moving.
+    async fn run_out(rig: &Rig, hub: &Hub<FakeFerryd>, id: &str, spare: u64) -> Route {
+        let mut tip = 100u64;
+        for _ in 0..400 {
+            let r = hub.route(id).unwrap();
+            if !r.phase.is_active() {
+                return r;
+            }
+            tip += 1;
+            let mut spendable = spare;
+            for p in &r.parts {
+                let Some(sid) = &p.swap_id else { continue };
+                match (p.leg, p.state.as_deref(), p.outcome.as_deref()) {
+                    (1, _, None) => {
+                        rig.l1.set_state(sid, "ZecSwept", Some("swapped"));
+                        rig.l1.push_timeline(sid, sweep(tip));
+                    }
+                    (2, _, None) => rig.l2.set_state(sid, "Claimed", Some("swapped")),
+                    _ => {}
+                }
+                if p.leg == 1 && p.status == PartStatus::Swapped {
+                    let buried = p.sweep_height.is_some_and(|h| tip >= h + 9);
+                    if buried || p.spendable {
+                        spendable += p.zec_zat - 10_000;
+                    }
+                }
+                if p.leg == 2 && p.status == PartStatus::Swapped {
+                    spendable = spendable.saturating_sub(p.zec_zat + 10_000);
+                }
+            }
+            rig.l1.set_zec(tip, 0);
+            rig.l2.set_zec(tip, spendable);
+            rig.advance(30);
+            hub.tick().await;
+        }
+        panic!(
+            "the route never stopped: {:#?}",
+            hub.route(id).unwrap().timeline
+        );
+    }
+
+    #[tokio::test]
+    async fn a_route_in_standard_parts_through_the_driver() {
+        let rig = Rig::new();
+        // 0.001 ZEC already in the leg-2 wallet: it pays the fees, so leg 2 sells what leg 1 buys.
+        rig.l2.set_zec(1, 100_000);
+        let hub = rig.hub();
+        let r = hub
+            .create(std_request(85_000_000, [60, 300]))
+            .await
+            .unwrap();
+        assert_eq!(r.phase, Phase::Leg1);
+        let v = hub.view(&r);
+        assert!(v.standard_amounts);
+        assert_eq!((v.legs[0].parts, v.legs[1].parts), (3, 3));
+        let r = run_out(&rig, &hub, &r.id, 100_000).await;
+        assert_eq!(
+            (r.phase, r.outcome),
+            (Phase::Done, Some(crate::route::Outcome::Swapped)),
+            "{:#?}",
+            r.timeline
+        );
+        let (buys, sells) = (rig.l1.starts(), rig.l2.starts());
+        let mut b: Vec<u64> = buys.iter().map(|s| s.zec_zat).collect();
+        let mut s: Vec<u64> = sells.iter().map(|s| s.zec_zat).collect();
+        b.sort_unstable();
+        s.sort_unstable();
+        assert_eq!(b, [10_000_000, 25_000_000, 50_000_000]);
+        assert_eq!(s, b, "the same standard sizes both ways");
+        // One swap per label, labels <route>/<leg>/<n>.
+        let mut labels: Vec<String> = buys
+            .iter()
+            .chain(sells.iter())
+            .map(|s| s.route.clone())
+            .collect();
+        labels.sort();
+        labels.dedup();
+        assert_eq!(labels.len(), 6);
+        assert!(labels.iter().all(|l| l.starts_with(&format!("{}/", r.id))));
+        assert_eq!((rig.l1.swap_count(), rig.l2.swap_count()), (3, 3));
+        // The view: every part swapped, the legs' totals, the plan.
+        let v = hub.view(&r);
+        assert!(v.parts.iter().all(|p| p.status == PartStatus::Swapped));
+        assert_eq!(v.legs[1].parts_done, 3);
+        assert_eq!(v.legs[1].earlier_swaps.len(), 2);
+        assert_eq!(
+            v.legs[1].counter_units,
+            Some(sells.iter().map(|s| s.min_counter.unwrap()).sum())
+        );
+        assert!(v.note.contains("for 0.85 ZEC in 3 parts"), "{}", v.note);
+    }
+
+    #[tokio::test]
+    async fn a_route_in_parts_survives_restarts_midway() {
+        let rig = Rig::new();
+        rig.l2.set_zec(1, 100_000);
+        let r = rig
+            .hub()
+            .create(std_request(85_000_000, [0, 120]))
+            .await
+            .unwrap();
+        // Restart the router every few ticks while the parts run.
+        let mut tip = 100u64;
+        for i in 0..300 {
+            let hub = rig.hub();
+            let cur = hub.route(&r.id).unwrap();
+            if !cur.phase.is_active() {
+                break;
+            }
+            tip += 1;
+            let mut spendable = 100_000u64;
+            for p in &cur.parts {
+                let Some(sid) = &p.swap_id else { continue };
+                if p.outcome.is_none() {
+                    if p.leg == 1 {
+                        rig.l1.set_state(sid, "ZecSwept", Some("swapped"));
+                        rig.l1.push_timeline(sid, sweep(tip));
+                    } else {
+                        rig.l2.set_state(sid, "Claimed", Some("swapped"));
+                    }
+                }
+                if p.leg == 1
+                    && p.status == PartStatus::Swapped
+                    && p.sweep_height.is_some_and(|h| tip >= h + 9)
+                {
+                    spendable += p.zec_zat - 10_000;
+                }
+                if p.leg == 2 && p.status == PartStatus::Swapped {
+                    spendable = spendable.saturating_sub(p.zec_zat + 10_000);
+                }
+            }
+            rig.l1.set_zec(tip, 0);
+            rig.l2.set_zec(tip, spendable);
+            rig.advance(30);
+            for _ in 0..(1 + i % 3) {
+                hub.tick().await;
+            }
+        }
+        let r = rig.hub().route(&r.id).unwrap();
+        assert_eq!(r.phase, Phase::Done, "{:#?}", r.timeline);
+        assert_eq!(
+            (rig.l1.starts().len(), rig.l2.starts().len()),
+            (3, 3),
+            "each part started once"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_shows_the_split_without_starting() {
+        let rig = Rig::new();
+        let hub = rig.hub();
+        let plan = hub.plan(std_request(100_000_000, [0, 0])).await.unwrap();
+        assert!(plan.standard_amounts);
+        // A fresh wallet: 1 ZEC bought, 0.95 sold in 4 parts, the rest kept.
+        let sells: Vec<u64> = plan
+            .parts
+            .iter()
+            .filter(|p| p.leg == 2)
+            .map(|p| p.zec_zat)
+            .collect();
+        assert_eq!(sells.iter().sum::<u64>(), 95_000_000);
+        assert_eq!(sells.len(), 4);
+        assert!(plan.note.contains("stays in your wallet"), "{}", plan.note);
+        assert!(hub.routes().is_empty() && rig.l1.starts().is_empty());
+        // With 0.001 ZEC spare in the wallet: the same sizes both ways.
+        rig.l2.set_zec(1, 100_000);
+        let plan = hub.plan(std_request(100_000_000, [0, 0])).await.unwrap();
+        assert_eq!(plan.amounts.zec2_zat, 100_000_000);
+        // Another route's held ZEC is not spare.
+        let held = hub
+            .create(CreateRoute {
+                to: "usdc-base".into(),
+                ..request()
+            })
+            .await
+            .unwrap();
+        let _ = hub.user(&held.id, Obs::Stop).await.unwrap();
+        let id1 = held.parts[0].swap_id.clone().unwrap();
+        rig.l1.set_state(&id1, "BtcRedeemed", None);
+        hub.tick().await;
+        assert_eq!(hub.route(&held.id).unwrap().phase, Phase::Holding);
+        rig.l2.set_zec(1, 100_000 + 99_990_000);
+        let plan = hub.plan(std_request(100_000_000, [0, 0])).await.unwrap();
+        assert_eq!(
+            plan.amounts.zec2_zat, 100_000_000,
+            "the 0.001 spare, not the held ZEC"
+        );
+        rig.l2.set_zec(1, 99_990_000);
+        let plan = hub.plan(std_request(100_000_000, [0, 0])).await.unwrap();
+        assert_eq!(plan.amounts.zec2_zat, 95_000_000);
     }
 }
