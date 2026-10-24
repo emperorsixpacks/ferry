@@ -468,6 +468,9 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         // loop, so a caller that gives up on this request can't orphan it.
         let mut st = self.state.lock().await;
         self.drive_local(&mut rec).await;
+        if !self.save(&rec) {
+            return Err(ApiError(500, "could not save the swap".into()));
+        }
         st.swaps.insert(id.clone(), rec);
         self.publish(&mut st);
         Ok(id)
@@ -675,7 +678,12 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             .first()
             .cloned()
             .ok_or_else(|| ApiError(500, "no Accept produced".into()))?;
-        self.save(&rec);
+        // A swap we can't persist is refused (nothing has moved yet, and a firm quote it named
+        // is given back). Saved, it is in memory before the reply, and only then is the quote
+        // taken for good.
+        if !self.save(&rec) {
+            return Err(ApiError(500, "could not save the swap".into()));
+        }
         st.swaps.insert(id, rec);
         self.publish(&mut st);
         if let Some(q) = quote {
