@@ -79,6 +79,9 @@ pub struct MockZecLeg {
     block_ms: u64,
     /// Network label for status and the mock address prefix ("regtest", "test", "main").
     network: String,
+    /// Describes its transactions to a chain observer (false: like a devtool wallet without a
+    /// node RPC, which can't).
+    describe: bool,
 }
 
 fn now_ms() -> u64 {
@@ -102,6 +105,7 @@ impl MockZecLeg {
             owner,
             block_ms: (block_secs * 1000.0).max(1.0) as u64,
             network: "regtest".into(),
+            describe: true,
         };
         leg.with_chain(|c, _| {
             c.balances
@@ -114,6 +118,12 @@ impl MockZecLeg {
 
     pub fn with_network(mut self, network: impl Into<String>) -> Self {
         self.network = network.into();
+        self
+    }
+
+    /// Whether it describes its transactions (`--zec-mock-describe`).
+    pub fn with_describe(mut self, describe: bool) -> Self {
+        self.describe = describe;
         self
     }
 
@@ -415,7 +425,14 @@ impl ZecLeg for MockZecLeg {
         })
     }
 
+    fn describes_txs(&self) -> bool {
+        self.describe
+    }
+
     async fn describe_tx(&self, txid: &str) -> Result<Option<String>, MockZecError> {
+        if !self.describe {
+            return Ok(None);
+        }
         self.with_chain(|c, _| {
             Ok(c.txs.iter().find(|t| t.txid == txid).map(|t| match t.kind {
                 Kind::Send => format!(

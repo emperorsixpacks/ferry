@@ -108,7 +108,8 @@ async fn guard<L: ZecLeg + 'static>(State(d): D<L>, req: Request, next: Next) ->
 async fn status<L: ZecLeg + 'static>(
     State(d): D<L>,
 ) -> Result<Json<view::EvmStatusView>, ApiError> {
-    if let Some(s) = d.state.lock().await.status.clone() {
+    // The last published status (crate::reads): it never waits for a round.
+    if let Some(s) = d.reads.status() {
         return Ok(Json(s));
     }
     d.status_view()
@@ -117,26 +118,22 @@ async fn status<L: ZecLeg + 'static>(
         .map_err(|e| ApiError(503, e.to_string()))
 }
 
-async fn list_swaps<L: ZecLeg + 'static>(State(d): D<L>) -> Json<Vec<view::EvmSwapView>> {
-    Json(
-        d.state
-            .lock()
-            .await
-            .swaps
-            .values()
-            .map(view::swap_view)
-            .collect(),
+/// The swaps as last published (crate::reads): it never waits for a round.
+async fn list_swaps<L: ZecLeg + 'static>(State(d): D<L>) -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        d.reads.swaps_json(),
     )
 }
 
+/// One swap as last published (crate::reads).
 async fn get_swap<L: ZecLeg + 'static>(
     State(d): D<L>,
     Path(id): Path<String>,
-) -> Result<Json<view::EvmSwapView>, ApiError> {
-    let st = d.state.lock().await;
-    st.swaps
-        .get(&id)
-        .map(|r| Json(view::swap_view(r)))
+) -> Result<impl IntoResponse, ApiError> {
+    d.reads
+        .swap(&id)
+        .map(|json| ([(header::CONTENT_TYPE, "application/json")], json))
         .ok_or(ApiError(404, "no such swap".into()))
 }
 
@@ -180,21 +177,19 @@ async fn events<L: ZecLeg + 'static>(
     State(d): D<L>,
 ) -> Sse<impl Stream<Item = Result<SseFrame, Infallible>>> {
     let rx = d.events.subscribe();
+    // What was last published (crate::reads), so a new stream never waits for a round.
     let mut initial = vec![];
-    {
-        let st = d.state.lock().await;
-        if let Some(s) = &st.status {
-            initial.push(SseEvent {
-                event: "status",
-                data: serde_json::to_string(s).expect("serializes"),
-            });
-        }
-        for rec in st.swaps.values() {
-            initial.push(SseEvent {
-                event: "swap",
-                data: serde_json::to_string(&view::swap_view(rec)).expect("serializes"),
-            });
-        }
+    if let Some(s) = d.reads.status() {
+        initial.push(SseEvent {
+            event: "status",
+            data: serde_json::to_string(&s).expect("serializes"),
+        });
+    }
+    for data in d.reads.swaps() {
+        initial.push(SseEvent {
+            event: "swap",
+            data,
+        });
     }
     let live = BroadcastStream::new(rx).filter_map(|m| async move { m.ok() });
     let frames = stream::iter(initial)

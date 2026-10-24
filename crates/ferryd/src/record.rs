@@ -60,6 +60,64 @@ impl Pending {
     }
 }
 
+/// A finished swap is watched at most this long after its last timeline entry for what it only
+/// shows (the other side's sweep, block heights of its transactions): long enough for a sweep on
+/// any normal timeline (B sweeps minutes after the redeem; a Z that is online reclaims within the
+/// hour after B's refund), short enough that no finished swap is polled forever.
+pub const SETTLE_AFTER_MS: u64 = 6 * 3600 * 1000;
+/// Z's late-note watch (refunded after a send that may have gone out) ends when the wallet shows
+/// the lock can never land, or after this long without news. A lock we built expires 40 blocks
+/// (librustzcash's default, about 50 minutes) after it is built if it isn't mined, and a mined one
+/// shows up on the next wallet sync, so a week covers both many times over, even with the wallet
+/// server down for days.
+pub const LATE_NOTE_WATCH_MS: u64 = 7 * 24 * 3600 * 1000;
+
+/// What [`settles`] needs to know of a swap.
+#[derive(Clone, Copy, Debug)]
+pub struct Settle {
+    pub finished: bool,
+    /// Actions still queued.
+    pub pending: bool,
+    pub late_note_possible: bool,
+    /// Someone sweeps the joint note on this path (swapped or refunded, with a ZEC lock).
+    pub sweep_expected: bool,
+    /// We have described that sweep.
+    pub sweep_seen: bool,
+    /// Every timeline transaction has its block height.
+    pub heights_done: bool,
+    /// Time since the swap's last timeline entry.
+    pub quiet_ms: u64,
+}
+
+/// Whether a swap is settled: the tick no longer looks at it (both daemon types). A swap that
+/// isn't finished, or still has actions queued, never is. Z's late-note watch lasts until it is
+/// closed or [`LATE_NOTE_WATCH_MS`]. Otherwise a finished swap settles once it has shown what it
+/// shows (the other side's sweep, when the backend can describe it, and its block heights), or
+/// after [`SETTLE_AFTER_MS`] without news, whatever is still missing.
+pub fn settles(s: Settle, describes_txs: bool) -> bool {
+    if !s.finished || s.pending {
+        return false;
+    }
+    if s.late_note_possible {
+        return s.quiet_ms >= LATE_NOTE_WATCH_MS;
+    }
+    if s.quiet_ms >= SETTLE_AFTER_MS {
+        return true;
+    }
+    (!s.sweep_expected || !describes_txs || s.sweep_seen) && s.heights_done
+}
+
+/// Unix ms of a swap's last timeline entry (`created_ms` without one, or if it can't be read).
+pub fn last_activity_ms(timeline: &[TimelineEntry], created_ms: u64) -> u64 {
+    timeline
+        .last()
+        .and_then(|e| humantime::parse_rfc3339(&e.at).ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(created_ms)
+        .max(created_ms)
+}
+
 /// What the tick does with a pending action right now (both daemon types' `tick`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Now {
@@ -151,6 +209,11 @@ pub struct SwapRecord {
     /// wallet, so a crash in between can never lead to a second send.
     #[serde(default)]
     pub zec_send_intent: bool,
+    /// Z, refunded after a send that may have gone out: our wallet showed the lock can never
+    /// land (it expired unmined, and no note is there), so the joint address is no longer
+    /// watched for it.
+    #[serde(default)]
+    pub late_note_closed: bool,
     /// Presigned spends we broadcast, rebroadcast every tick until they or a conflicting spend
     /// are buried (a rejected or evicted refund must not be lost).
     #[serde(default)]
@@ -232,6 +295,7 @@ impl SwapRecord {
             route: None,
             sweep_to: None,
             payout_to: None,
+            late_note_closed: false,
         }
     }
 
@@ -324,26 +388,38 @@ impl SwapRecord {
     }
 
     /// Nothing left to do or to fill in.
-    pub fn settled(&self) -> bool {
-        // On the swapped and refunded paths someone sweeps the joint note; keep watching
-        // until we have seen it, so both parties show the same observer lines.
-        let sweep_expected =
-            matches!(self.outcome(), Some("swapped" | "refunded")) && self.zec_lock_txid.is_some();
-        // Z refunded without (knowingly) locking ZEC, but a send was attempted: keep watching
-        // the joint address, so a note that lands anyway is reclaimed rather than stranded.
-        let late_note_possible = self.role() == Role::Z
+    /// Done watching: the tick skips it from here on ([`settles`]). `describes_txs`: the Zcash
+    /// backend can describe a transaction to a chain observer (`ZecLeg::describes_txs`);
+    /// without that, the other side's sweep line never comes, so it isn't waited for.
+    pub fn settled(&self, describes_txs: bool, now_ms: u64) -> bool {
+        settles(
+            Settle {
+                finished: self.swap.is_final(),
+                pending: !self.pending.is_empty(),
+                late_note_possible: self.late_note_possible(),
+                sweep_expected: matches!(self.outcome(), Some("swapped" | "refunded"))
+                    && self.zec_lock_txid.is_some(),
+                sweep_seen: self.observer_zec.iter().any(|(k, _)| k == "sweep"),
+                heights_done: self
+                    .timeline
+                    .iter()
+                    .all(|e| e.txid.is_none() || e.height.is_some()),
+                quiet_ms: now_ms.saturating_sub(last_activity_ms(&self.timeline, self.created_ms)),
+            },
+            describes_txs,
+        )
+    }
+
+    /// Z refunded without (knowingly) locking ZEC, but a send was attempted: the joint address
+    /// is watched, so a note that lands anyway is reclaimed rather than stranded, until our
+    /// wallet shows the lock can never land (`late_note_closed`).
+    pub fn late_note_possible(&self) -> bool {
+        self.role() == Role::Z
             && self.state() == "Refunded"
+            && !self.late_note_closed
             && (self.zec_send_intent
                 || self.has("zec_lock_refused")
-                || self.has("zec_send_uncertain"));
-        !late_note_possible
-            && self.swap.is_final()
-            && self.pending.is_empty()
-            && (!sweep_expected || self.observer_zec.iter().any(|(k, _)| k == "sweep"))
-            && self
-                .timeline
-                .iter()
-                .all(|e| e.txid.is_none() || e.height.is_some())
+                || self.has("zec_send_uncertain"))
     }
 
     pub fn set_observer(list: &mut Vec<(String, String)>, key: &str, line: String) {
@@ -450,6 +526,89 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// A finished swap with nothing queued settles once it has shown what it shows; without a
+    /// Zcash backend that describes transactions (devtool with no node RPC, as on the deploy and
+    /// the node installer) it doesn't wait for the other side's sweep line, which never comes;
+    /// past SETTLE_AFTER_MS it settles whatever is still missing. Z's late-note watch outlasts
+    /// that bound, until it is closed or the week is up.
+    #[test]
+    fn finished_swaps_settle() {
+        use super::{settles, Settle, LATE_NOTE_WATCH_MS, SETTLE_AFTER_MS};
+        let base = Settle {
+            finished: true,
+            pending: false,
+            late_note_possible: false,
+            sweep_expected: true,
+            sweep_seen: false,
+            heights_done: true,
+            quiet_ms: 0,
+        };
+        // A backend that describes: the sweep line is waited for...
+        assert!(!settles(base, true));
+        assert!(settles(
+            Settle {
+                sweep_seen: true,
+                ..base
+            },
+            true
+        ));
+        // ...one that can't: not waited for.
+        assert!(settles(base, false));
+        // Heights still missing: wait, but not past the bound.
+        let heights = Settle {
+            heights_done: false,
+            ..base
+        };
+        assert!(!settles(heights, false));
+        let quiet = |s: Settle, ms: u64| Settle { quiet_ms: ms, ..s };
+        assert!(!settles(quiet(heights, SETTLE_AFTER_MS - 1), true));
+        assert!(settles(quiet(heights, SETTLE_AFTER_MS), true));
+        // Not finished, or actions still queued: never, however long it has been.
+        for s in [
+            Settle {
+                finished: false,
+                ..base
+            },
+            Settle {
+                pending: true,
+                ..base
+            },
+        ] {
+            assert!(!settles(quiet(s, u64::MAX), false));
+        }
+        // Z's late note: watched past the general bound, until closed or a week without news.
+        let late = Settle {
+            late_note_possible: true,
+            sweep_expected: false,
+            ..base
+        };
+        assert!(!settles(late, false));
+        assert!(!settles(quiet(late, 10 * SETTLE_AFTER_MS), false));
+        assert!(!settles(quiet(late, LATE_NOTE_WATCH_MS - 1), true));
+        assert!(settles(quiet(late, LATE_NOTE_WATCH_MS), false));
+    }
+
+    /// The quiet time counts from the last timeline entry, never from before the swap began.
+    #[test]
+    fn last_activity_is_the_last_timeline_entry() {
+        use super::last_activity_ms;
+        let mut rec = sample_record();
+        rec.timeline.clear();
+        assert_eq!(last_activity_ms(&rec.timeline, 5), 5);
+        rec.log("local", "x", "y", None);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let at = last_activity_ms(&rec.timeline, 0);
+        assert!(now.abs_diff(at) < 5_000, "{now} {at}");
+        rec.timeline[0].at = "not a time".into();
+        assert_eq!(last_activity_ms(&rec.timeline, 7), 7);
+        // A record whose swap isn't finished is never settled, with or without descriptions.
+        assert!(!rec.settled(true, u64::MAX) && !rec.settled(false, u64::MAX));
+        assert!(!rec.late_note_possible(), "B never watches for a late note");
+    }
+
     /// The tick's first pass runs deadline actions and leaves slow work queued: a slow Bitcoin
     /// action stops the queue there (as a retry would), a Zcash one is stepped over. The second
     /// pass runs everything, except Zcash work while the wallet server is stuck.

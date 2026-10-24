@@ -1199,6 +1199,11 @@ impl ZecLeg for DevtoolZecLeg {
         }))
     }
 
+    /// Only with the node's JSON-RPC: a lightwalletd alone can't show a transaction's parts.
+    fn describes_txs(&self) -> bool {
+        self.0.cfg.node_rpc.is_some()
+    }
+
     async fn describe_tx(&self, txid: &str) -> Result<Option<String>, ZecError> {
         if self.0.cfg.node_rpc.is_none() {
             return Ok(None);
