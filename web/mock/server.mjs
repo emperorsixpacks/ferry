@@ -12,6 +12,14 @@
 // Env: MOCK_SPEED (default 1, higher is faster), MOCK_Z_PORT, MOCK_B_PORT, MOCK_WALLET_LAG_MS,
 // MOCK_BTC_NETWORK / MOCK_ZEC_NETWORK (labels only; the mock still mines fast).
 //
+// Several swaps at once, as ferryd: each party runs up to MOCK_MAX_SWAPS (default 4, ferryd's
+// --max-swaps on a test network) swaps that aren't over, from its free funds (its balance less what
+// its live swaps hold before their locks). Past either, a start gets ferryd's 409 {"code": "busy"}
+// (the taker's own cap, or "The maker refused: Busy: ..." from its partner). GET /api/status has
+// `capacity` {max_swaps, live, late, free_slots} and `offer.free_slots`; every maker's offer has
+// `free_slots` (Bram's and Zoe's follow their party; the others take MOCK_MAX_SWAPS, or 0 when
+// their slug is in MOCK_BUSY_MAKERS, e.g. "kestrel,sandpiper").
+//
 // B serves the peer offers of a few mock B makers and Z those of a few Z makers (mock/makers.mjs)
 // for the maker list, and their firm quotes (POST /peer/quote, signed like ferryd's;
 // MOCK_QUOTE_SECS, default 45).
@@ -71,6 +79,10 @@ const RATE = 410000; // sat per ZEC
 const FEE_SAT = 2000; // per presigned BTC transaction, like ferryd's --fee-sat
 const ZEC_FEE_RESERVE = 50_000; // what a real Z wallet keeps for the lock's fee (ferry-zec)
 const LOCK_FEE_RESERVE = 10_000; // what ferryd's B keeps for its lock's own fee
+// ferryd --max-swaps: how many swaps that aren't over a party runs at once
+const MAX_SWAPS = Math.max(1, Number(process.env.MOCK_MAX_SWAPS ?? 4) || 4);
+// mock makers that are full (their offers say free_slots 0)
+const BUSY_MAKERS = new Set((process.env.MOCK_BUSY_MAKERS ?? "").split(",").map((s) => s.trim()).filter(Boolean));
 
 // ---------------------------------------------------------------------------------------------
 // world
@@ -509,7 +521,7 @@ const near = NEAR_PORT
 
 // the mock router (mock/router.mjs), when MOCK_ROUTE_PORT is set
 const ROUTE_PORT = process.env.MOCK_ROUTE_PORT ? Number(process.env.MOCK_ROUTE_PORT) : null;
-const router = ROUTE_PORT ? mockRouter({ swaps, newSwap: (...a) => newSwap(...a), chains, parties, inject: (s, role) => inject(s, role), makerOf, ms, speed: SPEED, payout: PAYOUT }) : null;
+const router = ROUTE_PORT ? mockRouter({ swaps, newSwap: (...a) => newSwap(...a), chains, parties, inject: (s, role) => inject(s, role), makerOf, ms, speed: SPEED, payout: PAYOUT, capacity: (role) => capacityOf(role) }) : null;
 
 function inject(s, role) {
   const v = s.views[role];
@@ -540,6 +552,21 @@ function heldInWallet(role, asset) {
   }
   return n;
 }
+
+// what a party can spend on a new swap: its balance less what its live swaps hold
+const freeOf = (role, asset) => Math.max(0, parties[role].balances[asset] - heldInWallet(role, asset));
+
+// ferryd's capacity (GET /api/status `capacity`): its swaps that aren't over, against --max-swaps.
+// The mock's swaps all run between its one Z and one B party, so both count the same ones.
+const liveOf = (role) => swaps.filter((s) => !s.views[role].outcome && s.views[role].state !== "Aborted").length;
+const capacityOf = (role) => {
+  const live = liveOf(role);
+  return { max_swaps: MAX_SWAPS, live, late: 0, free_slots: Math.max(0, MAX_SWAPS - live) };
+};
+// a mock maker's free slots: Bram's and Zoe's are their party's, the others' fixed
+const slotsOf = (m) => (m.slug === null ? capacityOf(m.role).free_slots : BUSY_MAKERS.has(m.slug) ? 0 : MAX_SWAPS);
+// ferryd's refusal of a start it can't take now
+const busyError = (msg) => ({ error: `Busy: ${msg}`, code: "busy" });
 
 const books = { Z: sendBook(), B: sendBook() };
 function walletAssets(role, coin) {
@@ -617,7 +644,8 @@ function statusView(role, coin = null) {
       btc: { network: chains.btc.network, height: chains.btc.height, ...(coin === "ltc" ? { coin: "ltc", ticker: "LTC" } : {}) },
       zec: { network: chains.zec.network, height: chains.zec.height, pool: chains.zec.pool },
     },
-    offer: { pair: coin === "ltc" ? "ZEC/LTC" : "ZEC/BTC", rate_sat_per_zec: RATE, min_zat: 10000000, max_zat: 1000000000, fee_sat: FEE_SAT, t1_blocks: T1, t2_blocks: T2, btc_lock_confs: BTC_CONFS, zec_confs: ZEC_CONFS },
+    offer: { pair: coin === "ltc" ? "ZEC/LTC" : "ZEC/BTC", rate_sat_per_zec: RATE, min_zat: 10000000, max_zat: 1000000000, fee_sat: FEE_SAT, t1_blocks: T1, t2_blocks: T2, btc_lock_confs: BTC_CONFS, zec_confs: ZEC_CONFS, free_slots: capacityOf(role).free_slots },
+    capacity: capacityOf(role),
     features: [...(PAYOUT ? ["route", "payout"] : ["route"]), "withdraw", "withdraw_preview"],
   };
 }
@@ -642,11 +670,12 @@ function peerOffer(m) {
   const t = Math.floor(now() / 1000);
   const up = Math.floor((now() - STARTED) / 1000);
   const updated = m.source === "fixed" ? undefined : m.paused ? Math.floor(STARTED / 1000) - m.ageS : t - ((m.ageS + up) % 60);
-  // Bram and Zoe are the mock's real parties: their liquidity follows their balances
+  // Bram and Zoe are the mock's real parties: their liquidity follows their free balances (what
+  // their live swaps don't hold), as ferryd's does
   const own =
     m.role === "Z"
-      ? Math.max(0, parties.Z.balances.zec_shielded_zat - ZEC_FEE_RESERVE)
-      : Math.max(0, Math.floor(((parties.B.balances.btc_sat - FEE_SAT) * 1e8) / m.rate));
+      ? Math.max(0, freeOf("Z", "zec_shielded_zat") - ZEC_FEE_RESERVE)
+      : Math.max(0, Math.floor(((freeOf("B", "btc_sat") - FEE_SAT) * 1e8) / m.rate));
   const liquidity = m.slug === null ? own : m.liquidity;
   // a private-swap partner (mock/makers.mjs ROUTE_MAKERS) says which coin it swaps, as ferryd does:
   // an ERC-20 on a local chain (anvil, so the operator's entry names the chain), or Litecoin
@@ -666,6 +695,8 @@ function peerOffer(m) {
     rate_source: m.source,
     ...(updated != null ? { rate_updated_at: updated } : {}),
     liquidity: { zec_zat: Math.min(liquidity, m.max) },
+    // how many more swaps it takes right now (ferryd --max-swaps less what it runs)
+    ...(m.paused ? {} : { free_slots: slotsOf(m) }),
     quote_key: quoteKey(m).public,
     // a ferryd that can pay a taker's coin to a payout address (a NEAR Intents deposit address)
     ...(PAYOUT ? { features: ["payout"] } : {}),
@@ -692,8 +723,6 @@ function quoteKey(m) {
   return keys.get(keyOf(m));
 }
 
-const busy = () => swaps.some((s) => !(s.views.Z.outcome && s.views.B.outcome));
-
 // POST /peer/quote {pair, taker_role, bucket_zat} for mock maker m: [status, body]
 function peerQuote(m, body) {
   const b = bucketFor(Number(body?.bucket_zat));
@@ -703,7 +732,7 @@ function peerQuote(m, body) {
   const taker = m.role === "Z" ? "B" : "Z";
   if (body.taker_role !== taker) return [400, { error: `this maker quotes takers with role ${taker}` }];
   if (m.paused) return [403, { error: "not making offers" }];
-  if (busy()) return [409, { error: "busy with another swap; ask again when it is done" }];
+  if (slotsOf(m) === 0) return [409, { error: "busy: running as many swaps as it takes at once; ask again in a few minutes" }];
   const offer = peerOffer(m);
   if (b.bucket < m.min || b.lower >= m.max) return [400, { error: "outside this maker's range" }];
   const min = Math.max(b.lower, m.min);
@@ -886,7 +915,10 @@ function handler(role, coin = null) {
       if (maker.role === role) return send(res, 400, { error: `the counterparty also has role ${role}` });
       if (maker.paused) return send(res, 400, { error: "the counterparty is not making offers" });
       if (zat < maker.min || zat > maker.max) return send(res, 400, { error: `Amount must be between ${zecAmount(maker.min)} and ${zecAmount(maker.max)}` });
-      if (swaps.some((s) => !(s.views.Z.outcome && s.views.B.outcome))) return send(res, 409, { error: "A swap is already in progress" });
+      // several swaps at once, up to --max-swaps on each side (ferryd's words)
+      const peer = role === "Z" ? "B" : "Z";
+      if (capacityOf(role).free_slots === 0) return send(res, 409, busyError(`this node already runs ${MAX_SWAPS} swaps, as many as it takes at once (--max-swaps); try again in a few minutes`));
+      if (slotsOf(maker) === 0) return send(res, 409, busyError(`the maker can't take another swap right now (Busy: it already runs as many swaps as it takes at once); try again in a few minutes`));
       // a firm quote holds the swap to its rate
       const firm = body.quote ? honour(body.quote, maker, zat) : null;
       if (firm?.error) return send(res, 400, { error: firm.error });
@@ -914,6 +946,10 @@ function handler(role, coin = null) {
       const bHave = parties.B.balances.btc_sat;
       if (bHave < sat + LOCK_FEE_RESERVE)
         return send(res, 400, { error: mine(`B does not have enough BTC: ${btcAmount(sat + LOCK_FEE_RESERVE)} needed (the amount plus about ${btcAmount(LOCK_FEE_RESERVE)} for the lock's fee), ${btcAmount(bHave)} in the wallet`) });
+      // enough in the wallet, but swaps in progress hold it: busy until they lock or end
+      const short = freeOf("Z", "zec_shielded_zat") < zat + ZEC_FEE_RESERVE ? "Z" : freeOf("B", "btc_sat") < sat + LOCK_FEE_RESERVE ? "B" : null;
+      if (short === role) return send(res, 409, busyError("swaps in progress hold this node's funds until they lock; try again in a few minutes"));
+      if (short === peer) return send(res, 409, busyError("the maker can't take another swap right now (Busy: swaps in progress hold its funds); try again in a few minutes"));
       firm?.take();
       const s = newSwap(role, body.maker ?? null, zat, rate, { payoutTo: body.payout_to ?? null, sweepAddr });
       return send(res, 201, { id: s.id });

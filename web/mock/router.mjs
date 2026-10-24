@@ -48,7 +48,8 @@ const inAbout = (s) => (s < 60 ? "in less than a minute" : `in about ${duration(
 
 // `world`: the mock's swaps and parties (mock/server.mjs)
 export function mockRouter(world, env = process.env) {
-  const { swaps, newSwap, chains, parties, inject, makerOf, ms } = world;
+  // `capacity(role)`: the party's {free_slots, ...} as ferryd's GET /api/status says it
+  const { swaps, newSwap, chains, parties, inject, makerOf, ms, capacity = () => ({ free_slots: 1 }) } = world;
   const legs = (env.MOCK_ROUTE_LEGS ?? "btc:b,usdc-base:b,btc:z,usdc-base:z,ltc:z")
     .split(",")
     .map((s) => s.trim())
@@ -67,7 +68,8 @@ export function mockRouter(world, env = process.env) {
   const iso = () => new Date().toISOString().replace(/\.\d+Z$/, "Z");
   const has = (pair, role) => legs.some((l) => l.pair === pair && l.role === role);
   const swapOf = (id) => swaps.find((s) => s.id === id) ?? null;
-  const live = () => swaps.some((s) => !(s.views.Z.outcome && s.views.B.outcome));
+  // the daemon of a leg runs as many swaps as it takes at once (ferryd's 409 "busy"): asked again
+  const full = (role) => capacity(role).free_slots === 0;
   const display = (m) => m?.name ?? m?.url ?? "your partner";
   const walletOf = (role) => parties[role].name;
   const zecWallet = () => `your wallet "${walletOf("Z")}"`;
@@ -132,8 +134,8 @@ export function mockRouter(world, env = process.env) {
     else if (m.role === leg.role) refusal = `the counterparty also has role ${leg.role}`;
     else if (m.paused) refusal = "The maker refused: not making offers";
     else if (zat < m.min || zat > m.max) refusal = `Amount must be between ${zecStr(m.min)} and ${zecStr(m.max)}`;
-    else if (live()) {
-      refusal = "A swap is already in progress";
+    else if (full(leg.role)) {
+      refusal = "Busy: this node already runs as many swaps as it takes at once (--max-swaps); try again in a few minutes";
       busy = true;
     }
     const counter = m ? Math.round((zat / 1e8) * m.rate) : 0;
@@ -145,7 +147,7 @@ export function mockRouter(world, env = process.env) {
       if (n === 1) {
         if (busy && now() < r.starting.window_ends) {
           r.starting.next_at = now() + retryMs;
-          r.problem = `Your ${r.from} daemon is busy with another swap; trying again`;
+          r.problem = `Your ${r.from} daemon is running as many swaps as it takes at once; trying again`;
           return;
         }
         return fail(r, "not_started", `Swap 1 with ${display(maker)} didn't start: ${refusal}. Nothing moved.`);

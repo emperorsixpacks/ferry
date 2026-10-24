@@ -35,8 +35,11 @@
 //                           main pair), e.g. when it is the demo's maker
 //   FERRY_B_BUYS [auto]     0: visitors can't start swaps on FERRY_B_URL's daemon (buying ZEC on the
 //                           main pair), e.g. when it is the demo's maker. Buy starts take the same
-//                           guards as sell starts: the caps, both rate limits, the maker allowlist and
-//                           one live swap per pair
+//                           guards as sell starts: the caps and both rate limits, and the maker
+//                           allowlist. Several swaps may run at once on a pair: each daemon takes as
+//                           many as its free funds and its --max-swaps allow, and a start it can't take
+//                           is answered 409 {"code": "busy"}, which reaches the browser as "Every
+//                           partner is busy right now. Try again in a few minutes."
 //   PUBLIC_ORIGIN [unset]   e.g. https://ferry.example: POSTs whose Origin is something else get 403
 //                           (with FERRY_OWN_NODE=1, a loopback origin's other loopback name passes too:
 //                           http://127.0.0.1:7865 and http://localhost:7865)
@@ -68,10 +71,12 @@
 //                           page without one shows no private swaps. A route start takes the swap
 //                           guards: the caps, both rate limits (a route counts as two swap starts),
 //                           the maker allowlist (partners named by name or index, mapped to their
-//                           URLs here, leg 2's fallbacks added here), every daemon idle and one live
-//                           route at a time. No direct swap starts while a route is moving, so nothing
-//                           spends the ZEC it holds between its two swaps. The views lose the
-//                           partners' URLs on the way out
+//                           URLs here, leg 2's fallbacks added here), and one moving route at a time.
+//                           Routes and ordinary swaps don't wait for each other (the daemons' free
+//                           funds and caps decide), with one exception: while a route is moving, no
+//                           direct sell starts on the pair it sells ZEC on, because the ZEC it bought
+//                           waits in that daemon's wallet, which the daemon counts as free. The views
+//                           lose the partners' URLs on the way out
 //
 // NEAR Intents (its 1Click Swap API; near.mjs): sell shielded ZEC for any of its assets, or buy
 // shielded ZEC with them. Ferry swaps ZEC for a coin it supports, and NEAR Intents carries that coin
@@ -95,12 +100,13 @@
 //                           [10800]: a sell's quote must outlive its Ferry swap; a buy's is the time to
 //                           send the deposit
 //   DEMO_NEAR_QUOTES_PER_MIN [40]  DEMO_NEAR_QUOTES_PER_MIN_TOTAL [400]  NEAR quotes per IP / in all
-//   A NEAR start takes the swap guards: the caps, both rate limits, one live swap per pair and the
-//   router idle; the Ferry buy that follows a NEAR delivery waits for the pair's daemons to be idle.
-//   With FERRY_ROUTER_URL too, a private swap can have NEAR Intents at an end (POST /api/near/combo:
-//   coin → NEAR asset, NEAR asset → coin, NEAR → NEAR), with the route guards (two starts, nothing
-//   else moving), the partners mapped here (buildRoute), and the route's payout_to set here to a
-//   1Click deposit address this server made, never one from a browser. Only with FERRY_NEAR=1.
+//   A NEAR start takes the swap guards: the caps and both rate limits, and a NEAR sell the route
+//   exception above; the Ferry buy that follows a NEAR delivery starts when its daemon takes it (a
+//   busy daemon is asked again). With FERRY_ROUTER_URL too, a private swap can have NEAR Intents at
+//   an end (POST /api/near/combo: coin → NEAR asset, NEAR asset → coin, NEAR → NEAR), with the route
+//   guards (two starts, no other route moving), the partners mapped here (buildRoute), and the
+//   route's payout_to set here to a 1Click deposit address this server made, never one from a
+//   browser. Only with FERRY_NEAR=1.
 //
 // The daemons see no browser Origin header: this server strips it after its own PUBLIC_ORIGIN
 // check, so ferryd's --ui-origin allowlist doesn't need to know the public domain.
@@ -110,9 +116,9 @@ import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makerDirectory, parseMakers } from "./makers.mjs";
 import { quoteDesk, rateLimit } from "./quotes.mjs";
-import { extraDaemons, mainSide, pairsBody, samePair } from "./pairs.mjs";
-import { buildRoute, publicRoute, routerLink } from "./routes.mjs";
-import { ONE_CLICK_PUBKEY, ONE_CLICK_URL, nearDesk, nearRoutes, oneClick, ownDaemons, requestJson } from "./near.mjs";
+import { extraDaemons, mainSide, pairsBody } from "./pairs.mjs";
+import { buildRoute, publicRoute, routerLink, running } from "./routes.mjs";
+import { ONE_CLICK_PUBKEY, ONE_CLICK_URL, nearDesk, nearRoutes, oneClick, ownDaemons, pairOfStatus, requestJson } from "./near.mjs";
 import { originAllowed, ownProblem, receiveFields, withdrawBody } from "./own.mjs";
 import { sseTransform } from "./sse.mjs";
 
@@ -232,8 +238,13 @@ const NEAR_JWT = (() => {
     return cached;
   };
 })();
-// any daemon this server fronts, as near.mjs asks: {status, body}
-const daemonCall = (key, method, path, body) => requestJson(new URL(path, DAEMONS[key].url), { method, headers: authHeader(DAEMONS[key]), body, timeoutMs: 30_000 });
+// any daemon this server fronts, as near.mjs asks: {status, body}. A swap start the daemon can't
+// take (it, or its partner, runs as many swaps as it takes at once) is said the way the browser says
+// it (busyBody).
+const daemonCall = (key, method, path, body) =>
+  requestJson(new URL(path, DAEMONS[key].url), { method, headers: authHeader(DAEMONS[key]), body, timeoutMs: 30_000 }).then((r) =>
+    method === "POST" && path === "/api/swaps" && r?.status === 409 ? { ...r, body: busyBody(r.body) } : r,
+  );
 const NEAR_DAEMONS = ownDaemons({
   sell: [...(MAIN_SELL !== false ? [{ key: "z", auto: MAIN_SELL === "auto" }] : []), ...EXTRA.filter((d) => d.side === "sell").map((d) => ({ key: d.key, pair: d.id }))],
   buy: [...(MAIN_BUY !== false ? [{ key: "b", auto: MAIN_BUY === "auto" }] : []), ...EXTRA.filter((d) => d.side === "buy").map((d) => ({ key: d.key, pair: d.id }))],
@@ -254,9 +265,9 @@ const NEAR = NEAR_QUOTES
       sellDeadlineSecs: Number(env.FERRY_NEAR_SELL_DEADLINE_SECS ?? 86_400),
       buyDeadlineSecs: Number(env.FERRY_NEAR_BUY_DEADLINE_SECS ?? 10_800),
       limits: { maxZat: DEMO_MAX_ZAT, minZat: DEMO_MIN_ZAT },
-      // the Ferry buy that follows a NEAR delivery: when the pair's daemons and the router are idle;
-      // a private swap that follows one: when no route moves and no swap runs anywhere
-      admit: async ({ key, kind }) => (kind === "route" ? routeIdle() : pairIdle(key)),
+      // the Ferry buy that follows a NEAR delivery: whenever its daemon takes it (a busy one is asked
+      // again later); a private swap that follows one: when no other route moves
+      admit: async ({ key, kind }) => (kind === "route" ? routeIdle() : routeConflict(key)),
       // private swaps with NEAR Intents at an end: the route through the user's router
       router: ROUTER,
     })
@@ -348,38 +359,67 @@ function startsRefused(req, n) {
   return null;
 }
 
-// One live swap per pair, and nothing while a private swap holds ZEC: null when `key`'s pair is
-// idle, else the 409 (or 502) to answer.
-async function pairIdle(key) {
-  let lists;
+// What the browser hears when a daemon can't take a swap now: it runs as many swaps as it takes at
+// once (ferryd --max-swaps), its free funds are tied up in swaps in progress, or its partner said the
+// same. ferryd answers 409 {"code": "busy"}; anything else passes as it is.
+const BUSY_TEXT = "Every partner is busy right now. Try again in a few minutes.";
+function busyBody(body) {
+  return body?.code === "busy" ? { error: BUSY_TEXT, code: "busy" } : body;
+}
+
+// The daemons that sell ZEC: the main Z daemon and every pair's own sell-side daemon.
+const sells = (key) => key === "z" || EXTRA.some((d) => d.key === key && d.side === "sell");
+
+// The pair a daemon swaps ("btc", "usdc-base"): a pair's own daemon says so in its name, the main
+// ones in their status (asked once a minute at most).
+const pairCache = new Map();
+async function pairOf(key) {
+  const d = EXTRA.find((x) => x.key === key);
+  if (d) return d.id;
+  const c = pairCache.get(key);
+  if (c && Date.now() - c.at < 60_000) return c.pair;
+  const s = await daemonJson(key, "/api/status");
+  if (s.status !== 200) throw new Error(`status ${s.status}`);
+  const pair = pairOfStatus(s.body);
+  pairCache.set(key, { at: Date.now(), pair });
+  return pair;
+}
+
+// A private swap that is selling ZEC on `key`'s pair: the ZEC its first swap bought waits in that
+// daemon's wallet, which the daemon counts as free, so no direct sell may start there until the
+// route is done. Everything else runs side by side (the daemons' free funds and caps decide). null
+// when nothing is in the way (or `key` doesn't sell ZEC), else the 409 (or 502) to answer.
+async function routeConflict(key) {
+  if (!ROUTER || !sells(key)) return null;
+  let routes;
+  let pair;
   try {
-    lists = await Promise.all(samePair(key, EXTRA).map((k) => daemonJson(k, "/api/swaps")));
+    [routes, pair] = await Promise.all([ROUTER.call("GET", "/api/routes"), pairOf(key)]);
   } catch {
-    return { status: 502, body: { error: "Can't reach the daemon. Is it running?" } };
+    return { status: 502, body: { error: "Can't reach the private swap service or the daemon. Try again in a moment." } };
   }
-  if (lists.some((l) => l.status === 200 && Array.isArray(l.body) && l.body.some((s) => !s.outcome))) return { status: 409, body: { error: "A swap is already in progress on this pair. Try again when it finishes." } };
-  if (ROUTER && (await ROUTER.busy())) return { status: 409, body: { error: "A private swap is in progress. Try again when it finishes." } };
+  if (routes.status !== 200 || !Array.isArray(routes.body)) return { status: 502, body: { error: "Can't reach the private swap service. Try again in a moment." } };
+  if (routes.body.some((v) => running(v) && v.to === pair)) return { status: 409, body: { error: "A private swap is selling ZEC on this pair right now. Try again when it finishes." } };
   return null;
 }
 
-// Nothing moving that a route could collide with: no route, no swap on any daemon. null when idle,
-// else the 409 (or 502) to answer.
+// Routes run one at a time: null when none is moving, else the 409 (or 502, 503) to answer. Ordinary
+// swaps don't hold a route back: a leg the daemon can't take yet is asked again by the router.
 async function routeIdle() {
   if (!ROUTER) return { status: 503, body: { error: "Private swaps aren't available on this server." } };
-  const [moving, live] = await Promise.all([ROUTER.busy(), anySwapLive()]);
-  if (moving === null || live === null) return { status: 502, body: { error: "Can't reach the private swap service or a daemon. Try again in a moment." } };
+  const moving = await ROUTER.busy();
+  if (moving === null) return { status: 502, body: { error: "Can't reach the private swap service. Try again in a moment." } };
   if (moving) return { status: 409, body: { error: "A private swap is already in progress. Try again when it finishes." } };
-  if (live) return { status: 409, body: { error: "A swap is already in progress. Try again when it finishes." } };
   return null;
 }
 
-// A NEAR swap's start: a sell starts its Ferry swap now (the pair idle, one start); a buy only takes
-// a start (its Ferry swap waits for NEAR Intents, and then for the pair to be idle). A private swap
-// with NEAR Intents at an end is two swap starts: now when it starts now (everything idle), else
-// when NEAR Intents has delivered its coin (and then waits for everything to be idle).
+// A NEAR swap's start: a sell starts its Ferry swap now (one start, and not on a pair a private swap
+// is selling on); a buy only takes a start (its Ferry swap waits for NEAR Intents, then for its
+// daemon to take it). A private swap with NEAR Intents at an end is two swap starts: now when it
+// starts now (no other route moving), else when NEAR Intents has delivered its coin.
 async function nearAdmit(req, { key, kind }) {
   if (kind === "sell") {
-    const busy = await pairIdle(key);
+    const busy = await routeConflict(key);
     if (busy) return busy;
   }
   if (kind === "route") {
@@ -387,16 +427,6 @@ async function nearAdmit(req, { key, kind }) {
     if (busy) return busy;
   }
   return startsRefused(req, kind === "route" || kind === "route-later" ? 2 : 1);
-}
-
-// whether any daemon this server fronts has a swap that isn't over; null if one can't be asked
-async function anySwapLive(keys = Object.keys(DAEMONS)) {
-  try {
-    const lists = await Promise.all(keys.map((k) => daemonJson(k, "/api/swaps")));
-    return lists.some((l) => l.status === 200 && Array.isArray(l.body) && l.body.some((s) => !s.outcome));
-  } catch {
-    return null;
-  }
 }
 
 setInterval(() => {
@@ -549,22 +579,13 @@ async function guard(key, path, req, res) {
       }
       receive = f.json;
     }
-    // one live swap per pair, whichever way: a start waits for every swap on the pair's daemons
-    // (in a local demo one is the other's maker, which finishes a moment after the taker)
-    let lists;
-    try {
-      lists = await Promise.all(samePair(key, EXTRA).map((k) => daemonJson(k, "/api/swaps")));
-    } catch {
-      json(res, 502, { error: "Can't reach the daemon. Is it running?" });
-      return false;
-    }
-    if (lists.some((l) => l.status === 200 && Array.isArray(l.body) && l.body.some((s) => !s.outcome))) {
-      json(res, 409, { error: "A swap is already in progress on the demo. Try again when it finishes." });
-      return false;
-    }
-    // a route between its two swaps holds ZEC on one of these daemons: nothing else may spend it
-    if (ROUTER && (await ROUTER.busy())) {
-      json(res, 409, { error: "A private swap is in progress on the demo. Try again when it finishes." });
+    // Several swaps run side by side: the daemon (and its partner) take as many as their free funds
+    // and --max-swaps allow, and answer 409 "busy" past that (said plainly on the way back, in
+    // proxy()). The one thing that waits: a sell on the pair a private swap is selling ZEC on, whose
+    // bought ZEC sits unreserved in this daemon's wallet.
+    const conflict = await routeConflict(key);
+    if (conflict) {
+      json(res, conflict.status, conflict.body);
       return false;
     }
     if (!takeStarts(req, res, 1)) return false;
@@ -693,12 +714,15 @@ async function proxy(key, path, search, req, res) {
     if (String(up.headers["content-type"] ?? "").startsWith("text/event-stream")) out["x-accel-buffering"] = "no";
     // the body may be rewritten below, so its length is recomputed by Node
     const sse = String(up.headers["content-type"] ?? "").startsWith("text/event-stream");
-    if (path === "/api/status" && up.statusCode === 200) delete out["content-length"];
+    // a start the daemon (or its partner) can't take now: said plainly (busyBody)
+    const busy = req.method === "POST" && path === "/api/swaps" && up.statusCode === 409;
+    if ((path === "/api/status" && up.statusCode === 200) || busy) delete out["content-length"];
     if ((up.statusCode ?? 502) >= 300) req.ferryRefused?.();
     res.writeHead(up.statusCode ?? 502, out);
     // what the node sent out reaches its owner's page only
     if (sse && path === "/api/events") rewriteEvents(up, res, "status", clampOffer, ownRefusal(req) ? ["withdrawal"] : []);
     else if (path === "/api/status" && up.statusCode === 200) rewriteJson(up, res);
+    else if (busy) rewriteJson(up, res, busyBody);
     else up.pipe(res);
     // a daemon that dies mid-stream must end the browser's event stream, so EventSource reconnects
     up.on("close", () => {
@@ -738,22 +762,11 @@ async function routerGuard(path, req, res) {
     deny(res, "This origin may not use the Ferry demo");
     return false;
   }
-  // nothing else moves while a route starts or retries its second swap: no other route, no swap
+  // one route moving at a time; ordinary swaps don't hold one back (routeIdle)
   const idle = async () => {
-    const [moving, live] = await Promise.all([ROUTER.busy(), anySwapLive()]);
-    if (moving === null || live === null) {
-      json(res, 502, { error: "Can't reach the private swap service or a daemon. Try again in a moment." });
-      return false;
-    }
-    if (moving) {
-      json(res, 409, { error: "A private swap is already in progress on the demo. Try again when it finishes." });
-      return false;
-    }
-    if (live) {
-      json(res, 409, { error: "A swap is already in progress on the demo. Try again when it finishes." });
-      return false;
-    }
-    return true;
+    const no = await routeIdle();
+    if (no) json(res, no.status, no.body);
+    return !no;
   };
 
   if (path === "/api/routes") {
@@ -779,7 +792,7 @@ async function routerGuard(path, req, res) {
   const m = path.match(new RegExp(`^/api/routes/(${ROUTE_ID})/(continue|stop)$`));
   if (m && m[2] === "stop") return "";
   if (m) {
-    // "Finish now": out of holding, a new second swap (one start, everything idle); during the
+    // "Finish now": out of holding, a new second swap (one start, no other route moving); during the
     // pause, the same second swap sooner. Always on the route's own terms: no body gets through.
     let route;
     try {

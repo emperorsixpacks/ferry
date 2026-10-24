@@ -80,8 +80,9 @@ export function pairsBody(extras, { mainSell = "auto", mainBuy = "auto" } = {}) 
   };
 }
 
-// The daemons that hold the same pair as `key`: a start on one waits for every swap on both
-// (in a local demo, one is the other's maker).
+// The daemons that hold the same pair as `key` (in a local demo, one is the other's maker). Starts
+// no longer wait for them: each daemon takes as many swaps at once as its funds and --max-swaps
+// allow.
 export function samePair(key, extras) {
   if (key === "z" || key === "b") return ["z", "b"];
   const d = extras.find((x) => x.key === key);

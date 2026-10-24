@@ -125,14 +125,22 @@ function summarize(m, index, offer, now) {
   const pair = token ? `ZEC/${token}` : offer?.coin === "ltc" ? "ZEC/LTC" : offer?.coin === "btc" ? "ZEC/BTC" : m.pair;
   // a public chain's network names its chain; a local one (anvil) leaves it to the operator
   const chain = offer?.counter === "evm" ? (NETWORK_CHAIN[offer?.network] ?? m.chain) : null;
+  // how many more swaps it takes right now (ferryd --max-swaps, less the swaps it runs); null from a
+  // maker that doesn't say (an older ferryd)
+  const slots = offer?.free_slots;
+  const freeSlots = Number.isSafeInteger(slots) && slots >= 0 ? slots : null;
+  const open = rate != null && making && !paused;
   return {
     index,
     name: m.name,
     pair,
     chain,
     online: rate != null,
-    // can take a swap right now
-    available: rate != null && making && !paused,
+    // can take a swap right now: making offers, not paused, not full
+    available: open && freeSlots !== 0,
+    // making offers, but already running as many swaps as it takes at once
+    busy: open && freeSlots === 0,
+    free_slots: freeSlots,
     paused,
     role: offer?.role === "Z" || offer?.role === "B" ? offer.role : null,
     rate_sat_per_zec: rate,
@@ -154,6 +162,8 @@ function offline(m, index, error) {
     chain: m.chain,
     online: false,
     available: false,
+    busy: false,
+    free_slots: null,
     paused: false,
     role: null,
     rate_sat_per_zec: null,

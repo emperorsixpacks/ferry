@@ -277,7 +277,15 @@ function makers(): Plugin {
         });
         res.statusCode = up.status;
         res.setHeader("content-type", up.headers.get("content-type") ?? "application/json");
-        res.end(await up.text());
+        const text = await up.text();
+        // a start the daemon or its partner can't take now ("code": "busy"), said as server/prod.mjs says it
+        let busy = false;
+        try {
+          busy = up.status === 409 && JSON.parse(text)?.code === "busy";
+        } catch {
+          /* not JSON */
+        }
+        res.end(busy ? JSON.stringify({ error: "Every partner is busy right now. Try again in a few minutes.", code: "busy" }) : text);
       } catch {
         send(res, 502, { error: "Can't reach the daemon. Is it running?" });
       }
