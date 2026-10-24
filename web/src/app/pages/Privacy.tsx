@@ -636,10 +636,13 @@ const LIMITS: [string, string][] = [
     "Every public chain shows its own amounts and times. In a route, the amount in and the amount out sit near the two coins' price ratio, minutes to hours apart, and on a quiet chain an analyst can test the few candidates. Standard amounts (fixed sizes at random times) blur this; on an EVM chain, where every part pays the same account, the parts can still be added back up.",
   ],
   ["Your swap partner", "It learns the amounts and the deadlines, and your IP address, because the two Ferry nodes talk directly. Use Tor or a VPN if that matters."],
-  ["Partners who compare notes", "A route uses a different partner for each swap, but nobody can prove two names aren't one operator. Two partners who share notes can link your swaps."],
+  [
+    "Partners who compare notes",
+    "A route uses a different partner for each swap, but nobody can prove two names aren't one operator. Two partners who share notes can link your swaps. Today every partner is run by the Ferry team.",
+  ],
   ["On Base, a swap looks like a swap", "Every step there is a public call to Ferry's contract, with the amount. Your node uses one account for its swaps there, so they link to each other."],
   ["A called-off swap shows its shape", "On Bitcoin, only a swap that completes looks ordinary. A refund or a penalty is visibly a swap."],
-  ["Early software", "Ferry has run on test networks only, and hasn't been independently reviewed."],
+  ["Early software", "Ferry has run on test networks only: one live swap on public test networks, and local tests. Nothing on mainnet, and no independent review."],
 ];
 
 function Limits() {
@@ -696,8 +699,8 @@ function Evidence() {
         <div className="mt-10 grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_minmax(0,1fr)]">
           <Proof title="A real Ferry swap, on public test networks" date="2026-10-20">
             <p>
-              Two Ferry nodes swapped 0.05 ZEC for 2 USDC. On Base Sepolia, both steps are calls to Ferry's contract that anyone can open. On the Zcash testnet, the two
-              transactions are shielded.
+              Two Ferry nodes, both ours, swapped 0.05 test ZEC for 2 test USDC. On Base Sepolia, both steps are calls to Ferry's contract that anyone can open. On the
+              Zcash testnet, the two transactions are shielded.
             </p>
             <ul className="mt-4 space-y-2">
               <ProofRow mark={<ChainLogo id="base" size={16} />} label="The lock">
