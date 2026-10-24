@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowRight, GearSix } from "@phosphor-icons/react";
+import { ArrowRight, ArrowsLeftRight, GearSix } from "@phosphor-icons/react";
 import { counterBalance, pairChain, startSwap, type Role, type RouteView, type Status, type SwapView } from "@/api";
 import { CHAIN_NAMES, amountIn, coin, zec } from "@/format";
 import { Link, navigate } from "@/router";
@@ -23,6 +23,7 @@ import { following, nearAssetOf, usePathCtx, useSelection, type CardProps, type 
 import { plainSummary } from "../lib/progress";
 import { secondsLeft, useQuotes, withFirm } from "../lib/quotes";
 import { isRunning, legSwapIds, routeSummary, useRoutes } from "../lib/routes";
+import { useActivityRows } from "./Activity";
 
 // /app: one swap card for any two coins. Sell defaults to shielded ZEC and Buy to the first coin
 // this server sells it for; both pills open the same picker (shielded ZEC, Ferry's coins, then more
@@ -35,7 +36,8 @@ import { isRunning, legSwapIds, routeSummary, useRoutes } from "../lib/routes";
 //   NEAR Intents at an end    a private swap with NEAR Intents before it, after it or both (ComboCard)
 // What this server can't run stays on the card, looking the same, with one sentence on why
 // (OffCard). Under the amounts, the path line says who runs each part and how long it takes; under
-// the card, one honest line says what stays private.
+// the card, one honest line says what stays private. Beside the card (below it on a phone), "Recent
+// activity": the latest swaps of every kind, each opening its progress page.
 
 // what the ZEC lock's network fee needs on top of the amount (ferry-zec's SEND_FEE_RESERVE)
 const ZEC_FEE_RESERVE = 50_000;
@@ -72,23 +74,68 @@ export function AppHome() {
     else if (path.kind === "route-near" || path.kind === "near-route" || path.kind === "near-near") card = <ComboCard key={path.kind} {...props} />;
     else card = <OffCard {...props} />;
   }
+  // the swap card on the left (at its own width), "Recent activity" on the right; on phones the panel
+  // goes below the card. The banner for a swap in progress shows on phones only: on a wide screen
+  // the panel already lists it first, with its live status, right beside the card.
   return (
     <Layout>
-      <div className="mx-auto w-full max-w-[480px]">
-        {moving ? (
-          <RouteBanner route={moving} />
-        ) : live ? (
-          <LiveBanner swap={live} status={d.status} />
-        ) : comboLive ? (
-          <Banner to={`/app/combo/${comboLive.id}`} title={comboLive.state === "deposit" ? "A swap is waiting for your deposit" : comboLive.state === "holding" ? "Your private swap is waiting for you" : "You have a private swap in progress"} line={comboSummary(comboLive)} pulse={comboLive.state !== "holding"} />
-        ) : nearLive ? (
-          <Banner to={`/app/near/${nearLive.id}`} title={nearLive.state === "deposit" ? "A swap is waiting for your deposit" : nearLive.state === "holding" ? "Your NEAR Intents swap is waiting for you" : "You have a swap in progress"} line={nearSummary(nearLive)} pulse={nearLive.state !== "holding"} />
-        ) : holding ? (
-          <RouteBanner route={holding} />
-        ) : null}
-        {card ?? <OffCard loading />}
+      <div className="mx-auto flex w-full max-w-[480px] flex-col gap-8 lg:max-w-[960px] lg:flex-row lg:items-start lg:gap-10">
+        <div className="w-full min-w-0 lg:w-[480px] lg:shrink-0">
+          <div className="lg:hidden">
+            {moving ? (
+              <RouteBanner route={moving} />
+            ) : live ? (
+              <LiveBanner swap={live} status={d.status} />
+            ) : comboLive ? (
+              <Banner to={`/app/combo/${comboLive.id}`} title={comboLive.state === "deposit" ? "A swap is waiting for your deposit" : comboLive.state === "holding" ? "Your private swap is waiting for you" : "You have a private swap in progress"} line={comboSummary(comboLive)} pulse={comboLive.state !== "holding"} />
+            ) : nearLive ? (
+              <Banner to={`/app/near/${nearLive.id}`} title={nearLive.state === "deposit" ? "A swap is waiting for your deposit" : nearLive.state === "holding" ? "Your NEAR Intents swap is waiting for you" : "You have a swap in progress"} line={nearSummary(nearLive)} pulse={nearLive.state !== "holding"} />
+            ) : holding ? (
+              <RouteBanner route={holding} />
+            ) : null}
+          </div>
+          {card ?? <OffCard loading />}
+        </div>
+        <aside className="w-full min-w-0 lg:flex-1 lg:pt-12">
+          <RecentActivity />
+        </aside>
       </div>
     </Layout>
+  );
+}
+
+// "Recent activity": the latest few of the person's swaps, every kind, each row opening its
+// progress page; the rest on /app/activity.
+function RecentActivity() {
+  const rows = useActivityRows();
+  const shown = rows.slice(0, 7);
+  return (
+    <section aria-labelledby="recent-title" className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(24,24,27,0.04)]" data-recent>
+      <div className="flex items-center justify-between gap-3 px-5 pt-4 pb-3">
+        <h2 id="recent-title" className="text-[15px] font-semibold tracking-tight text-slate-900">
+          Recent activity
+        </h2>
+        <Link to="/app/activity" className="inline-flex items-center gap-1 rounded text-sm font-medium text-slate-600 transition-colors hover:text-slate-900">
+          View all
+          <ArrowRight size={12} weight="bold" aria-hidden />
+        </Link>
+      </div>
+      {shown.length === 0 ? (
+        <div className="border-t border-slate-100 px-6 pt-8 pb-10 text-center">
+          <span className="mx-auto flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-100 text-slate-500">
+            <ArrowsLeftRight size={18} weight="bold" aria-hidden />
+          </span>
+          <p className="mt-3 text-sm font-medium text-slate-900">Your swaps will show up here</p>
+          <p className="mt-1 text-[13px] text-slate-500">Each one opens its progress, step by step.</p>
+        </div>
+      ) : (
+        <ul className="divide-y divide-slate-100 border-t border-slate-100">
+          {shown.map((r) => (
+            <li key={r.key}>{r.row}</li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

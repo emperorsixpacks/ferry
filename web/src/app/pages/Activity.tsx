@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ArrowRight, ArrowsLeftRight } from "@phosphor-icons/react";
 import { directionOf, getSwaps, isMine, pairChain, pairCoin, type ComboJob, type Direction, type NearJob, type PairId, type RouteView, type Status, type SwapView } from "@/api";
 import { coin, coinOf } from "@/format";
@@ -38,7 +38,18 @@ interface Source {
   status: Status | null;
 }
 
-export function Activity() {
+export interface ActivityRow {
+  at: number;
+  key: string;
+  // still moving (or waiting for the person)
+  live: boolean;
+  row: ReactNode;
+}
+
+// Every swap of the person's, newest first, as rows: this page lists them all, the swap card's
+// "Recent activity" panel the latest few. Live: the followed daemon streams, the others are polled,
+// and private swaps and NEAR swaps come from their own providers.
+export function useActivityRows(): ActivityRow[] {
   const d = useLocal();
   // every daemon this server fronts, each once: the followed one included (it may not be probed yet)
   const sources: Source[] = [];
@@ -85,20 +96,24 @@ export function Activity() {
       return swaps.filter((s) => isMine(s) && !s.route).map((swap) => ({ swap, pair: x.pair, dir: directionOf(swap.role), status: followed ? d.status : x.status, words }));
     })
     .filter((it) => !seen.has(it.swap.id) && !!seen.add(it.swap.id));
-  // swaps and private swaps together, newest first
-  const rows = [
-    ...items.map((it) => ({ at: Date.parse(it.swap.timeline[0]?.at ?? "") || 0, key: `${it.pair}:${it.swap.id}`, row: <Row item={it} onOpen={() => open(it)} /> })),
-    ...routes.list.filter((v) => !comboRoutes.has(v.id)).map((v) => ({ at: v.created_at * 1000, key: v.id, row: <RouteRow route={v} /> })),
-    ...near.jobs.map((j) => ({ at: j.created_at * 1000, key: j.id, row: <NearRow job={j} /> })),
-    ...near.combos.map((j) => ({ at: j.created_at * 1000, key: j.id, row: <ComboRow job={j} /> })),
-  ].sort((x, y) => y.at - x.at);
-
   const open = (it: Item) => {
     if (it.pair !== d.pair) d.choosePair(it.pair, it.dir);
     if (it.dir !== d.dir) d.chooseDirection(it.dir);
     navigate(`/app/swap/${it.swap.id}`);
   };
+  const ended = (s: string) => ["done", "failed", "refunded", "expired"].includes(s);
 
+  // swaps and private swaps together, newest first
+  return [
+    ...items.map((it) => ({ at: Date.parse(it.swap.timeline[0]?.at ?? "") || 0, key: `${it.pair}:${it.swap.id}`, live: !it.swap.outcome, row: <Row item={it} onOpen={() => open(it)} /> })),
+    ...routes.list.filter((v) => !comboRoutes.has(v.id)).map((v) => ({ at: v.created_at * 1000, key: v.id, live: !ended(v.state), row: <RouteRow route={v} /> })),
+    ...near.jobs.map((j) => ({ at: j.created_at * 1000, key: j.id, live: !ended(j.state), row: <NearRow job={j} /> })),
+    ...near.combos.map((j) => ({ at: j.created_at * 1000, key: j.id, live: !ended(j.state), row: <ComboRow job={j} /> })),
+  ].sort((x, y) => y.at - x.at);
+}
+
+export function Activity() {
+  const rows = useActivityRows();
   return (
     <Layout>
       <div className="mx-auto w-full max-w-[640px]">
