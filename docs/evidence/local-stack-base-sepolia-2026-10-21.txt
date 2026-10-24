@@ -1,0 +1,573 @@
+# Ferry: the server deploy (infra/deploy) run on a Mac, 2026-10-21. Swaps through the public web UI
+# on Base Sepolia (chain 84532) and the Zcash testnet: ZEC -> USDC, USDC -> ZEC, ZEC -> WETH,
+# and up to three swaps at once on one pair.
+#
+# What ran: `infra/deploy/deploy.sh local` (docs/DEPLOY.md, "Rehearse locally"): the server's own
+# compose file, images, private networks, read-only containers, secrets and public-demo guard
+# (web/server/prod.mjs, public mode: FERRY_OWN_NODE unset, TRUST_PROXY=1), as compose project
+# "ferry-local". The one difference, infra/deploy/compose.local.yml: Caddy serves
+# https://localhost:7950 on 127.0.0.1 only, with its own local CA, instead of 80/443 with Let's
+# Encrypt. DOMAIN=localhost:7950, so PUBLIC_ORIGIN is that page. The swaps were started by a
+# headless Chromium (Playwright) using the swap card itself: pick the coin, type the amount, press
+# Sell ZEC / Buy ZEC. Their progress was read back through the same web server
+# (GET /daemon/<pair>/api/swaps/<id>), as the page does.
+# Machine: Apple silicon Mac (arm64), Docker 29.1.3 (Docker Desktop, containerd image store),
+# compose 2.40.3, 8 GB and 10 CPUs for Docker; partly on battery, on a slow and dropping network.
+# Code: this branch (worktree-agent-a671a2a06215e8cec) with master merged. Swaps 1-2: master
+# c18e053 (several swaps at once). Swaps 3-4: master fa618c2 (its review fixes) plus this branch's
+# a0b5460 and 579a389. Swaps 5-7, the final code: master 2cd42a8 (finished swaps settle; reads don't
+# wait for a daemon's round) merged in.
+# Settings (infra/deploy/.env, no secrets): COMPOSE_PROFILES=ltc,usdc-base,weth-base;
+# BUY_ZEC=btc,ltc,usdc-base,weth-base (visitors may also buy ZEC); MAX_SWAPS empty (ferryd's
+# default, 4); the defaults for rates and sizes (40 USDC and 0.012 WETH per ZEC, 0.01-0.25 ZEC)
+# and EVM deadlines (t1 45 min, refund window 30 min, margins 5 min, 10 lock confirmations); the
+# demo guard's defaults (0.5 ZEC a swap, 3 swaps per IP and 12 in all per hour), except
+# DEMO_SSE_PER_IP=200 and DEMO_SSE_TOTAL=2000 (Docker Desktop's port forwarding holds closed
+# event streams for minutes: DEPLOY.md, "Rehearse locally").
+# Wallets: ZEC/USDC runs the Base Sepolia accounts and Zcash wallets of the 2026-10-20 live swap
+# (moved from .evm-testnet, whose daemons were stopped first): B 0x63311aC7fb54eebAbDdE5ee2e99971c7b8d6E4bD,
+# Z 0x95713ff5BC7973166F3285Ed1b0574b1A24ec55a, so its Activity starts with that swap. ZEC/BTC runs
+# the .testnet wallets, moved with `deploy.sh local migrate-wallets` (Z holds the 1 TAZ). ZEC/WETH
+# has fresh accounts from `ctl secrets`: B 0x8908B7bd0c6153121578f6ac78bF81069587B591,
+# Z 0x4F6fF6162FA23883DCe2EadC9821113971f458AE.
+# FerryLock 0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef; Circle test USDC
+# 0x036CbD53842c5426634e7929541eC2318f3dCF7e; WETH 0x4200000000000000000000000000000000000006.
+# Times are UTC. Zcash transactions are shielded, so they are given as txids only.
+
+## Funding (test coins only; no key printed or put on a command line)
+# Base Sepolia ETH from the 10-20 deployer's encrypted keystore (cast --keystore), and the WETH
+# maker's wrap with `infra/deploy/ctl wrap-weth 0.002` (its keystore, inside the Foundry image):
+  0.004 ETH  deployer -> WETH B   https://sepolia.basescan.org/tx/0xb782a63dcdefe95c4f2245c2461fc6205fc9920a84b9f686b51a48d6b016cadc
+  0.0015 ETH deployer -> WETH Z   https://sepolia.basescan.org/tx/0xe9cad8dcfe811de3d1eb7be048a693f2e178dd756b9e759224cfa7dd5c0db414
+  wrap 0.002 ETH -> WETH (WETH B) https://sepolia.basescan.org/tx/0x5ef1573bc06ef330afeef63244a28656309c52ec376124637d5465ac1494c073
+# TAZ from the ZEC/BTC taker (1 TAZ) to the other pairs' takers, with ferryd's POST /api/withdraw
+# from inside its container (the public demo refuses withdrawals):
+  0.15 TAZ -> ZEC/USDC Z   Zcash tx 8a98ea9331fe71d97a40d5fe840d9e7df400b8ccbc9d8f1659a48c51efb560cf (fee 0.00025)
+  0.12 TAZ -> ZEC/WETH Z   Zcash tx f588bcc56682541c50c50d46469d56a76c4717ea5e64f385ff10a7760b297c36 (fee 0.0001)
+  0.06 TAZ -> ZEC/WETH Z   Zcash tx 48a306e5558913a6c25f5723b7dc35ccad2ee492662c012e9b156e94ede7a386 (fee 0.0001)
+
+## Smoke checks, through Caddy as a visitor sees them
+$ infra/deploy/deploy.sh local
+[deploy] building and starting (the first build compiles zcash-devtool: allow 20-40 minutes)
+[deploy] done. Follow the sync with: infra/deploy/deploy.sh local status
+# every container healthy within a minute: bitcoind, caddy, web, ferryd-{z,b}, ferryd-{z,b}-usdc-base,
+# ferryd-{z,b}-weth-base (and litecoind, ferryd-{z,b}-ltc once the ltc profile was on)
+$ infra/deploy/ctl pairs
+  ltc        enabled, visitors also buy ZEC (BUY_ZEC)
+  usdc-base  enabled, visitors also buy ZEC (BUY_ZEC)
+  weth-base  enabled, visitors also buy ZEC (BUY_ZEC)
+  ZEC/BTC: visitors also buy ZEC (BUY_ZEC)
+
+$ smoke checks through Caddy (curl --cacert <Caddy's local root>), 20:43
+$ curl -D - https://localhost:7950/healthz
+HTTP/2 200 
+referrer-policy: no-referrer
+referrer-policy: no-referrer
+server: Caddy
+strict-transport-security: max-age=31536000
+x-content-type-options: nosniff
+x-content-type-options: nosniff
+{"ok":true}
+
+$ curl https://localhost:7950/api/pairs
+{"pairs":["ltc","usdc-base","weth-base"],"buy":["ltc","usdc-base","weth-base"],"main":{"sell":true,"buy":true},"routes":null,"node":{"own":false}}
+
+$ curl https://localhost:7950/api/makers   (name, pair, role, online, free slots)
+  Demo maker                 ZEC/BTC   role B online True available True max_zat 50000000 free_slots 4
+  Demo maker (LTC)           ZEC/LTC   role B online True available True max_zat 25000000 free_slots 4
+  Demo maker (USDC)          ZEC/USDC  role B online True available True max_zat 25000000 free_slots 4
+  Demo maker (WETH)          ZEC/WETH  role B online True available True max_zat 25000000 free_slots 4
+  Demo maker (ZEC for BTC)   ZEC/BTC   role Z online True available True max_zat 50000000 free_slots 4
+  Demo maker (ZEC for LTC)   ZEC/LTC   role Z online True available True max_zat 25000000 free_slots 4
+  Demo maker (ZEC for USDC)  ZEC/USDC  role Z online True available True max_zat 25000000 free_slots 4
+  Demo maker (ZEC for WETH)  ZEC/WETH  role Z online True available True max_zat 25000000 free_slots 4
+
+# the public-demo guard (web/server/prod.mjs), each refused before any daemon acts:
+$ POST https://localhost:7950/daemon/usdc-base/api/swaps from Origin https://evil.example
+{"error":"This origin may not use the Ferry demo"}  -> 403
+$ POST https://localhost:7950/daemon/usdc-base/api/swaps {"zec_zat": 60000000} (0.6 ZEC, over the 0.5 ZEC demo cap)
+{"error":"The public demo is limited to 0.50 ZEC per swap"}  -> 400
+$ POST https://localhost:7950/daemon/usdc-base/api/withdraw (sending coins out: own node only)
+{"error":"This works on your own Ferry node only, not on this demo."}  -> 403
+$ GET https://localhost:7950/daemon/usdc-base/api/addresses (own node only)
+{"error":"This works on your own Ferry node only, not on this demo."}  -> 403
+$ GET http://127.0.0.1:7950/ (plain HTTP on the TLS port)
+  -> 400
+
+# (at 19:29, before 2cd42a8, the USDC makers showed offline here: their daemons were stuck on
+# the settle bug. The LTC makers answer their offers with the Litecoin node paused.)
+
+$ infra/deploy/deploy.sh local status   (20:33, 13.7 s; the Litecoin node paused)
+signet node  syncing: block 227978 of 327391 headers (70.04%)
+ferryd Z  zoe: btc 0 sat  zec 66955000 zat  (zec test height 4526698)
+ferryd B  bram: btc 0 sat  zec 0 zat  (zec test height 4526698)
+
+ZEC/LTC  litecoin testnet node not answering
+  ferryd B  bram: 0 LTC  0 ZEC  (litecoin height 0, zec test height 4526655)
+  ferryd Z  zoe: 0 LTC  0 ZEC  (litecoin height 0, zec test height 4526655)
+
+ZEC/USDC  base-sepolia (chain 84532): block 48464906 via https://sepolia.base.org
+  ferryd B  bram 0x63311aC7fb54eebAbDdE5ee2e99971c7b8d6E4bD: 12 USDC  0.00599 ETH  0.1995 ZEC
+  ferryd Z  zoe 0x95713ff5BC7973166F3285Ed1b0574b1A24ec55a: 8 USDC  0.003998 ETH  0.0745 ZEC
+    Z swap 4f513f9376b6...  Claimed            outcome swapped
+    Z swap 53127ea8f31c...  Claimed            outcome swapped
+    Z swap c569d97e645b...  Claimed            outcome swapped
+    Z swap ef6270abb6d2...  Claimed            outcome swapped
+    Z swap fc0d15906a49...  Claimed            outcome swapped
+    B swap 4f513f9376b6...  ZecSwept           outcome swapped
+    B swap 53127ea8f31c...  ZecSwept           outcome swapped
+    B swap c569d97e645b...  ZecSwept           outcome swapped
+    B swap ef6270abb6d2...  ZecSwept           outcome swapped
+    B swap fc0d15906a49...  ZecSwept           outcome swapped
+
+ZEC/WETH  base-sepolia (chain 84532): block 48464909 via https://sepolia.base.org
+  ferryd B  bram 0x8908B7bd0c6153121578f6ac78bF81069587B591: 0.00116 WETH  0.001989 ETH  0.0397 ZEC
+  ferryd Z  zoe 0x4F6fF6162FA23883DCe2EadC9821113971f458AE: 0.00072 WETH  0.001498 ETH  0.0797 ZEC
+    Z swap 3893fbc6a290...  Claimed            outcome swapped
+    Z swap 558784856cb2...  Claimed            outcome swapped
+    Z swap 82f54ee1b4f5...  ZecLocked          outcome None
+    Z swap c0c8a45f1e09...  Claimed            outcome swapped
+    Z swap e3721ea62f6e...  Claimed            outcome swapped
+    Z swap eac3ce674864...  Claimed            outcome swapped
+    B swap 3893fbc6a290...  ZecSwept           outcome swapped
+    B swap 558784856cb2...  ZecSwept           outcome swapped
+    B swap 82f54ee1b4f5...  Locked             outcome None
+    B swap c0c8a45f1e09...  ZecSwept           outcome swapped
+    B swap e3721ea62f6e...  ZecSwept           outcome swapped
+    B swap eac3ce674864...  Claimed            outcome None
+
+
+## What the page said (swap card and progress page, through Caddy)
+# Before swap 1, the card (USDC on Base picked, 0.05 ZEC typed):
+#   Demo maker (USDC) · You have 0.22 ZEC · 2 USDC · 1 ZEC = 40 USDC · firm for 28 s · from Demo
+#   maker (USDC) · Partner online · can take 4 more swaps · Ferry · one swap · about 2-10 min
+# Swap 1 (a sell) at the end: Done · You received 2 USDC · 0.05 ZEC left your shielded wallet ·
+#   Partner locks their USDC (done) · Your ZEC is locked (done) · You receive USDC (done).
+# Swap 2 (a buy), mid-swap: Swapping... Usually about 2-10 min · Your USDC is locked (done) ·
+#   Partner locks their ZEC (now) · Waiting for their ZEC to confirm on Zcash · Usually done by
+#   about 6:27 PM; at the end: You received 0.05 ZEC · It's in your shielded wallet. You paid 2 USDC.
+# Activity after swap 2 (both directions, newest first, one row per swap although both sides are
+# this server's daemons): 2 USDC -> 0.05 ZEC Buy ZEC · Oct 21, 6:17 PM · USDC on Base · Done |
+#   0.05 ZEC -> 2 USDC Sell ZEC · Oct 21, 5:57 PM · Done | 0.05 ZEC -> 2 USDC Sell ZEC · Oct 20,
+#   9:06 AM · Done (the 10-20 live swap, from the moved records).
+# During swap 1 the progress page showed B's side of the swap ("Your USDC is locked ... your 2 USDC
+# comes back"), and after swap 3 "You paid 2400000 BTC": with BUY_ZEC on, both sides of a swap are
+# daemons this server fronts. Fixed in web (aa5004c, f32a8a8); swaps 2 and 5-7 and swap 3's page
+# afterwards showed the visitor's own side throughout.
+
+
+## 1. ZEC -> USDC (sell), through the card
+# swap fc0d15906a49b727c0cbe5eb275407e27d435347a80a002c6b6e381527283237, sell through the swap card, 0.05 ZEC; started 16:57:29 UTC (the click)
+  16:57:33 Z  Sent Propose to B: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  16:57:33 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log. Derived the joint Ironwood address
+  16:57:33 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  16:57:33 B  Received Z's Propose: 0.05 ZEC for 2 USDC
+  16:57:33 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log
+  16:57:33 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  16:57:33 B  Sent Accept with B's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  16:57:42 B  Locked 2 USDC in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0x48267854247987ea762037c1d08de2a69721496629985b86a096c86af8262eb4
+  16:57:44 B  The lock is confirmed. Waiting for Z's ZEC
+  16:57:45 Z  FerryLock holds 2 USDC for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  16:58:17 Z  Sent 0.05 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx 9b36829f5f599924457ccafe34d83026165a3a1ecf0d8c3e7b9a4c03934b6273
+  17:00:17 B  Found the lock note at the joint address with the shared viewing key
+  17:00:46 B  Lock note has 3 confirmations and holds 0.05 ZEC
+  17:00:46 B  Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+  17:00:47 Z  Received B's Ready(id) signature and checked it recovers to B's account
+  17:00:49 Z  Claimed 2 USDC from FerryLock with B's Ready signature. The claim publishes z in its calldata
+               Base tx  https://sepolia.basescan.org/tx/0xceb9220842f08432d82d6175cc285326cb037468879d40020972a28b5bf3f2b3
+  17:00:53 Z  Swap complete. 2 USDC is at Z's address
+  17:00:54 B  Saw Z's claim on FerryLock: z is now public
+  17:00:54 B  Read z from Z's claim (calldata and event) and checked it against Z's points. B can now spend the joint Ironwood note
+  17:00:54 B  Waiting 17s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund
+  17:03:09 B  Swept the joint note to B's own shielded address, signing with ask = σ(z + b)
+               Zcash tx 3adf9f9f568dd017cea0b6307b3427c24468f34c60bb7e889cce0802de682855
+  17:05:03 B  Swap complete. B holds 0.05 ZEC in its own Ironwood notes
+# outcome: Z swapped, B swapped; amounts {"zec_zat": 5000000, "btc_sat": 2000000}
+# from the click: counter-coin lock seen by Z 0 min 15 s; ZEC lock sent 0 min 47 s; Z's claim 3 min 19 s; B's sweep 5 min 39 s; both done 7 min 35 s
+
+
+## 2. USDC -> ZEC (buy, BUY_ZEC on), through the card
+# swap 4f513f9376b6afebccbfbec3ad599604e1768a566b795e6f01ed4df300b9af9c, buy through the swap card, 0.05 ZEC; started 17:17:08 UTC (the click)
+  17:17:18 Z  Received B's Propose: 0.05 ZEC for 2 USDC
+  17:17:18 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log
+  17:17:18 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  17:17:18 Z  Sent Accept with Z's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  17:17:18 B  Sent Propose to Z: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  17:17:18 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log. Derived the joint Ironwood address
+  17:17:18 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  17:17:25 B  Locked 2 USDC in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0xc78d4e348e9e01ff3474182e59c19af0c85331a7d615f747dee26bfe3c2f1adb
+  17:17:35 B  The lock is confirmed. Waiting for Z's ZEC
+  17:17:36 Z  FerryLock holds 2 USDC for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  17:17:57 Z  Sent 0.05 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx c38a6186491e8c2f6e525e47590a2fa8bd5fb0c3212406a35fdfc2effeea74ed
+  17:18:47 B  Found the lock note at the joint address with the shared viewing key
+  17:18:58 B  Lock note has 3 confirmations and holds 0.05 ZEC
+  17:18:58 B  Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+  17:19:01 Z  Received B's Ready(id) signature and checked it recovers to B's account
+  17:19:05 Z  Claimed 2 USDC from FerryLock with B's Ready signature. The claim publishes z in its calldata
+               Base tx  https://sepolia.basescan.org/tx/0x5d87b3c47eb232d9549c38267a2020fef7bdf91944d021aa3d42dcc1a94683c5
+  17:19:06 Z  Swap complete. 2 USDC is at Z's address
+  17:19:17 B  Saw Z's claim on FerryLock: z is now public
+  17:19:17 B  Read z from Z's claim (calldata and event) and checked it against Z's points. B can now spend the joint Ironwood note
+  17:19:17 B  Waiting 16s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund
+  17:22:06 B  Swept the joint note to B's own shielded address, signing with ask = σ(z + b)
+               Zcash tx 948d6ad655e5a4c0274f74a6fe4a2d4f8f4a37fb1cf8a5ad6ca1cce367fe57cd
+  17:24:06 B  Swap complete. B holds 0.05 ZEC in its own Ironwood notes
+# outcome: Z swapped, B swapped; amounts {"zec_zat": 5000000, "btc_sat": 2000000}
+# from the click: counter-coin lock seen by Z 0 min 27 s; ZEC lock sent 0 min 48 s; Z's claim 1 min 56 s; B's sweep 4 min 57 s; both done 6 min 59 s
+
+
+## 3. ZEC -> WETH (sell), through the card
+# swap 558784856cb224e61c527f63793d013f815c07903c7799a922c214d275f5c465, sell through the swap card, 0.02 ZEC; started 19:34:58 UTC (the click)
+  19:35:24 Z  Sent Propose to B: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  19:35:24 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log. Derived the joint Ironwood address
+  19:35:24 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  19:35:24 B  Received Z's Propose: 0.02 ZEC for 0.00024 WETH
+  19:35:24 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log
+  19:35:24 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  19:35:24 B  Sent Accept with B's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  19:36:27 B  Locked 0.00024 WETH in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0x3cadaf1ebfef81d186961633c2b1e07b6e5366d844d168b4f4e2899488e42593
+  19:36:29 Z  FerryLock holds 0.00024 WETH for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  19:36:52 B  The lock is confirmed. Waiting for Z's ZEC
+  19:37:39 Z  Sent 0.02 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx 1b6abf2d2a8c5fade9ff7bcdb8e9b6bb5833fa8390bcd3203a09066e554f8d43
+  19:38:36 B  Found the lock note at the joint address with the shared viewing key
+  19:39:05 B  Lock note has 3 confirmations and holds 0.02 ZEC
+  19:39:05 B  Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+  19:39:06 Z  Received B's Ready(id) signature and checked it recovers to B's account
+  19:39:47 B  Saw Z's claim on FerryLock: z is now public
+               Base tx  https://sepolia.basescan.org/tx/0x910543dc5b581f0cd56a5ebcc50b90e9963b8d1b8c9cf228ee0701d5b3a28c37
+  19:39:47 B  Read z from Z's claim (calldata and event) and checked it against Z's points. B can now spend the joint Ironwood note
+  19:39:47 B  Waiting 10s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund
+  19:39:57 Z  Saw Z's claim on FerryLock: z is now public
+  19:39:57 Z  Swap complete. 0.00024 WETH is at Z's address
+  19:45:59 B  Swept the joint note to B's own shielded address, signing with ask = σ(z + b)
+               Zcash tx d8fd28325e7bf15de638e383f897f6f9e75bacf78e635cc47a182d909fb3e98e
+  19:47:11 B  Swap complete. B holds 0.02 ZEC in its own Ironwood notes
+# outcome: Z swapped, B swapped; amounts {"zec_zat": 2000000, "btc_sat": 240000000000000}
+# from the click: counter-coin lock seen by Z 1 min 30 s; ZEC lock sent 2 min 40 s; Z's claim 4 min 48 s (seen); B's sweep 11 min 00 s; both done 12 min 13 s
+# On the slow network Z's claim send did not return in time; the claim landed, Z found it on
+# FerryLock ("Saw Z's claim") and finished: the claim time above is when Z saw it.
+
+
+## 4a. Two at once on ZEC/WETH: tab 1
+# swap 3893fbc6a290331cca22d8e6706d5c291b2710e0c323e4304cb6d9840d1f0336, sell through the swap card, 0.01 ZEC; started 19:51:13 UTC (the click)
+  19:51:39 Z  Sent Propose to B: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  19:51:39 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log. Derived the joint Ironwood address
+  19:51:39 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  19:51:39 B  Received Z's Propose: 0.01 ZEC for 0.00012 WETH
+  19:51:39 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log
+  19:51:39 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  19:51:39 B  Sent Accept with B's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  19:53:28 B  Locked 0.00012 WETH in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0xab99f745c84cee2f47f43b7f11f96fca2a24d777822b53fada57ebd988aeefc3
+  19:53:53 B  The lock is confirmed. Waiting for Z's ZEC
+  19:54:10 Z  FerryLock holds 0.00012 WETH for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  19:55:09 Z  Sent 0.01 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx 9295c581336962550a0b7add0f85fc305bf7166bef2015af50211b32e07563a7
+  19:57:04 B  Found the lock note at the joint address with the shared viewing key
+  19:57:04 B  Lock note has 3 confirmations and holds 0.01 ZEC
+  19:57:04 B  Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+  19:57:06 Z  Received B's Ready(id) signature and checked it recovers to B's account
+  19:57:21 Z  Claimed 0.00012 WETH from FerryLock with B's Ready signature. The claim publishes z in its calldata
+               Base tx  https://sepolia.basescan.org/tx/0x805de2d9084f50aff83635e7fd7ba0c7a3cbb8e8e09f1414d544a057c038935b
+  19:57:33 Z  Swap complete. 0.00012 WETH is at Z's address
+  19:57:53 B  Saw Z's claim on FerryLock: z is now public
+  19:57:53 B  Read z from Z's claim (calldata and event) and checked it against Z's points. B can now spend the joint Ironwood note
+  19:57:53 B  Waiting 13s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund
+  20:00:49 B  Swept the joint note to B's own shielded address, signing with ask = σ(z + b)
+               Zcash tx 7dd45aa4f95f1a5d31a5994349d1a751270bf84a793ce872a3a1c08f8755138a
+  20:01:57 B  Swap complete. B holds 0.01 ZEC in its own Ironwood notes
+# outcome: Z swapped, B swapped; amounts {"zec_zat": 1000000, "btc_sat": 120000000000000}
+# from the click: counter-coin lock seen by Z 2 min 56 s; ZEC lock sent 3 min 55 s; Z's claim 6 min 07 s; B's sweep 9 min 35 s; both done 11 min 23 s
+
+
+## 4b. Two at once on ZEC/WETH: tab 3, started while 4a ran
+# swap e3721ea62f6e61ab2eb38e49a18c299e6133cb7e55ca6b5951f24c04732b9c33, sell through the swap card, 0.01 ZEC; started 19:53:43 UTC (the click)
+  19:54:30 B  Received Z's Propose: 0.01 ZEC for 0.00012 WETH
+  19:54:30 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log
+  19:54:30 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  19:54:30 B  Sent Accept with B's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  19:54:31 Z  Sent Propose to B: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  19:54:31 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log. Derived the joint Ironwood address
+  19:54:31 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  19:55:33 B  Locked 0.00012 WETH in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0xe0243adaeee6d22eb6361c39744ce74e6b49e55bb91b42d617e6aac655a50a09
+  19:55:47 Z  FerryLock holds 0.00012 WETH for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  19:56:17 Z  Sent 0.01 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx f8aebac796395019fade77e6fd90890ecf319ad7a239721d0975d6dfb9f9dc4e
+  19:56:30 B  The lock is confirmed. Waiting for Z's ZEC
+  19:57:04 B  Found the lock note at the joint address with the shared viewing key
+  19:57:04 B  Lock note has 3 confirmations and holds 0.01 ZEC
+  19:57:04 B  Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+  19:57:44 Z  Received B's Ready(id) signature and checked it recovers to B's account
+  19:58:08 B  Saw Z's claim on FerryLock: z is now public
+               Base tx  https://sepolia.basescan.org/tx/0xc57509e0d5c79945f0f111b96f658effdd624305b22193e84e10b1d3c71e31b4
+  19:58:08 B  Read z from Z's claim (calldata and event) and checked it against Z's points. B can now spend the joint Ironwood note
+  19:58:08 B  Waiting 15s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund
+  19:58:20 Z  Claimed 0.00012 WETH from FerryLock with B's Ready signature. The claim publishes z in its calldata
+  19:58:54 Z  Swap complete. 0.00012 WETH is at Z's address
+  20:01:28 B  Swept the joint note to B's own shielded address, signing with ask = σ(z + b)
+               Zcash tx a56e9d14c4ae310be711bd46a8b3691f43563864beadcbca4e9c42a2d295771d
+  20:01:57 B  Swap complete. B holds 0.01 ZEC in its own Ironwood notes
+# outcome: Z swapped, B swapped; amounts {"zec_zat": 1000000, "btc_sat": 120000000000000}
+# from the click: counter-coin lock seen by Z 2 min 04 s; ZEC lock sent 2 min 34 s; Z's claim 4 min 37 s; B's sweep 7 min 45 s; both done 8 min 54 s
+
+
+## 5. ZEC -> USDC (sell) on the final code; the start that came after it was busy
+# swap c569d97e645bed6185e4e41e25e8e9e01e9ee39df2d46c6ceab72082841adf94, sell through the swap card, 0.02 ZEC; started 20:09:05 UTC (the click)
+  20:09:17 Z  Sent Propose to B: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  20:09:17 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log. Derived the joint Ironwood address
+  20:09:17 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  20:09:17 B  Received Z's Propose: 0.03 ZEC for 1.2 USDC
+  20:09:17 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log
+  20:09:17 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  20:09:17 B  Sent Accept with B's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  20:09:49 B  Locked 1.2 USDC in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0x7b090d1a05963a2e942e209a820bcb43d4815053624672a610088a9d36a12eae
+  20:09:52 Z  FerryLock holds 1.2 USDC for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  20:10:02 B  The lock is confirmed. Waiting for Z's ZEC
+  20:11:27 Z  Sent 0.03 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx 47788569d3247d91861db91c915d0df723c8366a8102c00289e9ddffb197862c
+  20:13:17 B  Found the lock note at the joint address with the shared viewing key
+  20:13:24 B  Lock note has 3 confirmations and holds 0.03 ZEC
+  20:13:24 B  Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+  20:13:27 Z  Received B's Ready(id) signature and checked it recovers to B's account
+  20:13:56 Z  Claimed 1.2 USDC from FerryLock with B's Ready signature. The claim publishes z in its calldata
+               Base tx  https://sepolia.basescan.org/tx/0x3d54ceb5e4337c99e5e16520e8e1924ac954d6986ff07f900d88878052ae9657
+  20:14:02 Z  Swap complete. 1.2 USDC is at Z's address
+  20:14:05 B  Saw Z's claim on FerryLock: z is now public
+  20:14:05 B  Read z from Z's claim (calldata and event) and checked it against Z's points. B can now spend the joint Ironwood note
+  20:14:05 B  Waiting 8s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund
+  20:16:35 B  Swept the joint note to B's own shielded address, signing with ask = σ(z + b)
+               Zcash tx 2587807bdf07000b75663059e778238e739da22fe3c84e477090c7009aad501a
+  20:17:35 B  Swap complete. B holds 0.03 ZEC in its own Ironwood notes
+# outcome: Z swapped, B swapped; amounts {"zec_zat": 3000000, "btc_sat": 1200000}
+# from the click: counter-coin lock seen by Z 0 min 46 s; ZEC lock sent 2 min 21 s; Z's claim 4 min 50 s; B's sweep 7 min 29 s; both done 8 min 30 s
+
+
+## 6. USDC -> ZEC (buy) on the final code
+# swap 53127ea8f31ccd063558437d3a2c6fcfd9f675a2fe3d74485d930a5948791335, buy through the swap card, 0.02 ZEC; started 20:17:58 UTC (the click)
+  20:18:28 Z  Received B's Propose: 0.02 ZEC for 0.8 USDC
+  20:18:28 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log
+  20:18:28 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  20:18:28 Z  Sent Accept with Z's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  20:18:29 B  Sent Propose to Z: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  20:18:29 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log. Derived the joint Ironwood address
+  20:18:29 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  20:19:05 B  Locked 0.8 USDC in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0xe24c38cda5df9845f82059565e91a6303804590ba173a5a7fedd4340b4537f60
+  20:19:12 Z  FerryLock holds 0.8 USDC for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  20:19:30 B  The lock is confirmed. Waiting for Z's ZEC
+  20:19:44 Z  Sent 0.02 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx 9fe0f60d5db1d9972afba37a2ffbd60627da2f9e58c5e66a92bf36a2974f6eb3
+  20:20:58 B  Found the lock note at the joint address with the shared viewing key
+  20:21:23 B  Lock note has 3 confirmations and holds 0.02 ZEC
+  20:21:23 B  Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+  20:21:38 Z  Received B's Ready(id) signature and checked it recovers to B's account
+  20:22:09 Z  Claimed 0.8 USDC from FerryLock with B's Ready signature. The claim publishes z in its calldata
+               Base tx  https://sepolia.basescan.org/tx/0x9d8447c75d74a600c91c708e8deecf416de0ed9e37fd6cc1052d8c09da8239d2
+  20:22:12 B  Saw Z's claim on FerryLock: z is now public
+  20:22:12 B  Read z from Z's claim (calldata and event) and checked it against Z's points. B can now spend the joint Ironwood note
+  20:22:12 B  Waiting 5s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund
+  20:22:22 Z  Swap complete. 0.8 USDC is at Z's address
+  20:23:09 B  Swept the joint note to B's own shielded address, signing with ask = σ(z + b)
+               Zcash tx c10df535488b21b4010aa9cf65600229d96749299f18851843a4a01dbc82c6de
+  20:25:02 B  Swap complete. B holds 0.02 ZEC in its own Ironwood notes
+# outcome: Z swapped, B swapped; amounts {"zec_zat": 2000000, "btc_sat": 800000}
+# from the click: counter-coin lock seen by Z 1 min 13 s; ZEC lock sent 1 min 45 s; Z's claim 4 min 10 s; B's sweep 5 min 10 s; both done 7 min 05 s
+
+
+## 7a. Final code, two (then three) at once on ZEC/WETH: X
+# swap c0c8a45f1e0994ef537f35333ed6b8274b8273c3a7c31e983484cb6905077e2c, sell through the swap card, 0.01 ZEC; started 20:26:22 UTC (the click)
+  20:26:34 Z  Sent Propose to B: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  20:26:34 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log. Derived the joint Ironwood address
+  20:26:34 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  20:26:34 B  Received Z's Propose: 0.01 ZEC for 0.00012 WETH
+  20:26:34 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log
+  20:26:34 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  20:26:34 B  Sent Accept with B's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  20:27:00 B  Locked 0.00012 WETH in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0xfcb0d3e145c909af81cd082c15682b0a282d2f53c8671f7d62c2b696aa715070
+  20:27:03 Z  FerryLock holds 0.00012 WETH for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  20:27:05 B  The lock is confirmed. Waiting for Z's ZEC
+  20:27:38 Z  Sent 0.01 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx fc89480898b4f4a244ed61526ff7beaaba30ab5004b68aaf5b97c99d8148542c
+  20:28:56 B  Found the lock note at the joint address with the shared viewing key
+  20:29:55 B  Lock note has 3 confirmations and holds 0.01 ZEC
+  20:29:55 B  Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+  20:30:13 Z  Received B's Ready(id) signature and checked it recovers to B's account
+  20:30:28 Z  Claimed 0.00012 WETH from FerryLock with B's Ready signature. The claim publishes z in its calldata
+               Base tx  https://sepolia.basescan.org/tx/0xe99e8996f41abb8935ca52184225d35918424f33e82cab8c0f2999ea24df7d16
+  20:30:30 B  Saw Z's claim on FerryLock: z is now public
+  20:30:30 B  Read z from Z's claim (calldata and event) and checked it against Z's points. B can now spend the joint Ironwood note
+  20:30:30 B  Waiting 9s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund
+  20:30:33 Z  Swap complete. 0.00012 WETH is at Z's address
+  20:32:13 B  Swept the joint note to B's own shielded address, signing with ask = σ(z + b)
+               Zcash tx 33495e3a1ccc06931bbd4d1ed7edccefaf64daa5305976dd0e5bd33bf37f8148
+  20:32:51 B  Swap complete. B holds 0.01 ZEC in its own Ironwood notes
+# outcome: Z swapped, B swapped; amounts {"zec_zat": 1000000, "btc_sat": 120000000000000}
+# from the click: counter-coin lock seen by Z 0 min 41 s; ZEC lock sent 1 min 16 s; Z's claim 4 min 06 s; B's sweep 5 min 51 s; both done 7 min 16 s
+
+
+## 7b. Final code: Y, started while X ran
+# swap eac3ce674864842989d7c5982ab48a01b4881788c7cec87536184dd212dc6169, sell through the swap card, 0.01 ZEC; started 20:28:56 UTC (the click)
+  20:29:05 Z  Sent Propose to B: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  20:29:05 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log. Derived the joint Ironwood address
+  20:29:05 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  20:29:05 B  Received Z's Propose: 0.01 ZEC for 0.00012 WETH
+  20:29:05 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log
+  20:29:05 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  20:29:05 B  Sent Accept with B's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  20:29:25 B  Locked 0.00012 WETH in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0xb07f1e8b1af02d4eb0ae70028e43669f42db81a2d7e71b43038026ac554dd58f
+  20:29:32 Z  FerryLock holds 0.00012 WETH for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  20:29:34 B  The lock is confirmed. Waiting for Z's ZEC
+  20:30:06 Z  Sent 0.01 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx fd8ad6fbc791f5f438dbb80e8f4137e1f826add8e3bde20177916172ac18b7be
+  20:31:02 B  Found the lock note at the joint address with the shared viewing key
+  20:32:51 B  Lock note has 3 confirmations and holds 0.01 ZEC
+  20:32:51 B  Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+  20:33:14 Z  Received B's Ready(id) signature and checked it recovers to B's account
+  20:33:27 Z  Claimed 0.00012 WETH from FerryLock with B's Ready signature. The claim publishes z in its calldata
+               Base tx  https://sepolia.basescan.org/tx/0xc53e0509e036286c62f30dc0cf24bddf718024bf31ad4baa143f07bdf727f509
+  20:33:28 B  Saw Z's claim on FerryLock: z is now public
+  20:33:28 B  Read z from Z's claim (calldata and event) and checked it against Z's points. B can now spend the joint Ironwood note
+  20:33:28 B  Waiting 13s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund
+  20:33:37 Z  Swap complete. 0.00012 WETH is at Z's address
+  20:34:41 B  Swept the joint note to B's own shielded address, signing with ask = σ(z + b)
+               Zcash tx 9acd3a227d9f277a1a02ca7212eb9b1898a8dea8ccb24d40341b0bc35bfc3ea1
+  20:36:33 B  Swap complete. B holds 0.01 ZEC in its own Ironwood notes
+# outcome: Z swapped, B swapped; amounts {"zec_zat": 1000000, "btc_sat": 120000000000000}
+# from the click: counter-coin lock seen by Z 0 min 36 s; ZEC lock sent 1 min 10 s; Z's claim 4 min 31 s; B's sweep 5 min 45 s; both done 7 min 39 s
+
+
+## 7c. Final code: a third, started while X and Y ran
+# swap 82f54ee1b4f556fa3b8716ba42d54ecb502ba35a898a600d9705ef54df5ebe29, sell through the swap card, 0.01 ZEC; started 20:31:00 UTC (the click)
+  20:31:23 Z  Sent Propose to B: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  20:31:23 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log. Derived the joint Ironwood address
+  20:31:23 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  20:31:23 B  Received Z's Propose: 0.01 ZEC for 0.00012 WETH
+  20:31:23 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log
+  20:31:23 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  20:31:23 B  Sent Accept with B's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  20:31:44 B  Locked 0.00012 WETH in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0x38eb418c2ecfb5f80d80c986f117022fe188a4156d44b914fe62cd3ecb54438a
+  20:31:58 Z  FerryLock holds 0.00012 WETH for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  20:32:21 B  The lock is confirmed. Waiting for Z's ZEC
+  20:32:49 Z  Sent 0.01 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx 872e3fea9aa48c28e442dcac0b03ed5b7d05ff5bb2a7a19745c5aadffea048a9
+  20:34:51 B  Found the lock note at the joint address with the shared viewing key
+  20:35:07 B  Lock note has 3 confirmations and holds 0.01 ZEC
+  20:35:07 B  Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+  20:35:10 Z  Received B's Ready(id) signature and checked it recovers to B's account
+  20:35:23 Z  Claimed 0.00012 WETH from FerryLock with B's Ready signature. The claim publishes z in its calldata
+               Base tx  https://sepolia.basescan.org/tx/0xf8ec08cf74020a33352125e5f826f77da600a22049f61367b45896f4339d5d6f
+  20:35:27 Z  Swap complete. 0.00012 WETH is at Z's address
+  20:35:31 B  Saw Z's claim on FerryLock: z is now public
+  20:35:31 B  Read z from Z's claim (calldata and event) and checked it against Z's points. B can now spend the joint Ironwood note
+  20:35:31 B  Waiting 16s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund
+  20:39:28 B  Swept the joint note to B's own shielded address, signing with ask = σ(z + b)
+               Zcash tx e332f1503c06d162601b047d885cbf73de80a819b2a142dfe027515ca18233a1
+  20:40:38 B  Swap complete. B holds 0.01 ZEC in its own Ironwood notes
+# outcome: Z swapped, B swapped; amounts {"zec_zat": 1000000, "btc_sat": 120000000000000}
+# from the click: counter-coin lock seen by Z 0 min 58 s; ZEC lock sent 1 min 49 s; Z's claim 4 min 23 s; B's sweep 8 min 28 s; both done 9 min 39 s
+
+
+## Several swaps at once, through three tabs of the card
+# 4a/4b (code fa618c2): two ZEC -> WETH sells of 0.01 ZEC pressed at the same moment in tabs 1 and 2.
+# Tab 1 started 3893fbc6. Tab 2's start was refused: 400 "That firm price has expired. Get a new
+# one." (both tabs held the same cached firm quote, and tab 1's start used it; the card then said
+# "No partner is buying ZEC for WETH right now"). Tab 3, reloaded while 3893fbc6 ran, said
+# "Partner online · can take 3 more swaps" and started e3721ea6 (201 at 19:55:09, its request took
+# 94 s on the slow network). Both ran together from 19:55:09 to 20:01:57 and both finished, both
+# sides swapped (4a and 4b above).
+# 5 (final code): ZEC -> USDC sells of 0.02 and 0.03 ZEC pressed together. The 0.03 one started
+# (c569d97e); the 0.02 one got the same expired-quote refusal (one firm-quote bucket covers every
+# amount up to 0.1 ZEC; the card: "That firm price ran out before the swap started. Press Sell ZEC
+# again for a fresh one."). A third start while c569d97e ran was refused as busy:
+#   POST /daemon/usdc-base/api/swaps -> 409 {"error":"Every partner is busy right now. Try again
+#   once one of their swaps finishes.","code":"busy"}
+#   card: "Every partner is busy right now. A swap takes about 2-10 min, so one usually has room
+#   again within that."
+# It was busy by funds, not by the cap (the partner line said "can take 3 more swaps"): a ZEC lock
+# spends whole notes oldest first, and the 0.03 lock took both of Z's notes (about 0.024 and 0.10).
+# 7 (final code): X (c0c8a45f) started at 20:26:34; Y (eac3ce67) at 20:29:08 while X ran (its card:
+# "Partner online · can take 3 more swaps"); a third (82f54ee1) at 20:31:31 while both ran (card:
+# "can take 2 more swaps"; the WETH Z had a third note by then, X's change). Three ran together
+# from 20:31:31 until X finished at about 20:33; all three finished, both sides swapped (7a-7c).
+# Between Y and the third, one start was refused with the expired-quote message: the quote Y had
+# used was still in the web server's cache. Pressing again 30 s later went through.
+
+## The demo's limits (web/server/prod.mjs, public mode), as a visitor meets them
+# Per address per hour (DEMO_RATE_PER_HOUR=3): after three starts from this machine since the web
+# server's restart at 20:05 (c569d97e 20:09, 53127ea8 20:18, c0c8a45f 20:26), the next press:
+#   20:26:51 POST /daemon/weth-base/api/swaps -> 429; card: "Too many swaps from your address. Try
+#   again in 43 minutes."
+# (Starts the daemon refuses, like the busy one above, are given back and don't count.) For swaps
+# 7b-7c the local .env then had DEMO_RATE_PER_HOUR=20; the server's default stays 3.
+# The 0.5 ZEC cap, a foreign Origin, withdrawals and addresses: refused (smoke checks above). The
+# card itself keeps amounts inside the partner's range (WETH and USDC: 0.01-0.25 ZEC).
+
+## Every Base Sepolia transaction above, read back from the chain (cast receipt, sepolia.base.org)
+
+0x38eb418c2ecfb5f80d80c986f117022fe188a4156d44b914fe62cd3ecb54438a  status 1  block 48464167  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0x3cadaf1ebfef81d186961633c2b1e07b6e5366d844d168b4f4e2899488e42593  status 1  block 48447546  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0x3d54ceb5e4337c99e5e16520e8e1924ac954d6986ff07f900d88878052ae9657  status 1  block 48458808  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0x48267854247987ea762037c1d08de2a69721496629985b86a096c86af8262eb4  status 1  block 48416788  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0x5d87b3c47eb232d9549c38267a2020fef7bdf91944d021aa3d42dcc1a94683c5  status 1  block 48417429  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0x7b090d1a05963a2e942e209a820bcb43d4815053624672a610088a9d36a12eae  status 1  block 48457561  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0x805de2d9084f50aff83635e7fd7ba0c7a3cbb8e8e09f1414d544a057c038935b  status 1  block 48453835  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0x910543dc5b581f0cd56a5ebcc50b90e9963b8d1b8c9cf228ee0701d5b3a28c37  status 1  block 48448448  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0x9d8447c75d74a600c91c708e8deecf416de0ed9e37fd6cc1052d8c09da8239d2  status 1  block 48461263  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0xab99f745c84cee2f47f43b7f11f96fca2a24d777822b53fada57ebd988aeefc3  status 1  block 48452648  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0xb07f1e8b1af02d4eb0ae70028e43669f42db81a2d7e71b43038026ac554dd58f  status 1  block 48463462  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0xc53e0509e036286c62f30dc0cf24bddf718024bf31ad4baa143f07bdf727f509  status 1  block 48464672  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0xc57509e0d5c79945f0f111b96f658effdd624305b22193e84e10b1d3c71e31b4  status 1  block 48454027  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0xc78d4e348e9e01ff3474182e59c19af0c85331a7d615f747dee26bfe3c2f1adb  status 1  block 48417379  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0xceb9220842f08432d82d6175cc285326cb037468879d40020972a28b5bf3f2b3  status 1  block 48416881  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0xe0243adaeee6d22eb6361c39744ce74e6b49e55bb91b42d617e6aac655a50a09  status 1  block 48453277  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0xe24c38cda5df9845f82059565e91a6303804590ba173a5a7fedd4340b4537f60  status 1  block 48460344  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0xe99e8996f41abb8935ca52184225d35918424f33e82cab8c0f2999ea24df7d16  status 1  block 48463774  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0xf8ec08cf74020a33352125e5f826f77da600a22049f61367b45896f4339d5d6f  status 1  block 48465256  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+0xfcb0d3e145c909af81cd082c15682b0a282d2f53c8671f7d62c2b696aa715070  status 1  block 48462752  to 0x74b775ea7bc7a2b2688b7a72da5dee674bbd65ef
+
+
+## Not run here
+# ZEC/BTC on signet: the stack's own pruned signet node started from nothing at 16:14 and was at
+# block 227,978 of 327,391 (70%) at 20:33, after pauses for battery; DEPLOY.md's "about 3 h" holds
+# on a good connection. B (bram) has no signet coins: its funding address, kept from .testnet by
+# migrate-wallets, is tb1pgyf4wvtyjeth44kqyw404w244a2j24zh9wpeaf2vx6vll7pgnmaqmxwapm. Z (zoe) holds
+# 0.67 TAZ.
+# ZEC/LTC: the ltc profile came up healthy (litecoind 0.21.5.6 and both daemons, arm64), but on
+# this connection the Litecoin testnet headers came at about 2,000 per 50 s (4.9 million to go),
+# so the node was paused; no tLTC either.
+
+## Problems found on this run, and what was done
+# Fixed on this branch:
+# - ferryd crash-looped after a redeploy ("no spending account in the wallet: attempt to write a
+#   readonly database"): stopping the container had killed zcash-devtool mid-write, and a
+#   read-only connection can't roll back the hot journal it left. ferry-zec rolls it back at start
+#   (a0b5460, with a test); ferryd-b then started on its own.
+# - An empty MAX_SWAPS crash-looped every daemon (ferryd refuses an empty --max-swaps): compose
+#   passes it only when set (99c72f9).
+# - The healthcheck (ferry-api) had no time limit: while a daemon was slow, hung checks piled up
+#   (10 after 5 minutes) and `deploy.sh status` hung (579a389).
+# - deploy.sh migrate-wallets' EXIT trap named a local variable, so the temp file the private keys
+#   pass through was never removed and a successful run exited 1 (942697f).
+# - deploy.sh status printed Python tracebacks while a daemon was down (098d384).
+# - The progress page could show the maker's copy of the visitor's swap (aa5004c, f32a8a8).
+# Found here and fixed on master by others: finished swaps never settled without a Zcash node RPC,
+# so every round re-polled them under the state lock and the USDC daemons stopped answering on the
+# slow network (2cd42a8; after it, status and swaps answered in about 1 ms).
+# Open, reported: one daemon that hangs keeps the swap card from rendering for every pair (no
+# upstream timeout on proxied GETs); a used firm quote stays cached, so the next start in its
+# bucket within its ~45 s life is refused once; with Docker Desktop, closed tabs hold their event
+# stream slot for 6+ minutes (local only: DEPLOY.md, "Rehearse locally").
+# The network: Docker Hub TLS handshake timeouts (a rebuild retried), a lookup failure while the
+# Mac slept or lost its network from about 18:23 to 19:22, and Base Sepolia RPC answers of 2-20 s
+# with timeouts from about 20:00; swaps 3, 4a and 4b ran on that network.
