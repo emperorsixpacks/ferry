@@ -22,6 +22,8 @@
 #   --no-open         don't open the browser after `up`
 #   --mainnet         REAL money: Zcash mainnet and Base mainnet, small caps, a typed
 #                     confirmation, and its own data directory and containers
+#   --near, --no-near with --mainnet: turn NEAR Intents swaps on or off (off by default;
+#                     never run with real funds yet), remembered
 #
 # Environment: FERRY_NODE_DIR (data directory), FERRY_NODE_PROJECT (Docker project name),
 # FERRYD_IMAGE / WEB_IMAGE (use prebuilt images instead of building).
@@ -63,12 +65,15 @@ MAINNET=
 OPT_PAIRS=
 OPT_RPC=
 OPT_PORT=
+OPT_NEAR=
 ARGS=()
 while [ $# -gt 0 ]; do
   case $1 in
     -y | --yes) YES=1 ;;
     --no-open) NO_OPEN=1 ;;
     --mainnet) MAINNET=1 ;;
+    --near) OPT_NEAR=1 ;;
+    --no-near) OPT_NEAR=0 ;;
     --pairs) OPT_PAIRS=${2:?--pairs needs a list, e.g. usdc-base,btc}; shift ;;
     --pairs=*) OPT_PAIRS=${1#*=} ;;
     --rpc) OPT_RPC=${2:?--rpc needs a URL}; shift ;;
@@ -513,6 +518,7 @@ setup() { # setup [force]: ask what isn't saved yet (everything with force)
     fi
   fi
   [ -n "$OPT_PORT" ] && cfg_set WEB_PORT "$OPT_PORT"
+  [ -n "$OPT_NEAR" ] && cfg_set NEAR "$OPT_NEAR"
   load_pairs
   if has_evm; then
     if [ -n "$force" ] || [ -n "$OPT_RPC" ] || [ -z "$(rpc_url)" ]; then ask_rpc; fi
@@ -716,8 +722,9 @@ write_env() {
     printf 'FERRY_MAKER_URL=\n'
     printf "FERRY_MAKERS='%s'\n" "$MAKERS"
     printf 'DEMO_MAX_ZAT=%s\nDEMO_RATE_PER_HOUR=30\nDEMO_SWAPS_PER_HOUR=60\nDEMO_FAULTS=0\n' "$MAX_ZAT"
-    if [ "$NET" = mainnet ]; then
-      # NEAR Intents swaps run only on your own node, on mainnet (web/server/prod.mjs)
+    # NEAR Intents swaps run only on your own node, on mainnet (web/server/prod.mjs), and only
+    # when asked for with --near: that path has not yet run with real funds
+    if [ "$NET" = mainnet ] && [ "$(cfg_get NEAR)" = 1 ]; then
       printf 'FERRY_NEAR=1\n'
     fi
   } >"$w.tmp"

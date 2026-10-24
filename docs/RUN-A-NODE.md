@@ -250,6 +250,10 @@ take about 5 hours to call off), and needs:
 - the **FerryLock** contract address both sides use. Ferry has no published mainnet deployment yet:
   deploy one with `infra/mainnet-demo.sh deploy` or use your counterparty's.
 
+NEAR Intents swaps (reaching coins beyond Ferry's own chains) stay off on mainnet unless you add
+`--near` (`./infra/node/ferry --mainnet --near up`; `--no-near` turns them off again): that path
+has not yet run with real funds.
+
 Ferry is unaudited hackathon software. Use amounts you can afford to lose, and back up first. Every
 command takes `--mainnet` the same way (`./infra/node/ferry --mainnet status`).
 
