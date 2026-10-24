@@ -1,12 +1,30 @@
 //! FerryLock client: lock / claim / refund / punish and reads.
 
+use std::time::Duration;
+
 use alloy::network::{EthereumWallet, ReceiptResponse};
 use alloy::primitives::{Address, B256, U256};
-use alloy::providers::{DynProvider, Provider, ProviderBuilder};
+use alloy::providers::{DynProvider, PendingTransactionBuilder, Provider, ProviderBuilder};
+use alloy::rpc::client::ClientBuilder;
 use alloy::signers::local::PrivateKeySigner;
+use alloy::transports::http::{reqwest, Http};
+use alloy::transports::layers::RetryBackoffLayer;
 
 use crate::bindings::{FerryLock, IERC20};
 use crate::{address, swap_id, Error, Terms};
+
+/// One RPC request may take this long; a hung public endpoint must not stall the daemon.
+const RPC_TIMEOUT: Duration = Duration::from_secs(30);
+/// Rate-limited (HTTP 429/503, or a "rate limit" JSON-RPC error) requests are retried this many
+/// times, `RPC_BACKOFF_MS` apart plus a share of the request budget below.
+const RPC_RETRIES: u32 = 8;
+const RPC_BACKOFF_MS: u64 = 1_000;
+/// Request budget in compute units per second (alloy counts about 20 per request, so ~10 req/s).
+const RPC_COMPUTE_UNITS: u64 = 200;
+/// A sent transaction not mined by then is reported as an error. Every call re-reads the swap
+/// (or allowance) first, so a retry never repeats a transaction that landed; one still pending
+/// can be sent again with the next nonce, and that copy reverts without revealing anything new.
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// `FerryLock.State`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,17 +92,38 @@ pub struct EvmClient {
 
 impl EvmClient {
     /// HTTP provider signing with `signer` (gas, nonce and chain id filled automatically).
+    /// Requests time out after 30 s, and rate-limited ones are retried with a backoff, since
+    /// public endpoints such as https://sepolia.base.org throttle.
     pub fn connect_http(
         rpc_url: &str,
         contract: Address,
         signer: PrivateKeySigner,
     ) -> Result<Self, Error> {
-        let url: alloy::transports::http::reqwest::Url =
-            rpc_url.parse().map_err(|e| Error::Url(format!("{e}")))?;
+        let url: reqwest::Url = rpc_url.parse().map_err(|e| Error::Url(format!("{e}")))?;
+        let http = reqwest::Client::builder()
+            .timeout(RPC_TIMEOUT)
+            .build()
+            .map_err(|e| Error::Rpc(e.to_string()))?;
+        let transport = Http::with_client(http, url);
+        let local = transport.guess_local();
+        let client = ClientBuilder::default()
+            .layer(RetryBackoffLayer::new(
+                RPC_RETRIES,
+                RPC_BACKOFF_MS,
+                RPC_COMPUTE_UNITS,
+            ))
+            .transport(transport, local);
         let from = signer.address();
+        // The nonce comes from the node on every send. alloy's default cache counts a nonce as
+        // used even when the send then fails, which on a flaky public RPC would leave every
+        // later transaction (a claim, a refund) waiting behind a gap.
         let provider = ProviderBuilder::new()
+            .disable_recommended_fillers()
+            .with_gas_estimation()
+            .with_simple_nonce_management()
+            .fetch_chain_id()
             .wallet(EthereumWallet::from(signer))
-            .connect_http(url)
+            .connect_client(client)
             .erased();
         Ok(Self::from_provider(provider, contract, from))
     }
@@ -217,12 +256,12 @@ impl EvmClient {
         if allowance < terms.amount {
             let approve = token.approve(self.contract, terms.amount);
             simulate(approve.call().await.map(|_| ()))?;
-            mined(approve.send().await?.get_receipt().await?)?;
+            confirmed(approve.send().await?).await?;
         }
         let c = self.lock_contract();
         let call = c.lock(salt, terms.clone());
         simulate(call.call().await.map(|_| ()))?;
-        let tx = mined(call.send().await?.get_receipt().await?)?;
+        let tx = confirmed(call.send().await?).await?;
         Ok((swap_id(self.from, salt), tx))
     }
 
@@ -254,7 +293,7 @@ impl EvmClient {
             alloy::primitives::Bytes::copy_from_slice(ready_sig),
         );
         simulate(call.call().await.map(|_| ()))?;
-        mined(call.send().await?.get_receipt().await?)
+        confirmed(call.send().await?).await
     }
 
     /// Refund to B by publishing `b`. Same pre-checks as [`EvmClient::claim`]: a reverted
@@ -264,7 +303,7 @@ impl EvmClient {
         let c = self.lock_contract();
         let call = c.refund(id, U256::from_be_bytes(*b));
         simulate(call.call().await.map(|_| ()))?;
-        mined(call.send().await?.get_receipt().await?)
+        confirmed(call.send().await?).await
     }
 
     /// [`EvmClient::refund`] without waiting for it to be mined (a watchtower follows it with
@@ -297,7 +336,7 @@ impl EvmClient {
         let c = self.lock_contract();
         let call = c.punish(id);
         simulate(call.call().await.map(|_| ()))?;
-        mined(call.send().await?.get_receipt().await?)
+        confirmed(call.send().await?).await
     }
 
     /// [`EvmClient::punish`] without waiting for it to be mined; simulated first, like
@@ -343,6 +382,18 @@ fn would_revert(e: alloy::contract::Error) -> Error {
         .map(|d| format!("{d:?}"))
         .unwrap_or_else(|| e.to_string());
     Error::WouldRevert(reason)
+}
+
+/// Wait for a sent transaction's receipt, at most [`RECEIPT_TIMEOUT`].
+async fn confirmed(
+    pending: PendingTransactionBuilder<alloy::network::Ethereum>,
+) -> Result<TxInfo, Error> {
+    mined(
+        pending
+            .with_timeout(Some(RECEIPT_TIMEOUT))
+            .get_receipt()
+            .await?,
+    )
 }
 
 fn mined<R: ReceiptResponse>(receipt: R) -> Result<TxInfo, Error> {

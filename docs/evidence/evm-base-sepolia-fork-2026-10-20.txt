@@ -1,0 +1,263 @@
+# Ferry ZEC <-> USDC on a fork of Base Sepolia, 2026-10-20 (infra/evm-testnet.sh).
+#
+# anvil 1.5.1 forking https://sepolia.base.org on 127.0.0.1:18547 with 2 s blocks. The chain id
+# stays 84532, so both ferryd daemons applied the Base Sepolia policy, not the anvil dev policy.
+# USDC: Circle's real test USDC contract (0x036CbD53842c5426634e7929541eC2318f3dCF7e) in its forked
+# state; B's 10 USDC were moved from a real holder by impersonation. ETH: anvil_setBalance with
+# the amounts the owner is asked to fund (deployer 0.005, B 0.002, Z 0.001).
+# FerryLock: deployed by the script from the committed artifact, after checking it against a
+# fresh forge build, and its code on chain checked against the artifact.
+# ZEC side in part 1: ferryd's mock Zcash chain (no TAZ was available). Part 2 starts the same
+# setup against the real Zcash testnet (zcash-devtool wallets on testnet.zec.rocks:443); its swap
+# stops at Z's funds check because the wallet has no TAZ.
+# Refund and punish: the fork's clock was jumped to t1 / t2 (evm_setNextBlockTimestamp).
+# The explorer links are where the transactions would be on the real network; on a fork they
+# exist only locally.
+# Read-only checks against the live https://sepolia.base.org the same day: eth_chainId 84532;
+# USDC symbol() "USDC", decimals() 6; eth_getLogs refuses more than ~200 blocks per request.
+# Timeline times are local (UTC+1); the "# started/ended" lines are UTC.
+
+## Part 1: infra/evm-testnet.sh fork test (PASS)
+# started 2026-10-20T07:01:43Z
+$ infra/evm-testnet.sh fork test
+[evm-testnet] starting anvil on 127.0.0.1:18547, forking https://sepolia.base.org (2 s blocks, like Base)
+[evm-testnet] fork up at block 48355709, chain id 84532
+[evm-testnet] created b account 0x9541F2c8A61338630992674d53d31F90aAa699b1
+[evm-testnet] created z account 0x9d62a1C2E68BcD82F84D0541a8bA51aF9EFE2bAE
+[evm-testnet] created deployer account 0xe5b011c9cF8c0a610431034F42422A66687ECC93
+
+Base Sepolia accounts (keys in <repo>/.evm-testnet-fork, never printed):
+  deployer  0xe5b011c9cF8c0a610431034F42422A66687ECC93   deploys FerryLock once
+  B         0x9541F2c8A61338630992674d53d31F90aAa699b1   the maker: holds the USDC, locks, refunds
+  Z         0x9d62a1C2E68BcD82F84D0541a8bA51aF9EFE2bAE   the taker: receives the USDC, sends the claim
+
+Next: infra/evm-testnet.sh status  (what to fund, and where)
+[evm-testnet] fork: deployer 0xe5b011c9cF8c0a610431034F42422A66687ECC93 has 0.005 ETH
+[evm-testnet] fork: b 0x9541F2c8A61338630992674d53d31F90aAa699b1 has 0.002 ETH
+[evm-testnet] fork: z 0x9d62a1C2E68BcD82F84D0541a8bA51aF9EFE2bAE has 0.001 ETH
+[evm-testnet] fork: moved 10 of the real test USDC from holder 0x2e0c37b721124e2558baf75f6f8e6cc9f14aec29 to B; B holds 10 USDC
+
+Base Sepolia (chain 84532) via http://127.0.0.1:18547 (anvil fork): block 48355713, time 1792479714
+FerryLock   not deployed (infra/evm-testnet.sh deploy)
+          Base Sepolia account                                    ETH         USDC
+deployer  0xe5b011c9cF8c0a610431034F42422A66687ECC93            0.005            0
+B         0x9541F2c8A61338630992674d53d31F90aAa699b1            0.002           10
+Z         0x9d62a1C2E68BcD82F84D0541a8bA51aF9EFE2bAE            0.001            0
+Zcash: mock backend (ZEC_BACKEND=mock)
+ferryd Z down
+ferryd B down
+
+Funded. Next: infra/evm-testnet.sh deploy
+
+[evm-testnet] FerryLock builds to the committed artifact (8006 bytes of runtime code)
+[evm-testnet] deploying FerryLock from 0xe5b011c9cF8c0a610431034F42422A66687ECC93 (balance 0.005 ETH)
+[evm-testnet] sent 0x20c080d06401597b903f003641d5bac8b2892b47b724bd0ece8a770f8040eec9
+[evm-testnet] FerryLock deployed at 0xe16b3DAa5756E8049fF40E031CFc6A11bF09C6eD; its code matches this build (1790632 gas)
+  contract  https://sepolia.basescan.org/address/0xe16b3DAa5756E8049fF40E031CFc6A11bF09C6eD
+  tx        https://sepolia.basescan.org/tx/0x20c080d06401597b903f003641d5bac8b2892b47b724bd0ece8a770f8040eec9
+  (an anvil fork: these links exist only locally)
+[evm-testnet] building ferryd
+[evm-testnet] starting B (bram, maker at 40000000 USDC units/ZEC): API :7952, peer :7962
+[evm-testnet] starting Z (zoe): API :7951, peer :7961
+[evm-testnet] ready: Z http://127.0.0.1:7951  B http://127.0.0.1:7952 (maker http://127.0.0.1:7962), FerryLock 0xe16b3DAa5756E8049fF40E031CFc6A11bF09C6eD on http://127.0.0.1:18547 (ZEC: mock/test)
+[evm-testnet] Z (0x9d62a1C2E68BcD82F84D0541a8bA51aF9EFE2bAE) swaps 0.05 ZEC for 2 USDC with B (0x9541F2c8A61338630992674d53d31F90aAa699b1)
+[evm-testnet] FerryLock https://sepolia.basescan.org/address/0xe16b3DAa5756E8049fF40E031CFc6A11bF09C6eD (fork only)
+[evm-testnet] swap b54bb042a4e2628344847b052c6dcafad5e7ee412e4e1dda85f9595075a9c7a9: claim window until t1 08:47:00, punish from t2 09:17:00 (chain time)
+  08:02:05 B  Received Z's Propose: 0.05 ZEC for 2 USDC
+  08:02:05 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log
+  08:02:05 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  08:02:05 B  Sent Accept with B's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  08:02:08 B  Locked 2 USDC in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0xc6cd8d3f27529e87f5fac262160a3d7bd22133e16bfaa3fc8ead48962e5bfe17 (fork only)
+  08:02:08 B  The lock is confirmed. Waiting for Z's ZEC
+  08:02:09 Z  Sent Propose to B: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  08:02:09 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log. Derived the joint Ironwood address
+  08:02:09 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  08:02:11 Z  FerryLock holds 2 USDC for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  08:02:27 Z  Sent 0.05 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx 37457e9524c422eee76c3124861769be949e9618549ce15d02f0cbb36a89a4c3
+  08:02:31 B  Found the lock note at the joint address with the shared viewing key
+  08:02:39 Z  Received B's Ready(id) signature and checked it recovers to B's account
+  08:02:39 B  Lock note has 3 confirmations and holds 0.05 ZEC
+  08:02:39 B  Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+  08:02:40 Z  Claimed 2 USDC from FerryLock with B's Ready signature. The claim publishes z in its calldata
+               Base tx  https://sepolia.basescan.org/tx/0xf70710f14929b516ca333fd3c7eea0f23fa3eb922f50e30200c3e152ed60e339 (fork only)
+  08:02:40 Z  Swap complete. 2 USDC is at Z's address
+  08:02:43 B  Saw Z's claim on FerryLock: z is now public
+  08:02:43 B  Read z from Z's claim (calldata and event) and checked it against Z's points. B can now spend the joint Ironwood note
+  08:02:43 B  Waiting 12s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund
+  08:02:55 B  Swept the joint note to B's own shielded address, signing with ask = σ(z + b)
+               Zcash tx 90b98f558d3b4efa6da21040622beb1f025b55a5e6d5d3779e033ab947765d57
+  08:02:59 B  Swap complete. B holds 0.05 ZEC in its own Ironwood notes
+
+Base Sepolia transactions:
+  lock    https://sepolia.basescan.org/tx/0xc6cd8d3f27529e87f5fac262160a3d7bd22133e16bfaa3fc8ead48962e5bfe17 (fork only)
+  claim   https://sepolia.basescan.org/tx/0xf70710f14929b516ca333fd3c7eea0f23fa3eb922f50e30200c3e152ed60e339 (fork only)
+[evm-testnet] outcome: Z swapped, B swapped
+[evm-testnet] Z's USDC 0 -> 2, B's USDC 10 -> 8
+[evm-testnet] happy swap finished as expected
+[evm-testnet] Z (0x9d62a1C2E68BcD82F84D0541a8bA51aF9EFE2bAE) swaps 0.05 ZEC for 2 USDC with B (0x9541F2c8A61338630992674d53d31F90aAa699b1)
+[evm-testnet] FerryLock https://sepolia.basescan.org/address/0xe16b3DAa5756E8049fF40E031CFc6A11bF09C6eD (fork only)
+[evm-testnet] swap 5d72334ee61c316ccc5943c14b265a09d30926c922475dab055fc81deb08f90c: claim window until t1 08:47:56, punish from t2 09:17:56 (chain time)
+  08:03:01 B  Received Z's Propose: 0.05 ZEC for 2 USDC
+  08:03:01 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log
+  08:03:01 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  08:03:01 B  Sent Accept with B's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  08:03:04 B  Locked 2 USDC in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0x1e47f05e929638834917d1b666346ca70879f41ce8ab92958c8c4192dcfacfc1 (fork only)
+  08:03:04 B  The lock is confirmed. Waiting for Z's ZEC
+  08:03:05 Z  Sent Propose to B: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  08:03:05 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log. Derived the joint Ironwood address
+  08:03:05 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  08:03:07 Z  FerryLock holds 2 USDC for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  08:03:23 Z  Sent 0.05 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx fc1f85bdc881a567e007eb70c648345f3222b283f0d2a4de81895eb5800c658d
+[evm-testnet] Z stops here: it will not claim. B refunds once t1 has passed, then Z reclaims its ZEC
+  08:03:24 Z  Demo fault: Z stops responding until the claim window has closed
+  08:03:27 B  Found the lock note at the joint address with the shared viewing key
+  08:03:39 B  Lock note has 3 confirmations and holds 0.05 ZEC
+  08:03:39 B  Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+[evm-testnet] fork: jumped chain time forward 2658s
+  08:03:43 Z  t1 passed without a claim: waiting for B's refund (or t2)
+  08:03:43 Z  Z is back online; the claim window has closed
+  08:03:43 B  t1 passed without a claim: the swap is called off. Refunding from FerryLock
+  08:03:44 B  t1 passed without a claim. Refunded from FerryLock; the refund publishes b in its calldata
+               Base tx  https://sepolia.basescan.org/tx/0x44340aa50b384130ad07cb56ddaa219cecb60335ce6d1d9be822a98612e1394e (fork only)
+  08:03:47 Z  Ignored B's late ReadySig: this swap is already in Expired
+  08:03:47 Z  Saw B's refund on FerryLock: b is now public
+  08:03:47 Z  Read b from B's refund. Z can now spend the joint note on its own
+  08:03:47 Z  Waiting 19s before sweeping, so the ZEC sweep does not line up with the FerryLock claim or refund
+  08:03:47 B  USDC is back at B's address. Revealing b unlocks nothing for B
+  08:04:07 Z  Swept the joint note back to Z's own shielded address
+               Zcash tx 714b5d551961e92e3f7914d9749f101c98908ed2572316b9ed05284ef3edd247
+  08:04:11 Z  0.05 ZEC is back in Z's own Ironwood notes
+
+Base Sepolia transactions:
+  lock    https://sepolia.basescan.org/tx/0x1e47f05e929638834917d1b666346ca70879f41ce8ab92958c8c4192dcfacfc1 (fork only)
+  refund  https://sepolia.basescan.org/tx/0x44340aa50b384130ad07cb56ddaa219cecb60335ce6d1d9be822a98612e1394e (fork only)
+[evm-testnet] outcome: Z refunded, B refunded
+[evm-testnet] Z's USDC 2 -> 2, B's USDC 8 -> 8
+[evm-testnet] refund swap finished as expected
+[evm-testnet] Z (0x9d62a1C2E68BcD82F84D0541a8bA51aF9EFE2bAE) swaps 0.05 ZEC for 2 USDC with B (0x9541F2c8A61338630992674d53d31F90aAa699b1)
+[evm-testnet] FerryLock https://sepolia.basescan.org/address/0xe16b3DAa5756E8049fF40E031CFc6A11bF09C6eD (fork only)
+[evm-testnet] swap d3f8e6df66e03772384f0bbe8785309068ae452bd1de501fd237ccb298d2c98e: claim window until t1 09:33:28, punish from t2 10:03:28 (chain time)
+  08:04:13 B  Received Z's Propose: 0.05 ZEC for 2 USDC
+  08:04:13 B  Verified Z's DLEQ proof: Z_p and Z_s share one discrete log
+  08:04:13 B  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  08:04:13 B  Sent Accept with B's points, DLEQ proof and EVM account. Derived the joint Ironwood address
+  08:04:16 B  Locked 2 USDC in FerryLock for Z, committed to address(Z_s) and address(B_s)
+               Base tx  https://sepolia.basescan.org/tx/0x79c224b57f946677d9b6aff0ea48b28e95fa726037abc7521ec8ab7c08d4d8e9 (fork only)
+  08:04:17 Z  Sent Propose to B: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+  08:04:17 Z  Verified B's DLEQ proof: B_p and B_s share one discrete log. Derived the joint Ironwood address
+  08:04:17 Z  Agreed the terms: nothing to presign on an EVM chain, FerryLock enforces the deadlines
+  08:04:17 B  The lock is confirmed. Waiting for Z's ZEC
+[evm-testnet] B stops here: it will neither sign Ready nor refund. Z punishes at t2
+  08:04:17 B  Demo fault: B stops responding and will not refund
+  08:04:19 Z  FerryLock holds 2 USDC for this swap, and every term matches: token, amount, deadlines, our payout address and the commitments to Z_s and B_s
+  08:04:35 Z  Sent 0.05 ZEC from Z's Ironwood notes to the joint address
+               Zcash tx 696db21c5a31100dc116609a0f2fb414c1fa8559a3e36e1157f5254042a0a529
+[evm-testnet] fork: jumped chain time forward 4478s
+  08:04:39 B  Found the lock note at the joint address with the shared viewing key
+  08:04:40 Z  t2 passed without a refund. Called punish: the locked tokens go to Z
+               Base tx  https://sepolia.basescan.org/tx/0x151070e01c7481f414d83849861b756ec11a70f264c615e44e8875d0a005781e (fork only)
+  08:04:43 Z  Z holds the USDC. Z's ZEC stays in the joint note, which is B's penalty for not refunding
+  08:04:43 B  Z took the locked USDC with punish after t2. B never refunded
+
+Base Sepolia transactions:
+  lock    https://sepolia.basescan.org/tx/0x79c224b57f946677d9b6aff0ea48b28e95fa726037abc7521ec8ab7c08d4d8e9 (fork only)
+  punish  https://sepolia.basescan.org/tx/0x151070e01c7481f414d83849861b756ec11a70f264c615e44e8875d0a005781e (fork only)
+[evm-testnet] outcome: Z punished, B punished
+[evm-testnet] Z's USDC 2 -> 4, B's USDC 8 -> 6
+[evm-testnet] punish swap finished as expected
+
+Base Sepolia (chain 84532) via http://127.0.0.1:18547 (anvil fork): block 48355799, time 1792487016
+FerryLock   0xe16b3DAa5756E8049fF40E031CFc6A11bF09C6eD (code matches this build)
+          Base Sepolia account                                    ETH         USDC
+deployer  0xe5b011c9cF8c0a610431034F42422A66687ECC93         0.004995            0
+B         0x9541F2c8A61338630992674d53d31F90aAa699b1            0.002            6
+Z         0x9d62a1C2E68BcD82F84D0541a8bA51aF9EFE2bAE            0.001            4
+Zcash: mock backend (ZEC_BACKEND=mock)
+  Z swap 5d72334ee61c…  ZecReclaimed     outcome refunded
+  Z swap b54bb042a4e2…  Claimed          outcome swapped
+  Z swap d3f8e6df66e0…  Punished         outcome punished
+ferryd Z up (pid 73591)
+  B swap 5d72334ee61c…  Refunded         outcome refunded
+  B swap b54bb042a4e2…  ZecSwept         outcome swapped
+  B swap d3f8e6df66e0…  Punished         outcome punished
+ferryd B up (pid 73509)
+
+Funded, deployed and running. Next: infra/evm-testnet.sh swap
+[evm-testnet] fork rehearsal passed: deploy, a swap, a refund and a punish against the real test USDC on a Base Sepolia fork
+[evm-testnet] stopped the daemons (logs in <repo>/.evm-testnet-fork/logs)
+[evm-testnet] stopped the fork
+# exit 0
+# ended 2026-10-20T07:04:45Z
+
+## Part 2: the real Zcash testnet side, on a fresh fork (startup OK; swap refused: no TAZ)
+# FERRY_EVM_TESTNET_DIR=<repo>/.evm-testnet-fork/devtool, ZEC_BACKEND=devtool (the default),
+# ZEC_DEVTOOL and ZEC_SIGNER set to existing builds of zcash-devtool and ferry-zec-signer.
+# started 2026-10-20T07:04:45Z
+$ infra/evm-testnet.sh fork up
+[evm-testnet] starting anvil on 127.0.0.1:18547, forking https://sepolia.base.org (2 s blocks, like Base)
+[evm-testnet] fork up at block 48355799, chain id 84532
+$ EVM_RPC=http://127.0.0.1:18547 infra/evm-testnet.sh keys
+[evm-testnet] created b account 0xB0497238d067483A8B4A841ac25660aDbF59aBb1
+[evm-testnet] created z account 0x1778c0D916777a964E94871eCb43e2a5EF4842b3
+[evm-testnet] created deployer account 0x769481De80C3F5fdE811f9B1FfefaD2Bb42c3A1D
+[evm-testnet] created the Zcash test wallet for z
+[evm-testnet] created the Zcash test wallet for b
+
+Base Sepolia accounts (keys in <repo>/.evm-testnet-fork/devtool, never printed):
+  deployer  0x769481De80C3F5fdE811f9B1FfefaD2Bb42c3A1D   deploys FerryLock once
+  B         0xB0497238d067483A8B4A841ac25660aDbF59aBb1   the maker: holds the USDC, locks, refunds
+  Z         0x1778c0D916777a964E94871eCb43e2a5EF4842b3   the taker: receives the USDC, sends the claim
+Zcash test wallets:
+  Z         utest14fevwq5jsa9glanh9qdm3536fd9ggp2ence8c3v2pu8ajc0zaxvsguk2c0x30l947x707ry8ktpuk5x8a0gwnxl9ggnn8daz0j6zw3vqv8nvmwjpa8s9ehxrtgclqlhq33wcftv9g8s8z2u2epxjrnn3sm8n2d7pv68ru6hh5ux5w9r0fv4gkcmzju73d64yt34k2pnkc65s673rpru
+            holds the TAZ it swaps
+  B         utest1xaeg200jwqrldztwtapfp23z793375d0s34wrcwccp54qt4x43h7nt95u7fk6e5dcpta47mrhq39xuvldn5rx20mpx4dk72ykxalfk94q0d70fmh0r63mj920td5d4htl90qe72fwz8yg7twxpl0m70edgu2vcj5ahhz9el397lyrnfh7j85jy0f4xeg26rpke4rhep2rl9hjxge03r
+            receives the swapped ZEC
+
+Next: infra/evm-testnet.sh status  (what to fund, and where)
+$ EVM_RPC=http://127.0.0.1:18547 infra/evm-testnet.sh fork fund
+[evm-testnet] fork: deployer 0x769481De80C3F5fdE811f9B1FfefaD2Bb42c3A1D has 0.005 ETH
+[evm-testnet] fork: b 0xB0497238d067483A8B4A841ac25660aDbF59aBb1 has 0.002 ETH
+[evm-testnet] fork: z 0x1778c0D916777a964E94871eCb43e2a5EF4842b3 has 0.001 ETH
+[evm-testnet] fork: moved 10 of the real test USDC from holder 0xa849bbad82f9edafdf9a5550cc874276138779d9 to B; B holds 10 USDC
+$ EVM_RPC=http://127.0.0.1:18547 infra/evm-testnet.sh deploy
+[evm-testnet] FerryLock builds to the committed artifact (8006 bytes of runtime code)
+[evm-testnet] deploying FerryLock from 0x769481De80C3F5fdE811f9B1FfefaD2Bb42c3A1D (balance 0.005 ETH)
+[evm-testnet] sent 0x533261751c443be440e30ae2a1d472e6986f9566359382288c4b6695a3933bb7
+[evm-testnet] FerryLock deployed at 0xB3620640EcCBf3D29E2dBdE16A16F3Bf84f961D5; its code matches this build (1790632 gas)
+  contract  https://sepolia.basescan.org/address/0xB3620640EcCBf3D29E2dBdE16A16F3Bf84f961D5
+  tx        https://sepolia.basescan.org/tx/0x533261751c443be440e30ae2a1d472e6986f9566359382288c4b6695a3933bb7
+  (an anvil fork: these links exist only locally)
+$ EVM_RPC=http://127.0.0.1:18547 FERRYD_SKIP_BUILD=1 infra/evm-testnet.sh up
+[evm-testnet] starting B (bram, maker at 40000000 USDC units/ZEC): API :7952, peer :7962
+[evm-testnet] starting Z (zoe): API :7951, peer :7961
+[evm-testnet] ready: Z http://127.0.0.1:7951  B http://127.0.0.1:7952 (maker http://127.0.0.1:7962), FerryLock 0xB3620640EcCBf3D29E2dBdE16A16F3Bf84f961D5 on http://127.0.0.1:18547 (ZEC: devtool/test)
+$ EVM_RPC=http://127.0.0.1:18547 infra/evm-testnet.sh status
+Base Sepolia (chain 84532) via http://127.0.0.1:18547 (anvil fork): block 48355810, time 1792479909
+FerryLock   0xB3620640EcCBf3D29E2dBdE16A16F3Bf84f961D5 (code matches this build)
+          Base Sepolia account                                    ETH         USDC
+deployer  0x769481De80C3F5fdE811f9B1FfefaD2Bb42c3A1D         0.004995            0
+B         0xB0497238d067483A8B4A841ac25660aDbF59aBb1            0.002           10
+Z         0x1778c0D916777a964E94871eCb43e2a5EF4842b3            0.001            0
+Zcash test wallets:
+  Z  0 TAZ (0 spendable in Ironwood)
+      utest14fevwq5jsa9glanh9qdm3536fd9ggp2ence8c3v2pu8ajc0zaxvsguk2c0x30l947x707ry8ktpuk5x8a0gwnxl9ggnn8daz0j6zw3vqv8nvmwjpa8s9ehxrtgclqlhq33wcftv9g8s8z2u2epxjrnn3sm8n2d7pv68ru6hh5ux5w9r0fv4gkcmzju73d64yt34k2pnkc65s673rpru
+  B  0 TAZ (0 spendable in Ironwood)
+      utest1xaeg200jwqrldztwtapfp23z793375d0s34wrcwccp54qt4x43h7nt95u7fk6e5dcpta47mrhq39xuvldn5rx20mpx4dk72ykxalfk94q0d70fmh0r63mj920td5d4htl90qe72fwz8yg7twxpl0m70edgu2vcj5ahhz9el397lyrnfh7j85jy0f4xeg26rpke4rhep2rl9hjxge03r
+ferryd Z up (pid 79672)
+ferryd B up (pid 79604)
+
+Still to fund:
+  - Z utest14fevwq5jsa9glanh9qdm3536fd9ggp2ence8c3v2pu8ajc0zaxvsguk2c0x30l947x707ry8ktpuk5x8a0gwnxl9ggnn8daz0j6zw3vqv8nvmwjpa8s9ehxrtgclqlhq33wcftv9g8s8z2u2epxjrnn3sm8n2d7pv68ru6hh5ux5w9r0fv4gkcmzju73d64yt34k2pnkc65s673rpru: at least 0.0505 TAZ (the swap plus fees), from https://fauzec.com
+$ EVM_RPC=http://127.0.0.1:18547 infra/evm-testnet.sh swap
+[evm-testnet] Z (0x1778c0D916777a964E94871eCb43e2a5EF4842b3) swaps 0.05 ZEC for 2 USDC with B (0xB0497238d067483A8B4A841ac25660aDbF59aBb1)
+[evm-testnet] FerryLock https://sepolia.basescan.org/address/0xB3620640EcCBf3D29E2dBdE16A16F3Bf84f961D5 (fork only)
+[evm-testnet] error: Z refused to start the swap (HTTP 400): {"error":"Z does not have enough shielded ZEC: 0 zat spendable in Ironwood, 5050000 zat needed (the amount plus fees)"}
+$ EVM_RPC=http://127.0.0.1:18547 infra/evm-testnet.sh down
+[evm-testnet] stopped the daemons (logs in <repo>/.evm-testnet-fork/devtool/logs)
+$ infra/evm-testnet.sh fork down
+[evm-testnet] stopped the fork
+# ended 2026-10-20T07:05:15Z

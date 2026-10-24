@@ -12,7 +12,7 @@ use ferry_core::evm::{
     EvmProposal, EvmSwap, LockTerms, ObservedLock,
 };
 use ferry_core::{Role, SendFailure, ZecLeg};
-use ferry_evm::{Address, EvmClient, PrivateKeySigner, SwapEventKind, B256, U256};
+use ferry_evm::{Address, EvmClient, PrivateKeySigner, SwapEvent, SwapEventKind, B256, U256};
 use futures_util::FutureExt;
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
@@ -33,6 +33,11 @@ const MAX_REJECTED: u32 = 16;
 const MAX_RECEIVED: usize = 32;
 /// A taker's t1 may differ from ours by this much (clock and block-time skew).
 const T1_TOLERANCE_SECS: u64 = 120;
+/// Blocks of a swap's event log read again on every poll (4 minutes of Base blocks), so a reorg
+/// that drops or moves an event within this depth is still seen. Older events come from earlier
+/// polls: a swap's scan stays one eth_getLogs request however old it is, where public RPCs cap
+/// each request at a few hundred blocks and throttle.
+const LOG_RESCAN_BLOCKS: u64 = 120;
 
 #[derive(Default)]
 pub struct EvmState {
@@ -57,6 +62,15 @@ pub struct EvmDaemon<L> {
     pub policy: EvmPolicy,
     proposals: std::sync::Mutex<VecDeque<Instant>>,
     pub price: Option<Arc<crate::pricefeed::LiveRate>>,
+    /// Each open swap's FerryLock events from earlier polls (memory only; a restart rescans).
+    logs: std::sync::Mutex<HashMap<String, LogCache>>,
+}
+
+/// A swap's events in the blocks before `next`.
+#[derive(Clone, Default)]
+struct LogCache {
+    events: Vec<SwapEvent>,
+    next: u64,
 }
 
 struct Retry;
@@ -214,6 +228,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             api_token,
             policy,
             proposals: std::sync::Mutex::new(VecDeque::new()),
+            logs: std::sync::Mutex::new(HashMap::new()),
             cli,
         };
         if daemon.offer.making {
@@ -1528,6 +1543,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 continue;
             };
             if rec.settled() {
+                self.logs.lock().expect("not poisoned").remove(&id);
                 continue;
             }
             match AssertUnwindSafe(self.tick_swap(rec)).catch_unwind().await {
@@ -1652,7 +1668,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         let (head, now) = self.client.latest_block().await?;
         rec.now = rec.now.max(now);
         let id = B256::from(rec.swap.session().swap_id());
-        let events = self.client.events(id, rec.from_block, head).await?;
+        let events = self.swap_events(rec, id, head).await?;
         let mut o = EvmObservation {
             now,
             ..Default::default()
@@ -1732,6 +1748,42 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             }
         }
         Ok(o)
+    }
+
+    /// The swap's events from its first block up to `head`: the last [`LOG_RESCAN_BLOCKS`] and
+    /// anything newer from the node, the rest from earlier polls.
+    async fn swap_events(
+        &self,
+        rec: &EvmRecord,
+        id: B256,
+        head: u64,
+    ) -> anyhow::Result<Vec<SwapEvent>> {
+        let cached = self
+            .logs
+            .lock()
+            .expect("not poisoned")
+            .get(&rec.id)
+            .cloned()
+            .unwrap_or_default();
+        let from = cached
+            .next
+            .saturating_sub(LOG_RESCAN_BLOCKS)
+            .max(rec.from_block);
+        let fresh = self.client.events(id, from, head).await?;
+        let mut events: Vec<SwapEvent> = cached
+            .events
+            .into_iter()
+            .filter(|e| e.block_number < from)
+            .collect();
+        events.extend(fresh);
+        self.logs.lock().expect("not poisoned").insert(
+            rec.id.clone(),
+            LogCache {
+                events: events.clone(),
+                next: head + 1,
+            },
+        );
+        Ok(events)
     }
 
     async fn zec_events(&self, rec: &mut EvmRecord, out: &mut Vec<EvmEvent>) -> anyhow::Result<()> {

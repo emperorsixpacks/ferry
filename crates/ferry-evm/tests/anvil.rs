@@ -1,5 +1,6 @@
-//! FerryLock + ferry-evm against a local anvil on 127.0.0.1:18545: a happy claim through a
-//! relayer, a refund and a punish, with Ferry shares (Pallas scalars with a cross-group DLEQ).
+//! FerryLock + ferry-evm against a local anvil on 127.0.0.1:18545 (FERRY_EVM_TEST_PORT moves it):
+//! a happy claim through a relayer, a refund and a punish, with Ferry shares (Pallas scalars with
+//! a cross-group DLEQ).
 //!
 //! Spawns `anvil` from PATH or ~/.foundry/bin and kills it (by its own child handle) at the end.
 //! Without an anvil binary the test prints a note and passes. Install: `foundryup`.
@@ -20,7 +21,7 @@ use ferry_evm::{
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
 
-const PORT: u16 = 18545;
+const DEFAULT_PORT: u16 = 18545;
 const AMOUNT: u64 = 250_000_000; // 250 USDC
 const MAX_TIP: u64 = 1_000_000;
 
@@ -111,7 +112,11 @@ async fn start() -> Option<Net> {
         eprintln!("SKIP: no anvil binary (install with foundryup)");
         return None;
     };
-    let anvil = Anvil::at(bin).port(PORT).spawn();
+    let port = std::env::var("FERRY_EVM_TEST_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(DEFAULT_PORT);
+    let anvil = Anvil::at(bin).port(port).spawn();
     let keys: Vec<PrivateKeySigner> = anvil.keys().iter().map(|k| k.clone().into()).collect();
     let url = anvil.endpoint();
     let deployer = ProviderBuilder::new()

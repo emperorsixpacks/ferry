@@ -66,6 +66,8 @@ infra/demo-watchtower.sh run    # a party is killed mid-swap; its watchtower ref
 CHAIN=ltc infra/demo-watchtower.sh run   # the same on Litecoin (CHAIN=evm: USDC in FerryLock on anvil)
 infra/demo-ltc.sh up            # the same demo against litecoind regtest (ZEC/LTC)
 infra/evm-demo.sh test          # ZEC/USDC on anvil: happy, refund and punish
+infra/evm-testnet.sh fork test  # ZEC/USDC rehearsal on a Base Sepolia fork; without `fork`, the
+                                # real Base Sepolia + Zcash testnet run (docs/EVM.md)
 ```
 
 ## Deploying
