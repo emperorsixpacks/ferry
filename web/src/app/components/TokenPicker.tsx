@@ -14,9 +14,9 @@ import { Sheet, arrowKeys } from "./ui/sheet";
 export { NearMark };
 
 // "Select a token": one picker for either side of the swap card. Shielded ZEC on top, then Ferry's
-// own coins (the ones this server swaps, or routes through, first; the rest dimmed, "not available
-// here"), then "More via NEAR Intents": its assets on every chain it reaches (a "More chains" chip
-// opens the rest). Filtered by chain or by a search.
+// own coins this server swaps or routes through, then "More via NEAR Intents": its assets on every
+// chain it reaches (a "More chains" chip opens the rest), then Ferry's other coins, "not available
+// here". Every row can be picked; the card says why a pick can't run. Filtered by chain or a search.
 //
 // Any coin this server does something with can be picked on either side. A row says, in a few
 // words, how it goes with the coin on the other side ("privately, through ZEC", "not with BTC
@@ -42,7 +42,9 @@ const chainName = (id: PairId) => (pairChain(id) ? CHAIN_NAMES[pairChain(id)!] :
 // "Bitcoin", "USD Coin · Base", "Wrapped Ether · Arbitrum"
 export const tokenSubtitle = (id: PairId) => (pairChain(id) ? `${assetName(id)} · ${chainName(id)}` : assetName(id));
 
-// One row of the sheet. `sub` replaces the coin's subtitle; `off` says why it can't be picked.
+// One row of the sheet. `sub` replaces the coin's subtitle. `off`: this server doesn't swap the coin
+// (it is listed under "Not available here", with these words); `can`: it can be picked all the same
+// (the swap card then says why it can't run), or not at all (dimmed).
 export interface TokenRow {
   id: RowId;
   can: boolean;
@@ -104,8 +106,8 @@ export function TokenSheet({ open, onClose, rows, selected, onPick, label = "Tok
     const q = query.trim().toLowerCase();
     if (filter.startsWith("near:")) return [];
     const list = rows.filter((r) => (filter === "all" || (r.id !== "zec" && chainMark(r.id) === filter)) && (!q || matches(r.id, q)));
-    // what can be picked first, in the order given
-    return [...list.filter((r) => r.can), ...list.filter((r) => !r.can)];
+    // what this server swaps first, in the order given
+    return [...list.filter((r) => !r.off), ...list.filter((r) => r.off)];
   }, [rows, filter, query]);
 
   // the chains NEAR Intents reaches besides the card's own, most tokens first
@@ -129,10 +131,11 @@ export function TokenSheet({ open, onClose, rows, selected, onPick, label = "Tok
     onPick(id);
     onClose();
   };
-  const focusRow = shown.find((r) => r.id === selected && r.can)?.id ?? shown.find((r) => r.can)?.id;
-  const firstOff = shown.findIndex((r) => !r.can);
-  const can = shown.filter((r) => r.can);
-  // the coins Ferry has no node for here, dimmed so people see what exists
+  const focusRow = shown.find((r) => r.id === selected && r.can)?.id ?? shown.find((r) => r.can && !r.off)?.id;
+  const firstOff = shown.findIndex((r) => !!r.off);
+  const can = shown.filter((r) => !r.off);
+  // the coins Ferry has no node for here, listed so people see what exists (and, on the swap card,
+  // can still pick one to see why it can't run)
   const offGroup =
     firstOff >= 0 ? (
       <div role="group" aria-labelledby="tokens-off">
@@ -140,7 +143,7 @@ export function TokenSheet({ open, onClose, rows, selected, onPick, label = "Tok
           Not available here
         </p>
         {shown
-          .filter((r) => !r.can)
+          .filter((r) => r.off)
           .map((r) => (
             <Row key={r.id} row={r} selected={r.id === selected} focus={false} phone={phone} onPick={pick} />
           ))}
@@ -322,8 +325,7 @@ function Row({ row, selected, focus, phone, onPick }: { row: TokenRow; selected:
   const { id, can, rate } = row;
   const zec = id === "zec";
   const ticker = zec ? "ZEC" : pairName(id).ticker;
-  const sub = row.sub ?? (zec ? "Zcash · shielded" : tokenSubtitle(id));
-  const off = row.off ?? "not available here";
+  const sub = row.off ? `${zec ? "Zcash" : chainName(id)} · ${row.off}` : (row.sub ?? (zec ? "Zcash · shielded" : tokenSubtitle(id)));
   return (
     <button
       type="button"
@@ -339,9 +341,9 @@ function Row({ row, selected, focus, phone, onPick }: { row: TokenRow; selected:
       {zec ? <TokenLogo id="zec" size={36} className={can ? undefined : "opacity-40 grayscale"} /> : <PairLogo pair={id} size={36} className={can ? undefined : "opacity-40 grayscale"} />}
       <span className="min-w-0 flex-1">
         <span className={cn("block font-medium", can ? "text-slate-900" : "text-slate-500")}>{ticker}</span>
-        <span className="block truncate text-[13px] text-slate-500">{can ? sub : `${zec ? "Zcash" : chainName(id)} · ${off}`}</span>
+        <span className="block truncate text-[13px] text-slate-500">{sub}</span>
       </span>
-      {can && rate != null && !zec ? (
+      {can && !row.off && rate != null && !zec ? (
         <span className="shrink-0 text-right">
           <span className="block text-sm text-slate-900 tabular-nums">
             {amountIn(rate, coinInfo(pairCoin(id)))} {ticker}
@@ -370,7 +372,7 @@ export function TokenPicker({ open, onClose, makers, role }: { open: boolean; on
           const best = bestMaker(makers.list.filter((m) => m.available && (m.role == null || m.role !== role) && forPair(m, id, pair)), 1e8, role);
           rate = best ? quoteOf(best)?.rate : undefined;
         }
-        return { id, can, rate, off: otherWay ? `only for ${dir === "buy" ? "selling" : "buying"} ZEC here` : "not available here" };
+        return { id, can, rate, off: can ? undefined : otherWay ? `only for ${dir === "buy" ? "selling" : "buying"} ZEC here` : "not available here" };
       }),
     [pairs, dir, makers.list, pair, status, role],
   );
@@ -429,7 +431,9 @@ export function CoinPicker({ open, onClose, side, pick, ctx, makers, zat = 1e8, 
   const rows = useMemo((): TokenRow[] => {
     const join = (...parts: (string | null)[]) => parts.filter(Boolean).join(" · ");
     const zec: TokenRow = { id: "zec", can: true, sub: join("Zcash · shielded", hint(ZEC)) };
-    const coins = PAIR_IDS.map((id): TokenRow => (present(ctx, id) ? { id, can: true, sub: join(tokenSubtitle(id), hint(id)), rate: rates[id] } : { id, can: false, off: "not available here" }));
+    // a coin this server doesn't swap at all is listed apart, and can still be picked: the card
+    // then says why it can't run
+    const coins = PAIR_IDS.map((id): TokenRow => (present(ctx, id) ? { id, can: true, sub: join(tokenSubtitle(id), hint(id)), rate: rates[id] } : { id, can: true, off: "not available here" }));
     return [zec, ...coins];
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ctx, rates, side, other]);

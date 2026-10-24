@@ -160,7 +160,7 @@ await desk.getByRole("button", { name: /^You get .*Choose another coin/ }).click
 const listbox = desk.getByRole("listbox", { name: "Tokens" });
 await listbox.waitFor();
 const options = await listbox.getByRole("option").evaluateAll((els) => els.map((e) => [e.textContent, e.getAttribute("aria-disabled")]));
-check(options.length === 11 && options.filter(([, off]) => off === "false").length === 2 && /^ZEC/.test(options[0][0]) && /^BTC/.test(options[1][0]), `the token picker lists shielded ZEC on top and all 10 pairs, only BTC pickable here besides ZEC (${options.length})`);
+check(options.length === 11 && /^ZEC/.test(options[0][0]) && /^BTC/.test(options[1][0]) && options.filter(([t]) => /not available here/.test(t)).length === 9 && options.every(([, off]) => off === "false"), `the token picker lists shielded ZEC on top and all 10 pairs, the 9 this server doesn't swap marked not available here, every one pickable (${options.length})`);
 await shot(desk, "06-token-picker-1440");
 await desk.keyboard.press("Escape");
 check(/Choose another coin/.test((await desk.evaluate(() => document.activeElement?.getAttribute("aria-label"))) ?? ""), "Escape closes the token picker and returns focus to the coin pill");

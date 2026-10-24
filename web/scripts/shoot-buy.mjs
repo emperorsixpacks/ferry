@@ -116,7 +116,7 @@ await shoot("01-buy-card", { settle: 1200 });
 await each((p) => p.getByRole("button", { name: /^You sell .*Choose another coin/ }).click());
 await each((p) => p.getByRole("listbox", { name: "Tokens" }).waitFor());
 const opts = await desk.getByRole("listbox", { name: "Tokens" }).getByRole("option").evaluateAll((els) => els.map((e) => [e.textContent, e.getAttribute("aria-disabled")]));
-check(opts.length === 11 && opts.filter(([, off]) => off === "false").length === 2 && /^ZEC/.test(opts[0][0]), `the picker lists shielded ZEC on top and the 10 pairs, BTC pickable for buying (${opts.length})`);
+check(opts.length === 11 && /^ZEC/.test(opts[0][0]) && /^BTC/.test(opts[1][0]) && opts.every(([, off]) => off === "false"), `the picker lists shielded ZEC on top, then BTC, then the other pairs, every one pickable (${opts.length})`);
 check(opts.filter(([t]) => /not available here/.test(t)).length === 9, "the other 9 say not available here");
 await shoot("02-buy-picker", { settle: 500 });
 await each((p) => p.keyboard.press("Escape"));
