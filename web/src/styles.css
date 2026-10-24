@@ -265,7 +265,10 @@ b {
   order: -1;
   font-size: 13px;
   color: var(--ink-2);
-  max-width: 46ch;
+  /* one line on desktop, so the controls don't jump when a stall starts */
+  max-width: 68ch;
+  text-align: right;
+  justify-self: end;
 }
 
 .error {

@@ -9,3 +9,5 @@ web/node_modules/
 web/dist/
 .demo/
 spikes/zec/jointkey/target/
+.testnet/
+web/film/*.mp4

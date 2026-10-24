@@ -182,7 +182,7 @@ function stepB(s) {
       const tx = broadcast("btc", "btc_lock", s);
       v.state = "BtcLocked";
       log(s, v, "btc", "btc_lock_broadcast", "Broadcast tx_lock: " + btcAmount(s.amounts.btc_sat) + " to the Taproot lock address", tx);
-      s.observer.btc.push(`tx_lock: a P2TR output of ${btcAmount(s.amounts.btc_sat)}. Until it is spent it looks like any other Taproot payment.`);
+      s.observer.btc.push(`tx_lock: a P2TR output of ${btcAmount(s.amounts.btc_sat)}. Until it is spent it looks like any single-key Taproot payment; its two script leaves stay hidden.`);
       return;
     }
     case "BtcLocked": {
@@ -213,6 +213,7 @@ function stepB(s) {
         v.secrets.peer_learned = true;
         f.sweepAt = now() + SWEEP_DELAY_MS;
         log(s, v, "btc", "secret_extracted", "Read z from Z's redeem signature in the tx_redeem witness (z = s − s′). B can now spend the joint Ironwood note", s.tx.btc_redeem);
+        log(s, v, "local", "sweep_delayed", `Waiting ${Math.round(SWEEP_DELAY_MS * SPEED / 1000)}s before sweeping, so the ZEC sweep does not line up with the Bitcoin transaction`);
         return;
       }
       if (lockH != null && h >= lockH + T1) return cancelB(s, v);
@@ -326,7 +327,7 @@ function stepZ(s) {
         const tx = broadcast("btc", "btc_redeem", s);
         v.secrets.mine_revealed = true;
         log(s, v, "btc", "btc_redeem_broadcast", "Decrypted the adaptor with z, added Z's signature and broadcast tx_redeem", tx);
-        s.observer.btc.push("tx_redeem: spends the lock output by script path, revealing one 2-of-2 leaf and two Schnorr signatures.");
+        s.observer.btc.push(`tx_redeem: key-path spend: one 64-byte Schnorr signature, no script and no second key revealed, paying ${btcAmount(s.amounts.btc_sat)} to a P2TR output. Indistinguishable from an ordinary single-key Taproot payment.`);
         return;
       }
       if (s.tx.btc_redeem && mined("btc", s.tx.btc_redeem)) {
