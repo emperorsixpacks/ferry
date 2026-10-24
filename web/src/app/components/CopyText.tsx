@@ -21,9 +21,9 @@ export function CopyText({ value, truncate = true, head = 6, tail = 4, className
           () => {},
         );
       }}
-      className={`group inline-flex cursor-pointer items-center gap-1.5 font-mono text-xs text-slate-500 transition-colors hover:text-slate-900 ${className ?? ""}`}
+      className={`group inline-flex max-w-full cursor-pointer items-center gap-1.5 text-left font-mono text-xs text-slate-500 transition-colors hover:text-slate-900 ${className ?? ""}`}
     >
-      <span>{truncate ? short(value, head, tail) : value}</span>
+      <span className="min-w-0 break-all">{truncate ? short(value, head, tail) : value}</span>
       {copied ? <Check size={12} weight="bold" className="text-brand-500" /> : <Copy size={12} weight="bold" className="opacity-40 transition-opacity group-hover:opacity-100" />}
     </button>
   );
