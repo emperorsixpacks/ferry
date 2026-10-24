@@ -8,8 +8,10 @@ import { useMakers } from "../lib/makers";
 import { aboutTime, chainName, nearAmount, nearText, numText, shade, useNear, useNearQuote, whole } from "../lib/near";
 import { pairName } from "../lib/pairs";
 import { nearToken, type CardProps, type Side } from "../lib/paths";
+import { nearKey, receiveFor, shortAddress, storeReceive, storedReceive, useReceive } from "../lib/receive";
 import { cn } from "../lib/utils";
 import { NearMark } from "./Logos";
+import { ReceiveNext, ReceiveTo } from "./ReceiveTo";
 import { Fact, FlipButton, Panel, PathLine, PrivacyLine, Section, SidePill, amountSize } from "./SwapParts";
 import { CoinPicker } from "./TokenPicker";
 import { Sheet } from "./ui/sheet";
@@ -47,6 +49,11 @@ export function NearCard({ asset, pick, path, ctx, onPick, onFlip, blocked }: Ca
   const runs = near.runs(dir);
   // the ZEC in the Ferry node on screen: what you sell from, or what you hold
   const zecBal = d.status ? d.status.balances.zec_shielded_zat : null;
+  // buying: where the ZEC goes, your Ferry node or your own shielded wallet (the Ferry buy's
+  // sweep_to, on your own node), as the node for the coin between says it can
+  const buyNode = d.pairs.find((p) => p.id === quote?.via)?.buy.status ?? d.pairs.find((p) => p.buy.status?.features?.includes("route"))?.buy.status ?? null;
+  const receive = !selling && runs ? receiveFor("zec", buyNode, d.info.own) : null;
+  const receiveTo = useReceive(receive?.key ?? null);
 
   const problem = (() => {
     if (amount.trim() === "") return selling ? "Enter how much ZEC to sell." : "Enter how much ZEC you want.";
@@ -196,6 +203,7 @@ export function NearCard({ asset, pick, path, ctx, onPick, onFlip, blocked }: Ca
         }}
       >
         <div className="flex flex-col">{selling ? [zecPanel, flip, tokenPanel] : [tokenPanel, flip, zecPanel]}</div>
+        {selling ? runs && d.info.own ? <ReceiveNext symbol={sym} /> : null : <ReceiveTo coin={receive} />}
 
         <div className="mt-3 min-h-5 space-y-0.5 px-1 text-[13px] text-slate-500">
           {quote && via ? (
@@ -237,7 +245,7 @@ export function NearCard({ asset, pick, path, ctx, onPick, onFlip, blocked }: Ca
       <PrivacyLine text={path.privacy} />
 
       <CoinPicker open={picker !== null} onClose={() => setPicker(null)} side={picker ?? "sell"} pick={pick} ctx={ctx} makers={makers} zat={valid ? zat : 1e8} onPick={(t) => onPick(picker ?? "sell", t)} />
-      {quote && confirm ? <NearConfirm open onClose={() => setConfirm(false)} token={token} dir={dir} zat={zat} first={quote} /> : null}
+      {quote && confirm ? <NearConfirm open onClose={() => setConfirm(false)} token={token} dir={dir} zat={zat} first={quote} sweepTo={receiveTo} /> : null}
     </>
   );
 }
@@ -247,12 +255,13 @@ const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 // The destination step and the confirmation, on one sheet: the address (where the asset goes when
 // selling; where a refund goes when buying), checked by NEAR Intents as it's typed, then the
 // amounts and the three things that are different about a NEAR swap.
-function NearConfirm({ open, onClose, token, dir, zat, first }: { open: boolean; onClose: () => void; token: NearToken; dir: Direction; zat: number; first: NearQuote }) {
+function NearConfirm({ open, onClose, token, dir, zat, first, sweepTo }: { open: boolean; onClose: () => void; token: NearToken; dir: Direction; zat: number; first: NearQuote; sweepTo: string | null }) {
   const near = useNear();
   const selling = dir === "sell";
   const sym = token.symbol;
   const chain = chainName(token.blockchain);
-  const [address, setAddress] = useState("");
+  // the address last used on this chain, offered again
+  const [address, setAddress] = useState(() => storedReceive(nearKey(token.blockchain)) ?? "");
   const [busy, setBusy] = useState(false);
   const [fail, setFail] = useState<string | null>(null);
   const typed = address.trim();
@@ -283,7 +292,8 @@ function NearConfirm({ open, onClose, token, dir, zat, first }: { open: boolean;
     setBusy(true);
     setFail(null);
     try {
-      const job = await startNear({ direction: dir, zec_zat: zat, asset: token.assetId, address: typed, via: quote.via, ...(selling ? { min_out: minOut } : { max_in: maxIn }) });
+      const job = await startNear({ direction: dir, zec_zat: zat, asset: token.assetId, address: typed, via: quote.via, ...(selling ? { min_out: minOut } : { max_in: maxIn, ...(sweepTo ? { sweep_to: sweepTo } : {}) }) });
+      storeReceive(nearKey(token.blockchain), typed);
       near.put(job);
       onClose();
       navigate(`/app/near/${job.id}`);
@@ -300,7 +310,7 @@ function NearConfirm({ open, onClose, token, dir, zat, first }: { open: boolean;
     <Sheet open={open} onClose={onClose} title={selling ? `Where should the ${sym} go?` : `Where should a refund go?`}>
       <div className="px-5 pb-5">
         <label className="block">
-          <span className="text-[13px] font-medium text-slate-700">{selling ? `Your ${sym} address on ${chain}` : `Your ${sym} address on ${chain}, for a refund`}</span>
+          <span className="text-[13px] font-medium text-slate-700">{selling ? `Receive to: your ${sym} address on ${chain}` : `Your ${sym} address on ${chain}, for a refund`}</span>
           <input
             value={address}
             onChange={(e) => setAddress(e.target.value)}
@@ -333,6 +343,7 @@ function NearConfirm({ open, onClose, token, dir, zat, first }: { open: boolean;
             <>
               <Line label="You send at most" value={nearText(maxIn, token)} strong />
               <Line label="You get" value={`${(zat / 1e8).toFixed(4).replace(/0{1,2}$/, "")} ZEC, shielded`} />
+              <Line label="Receive to" value={sweepTo ? `Your wallet ${shortAddress(sweepTo)}` : "Your Ferry node"} />
             </>
           )}
           <Line label="Through" value={`${via.noun}, then ${selling ? "NEAR Intents" : "Ferry"}`} />

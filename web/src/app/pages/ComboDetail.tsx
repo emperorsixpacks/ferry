@@ -11,6 +11,7 @@ import { ToneBadge } from "../components/ui/badge";
 import { Fold } from "../components/ui/fold";
 import { aboutTime, chainName, comboGot, comboIn, comboMidIn, comboMidOut, comboOut, comboWord, isActive, nearText, useNear } from "../lib/near";
 import type { Tone } from "../lib/progress";
+import { shortAddress } from "../lib/receive";
 import { PAUSE, inAbout, legNote, unitsText, useRoutes, zecText } from "../lib/routes";
 
 // /app/combo/:id: a private swap with NEAR Intents at an end, as one calm card. A status word, a
@@ -108,7 +109,7 @@ function Body({ j }: { j: ComboJob }) {
   else if (j.state === "holding" && j.route.id) head = { tone: "warn", title: `You hold ${zecText(route?.zec.held_zat ?? j.route.held_zat ?? 0)}`, sub: "The second swap couldn't run at your price. Your ZEC is safe in your shielded wallet. Nothing is lost." };
   else if (j.state === "holding") head = { tone: "warn", title: `Your ${midIn} is in your Ferry node`, sub: `${j.problem ? `${j.problem.replace(/\.$/, "")}. ` : ""}Nothing is lost: go on at today's price, or keep the ${midIn}.` };
   else if (j.state === "near_out") head = { tone: "live", title: `Sending your ${c}`, sub: `The private swap is done. NEAR Intents is swapping the ${midOut} for ${c}.` };
-  else if (j.state === "done") head = { tone: "good", title: `You received ${got ?? c}`, sub: `Your ${a} went through shielded ZEC. No transaction links the two Ferry swaps.` };
+  else if (j.state === "done") head = { tone: "good", title: `You received ${got ?? c}`, sub: `Your ${a} went through shielded ZEC. No transaction links the two Ferry swaps.${j.payout_to ? ` It went to your wallet ${shortAddress(j.payout_to)}.` : ""}` };
   else if (j.state === "refunded")
     head = j.back && (j.back.status === "REFUNDED" || j.back.status === "FAILED") ? { tone: "neutral", title: `Your ${midOut} is back`, sub: `NEAR Intents couldn't fill the last part, so it refunded the ${midOut} to your Ferry node.` } : { tone: "neutral", title: `Your ${a} is on its way back`, sub: `NEAR Intents couldn't fill its part, so it refunds your ${a}${j.refund_address ? ` to ${short(j.refund_address)}` : ""}.` };
   else if (j.state === "expired") head = { tone: "neutral", title: "Nothing moved", sub: "No deposit arrived before the deadline. If you sent one late, NEAR Intents refunds it to your refund address." };

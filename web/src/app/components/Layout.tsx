@@ -180,7 +180,8 @@ const amount = (n: number) =>
   n === 0 ? "0" : n.toLocaleString("en-US", n < 1000 ? { maximumSignificantDigits: 4 } : { maximumFractionDigits: 0 });
 
 // Your Ferry node: its initial and name in the bar; its balances, the pair on screen and the
-// way to your swaps in a small menu under it. Escape or a click elsewhere closes it, and Escape
+// way to your wallet and your swaps in a small menu under it. The wallet has no tab of its own:
+// it is your node's, as this menu is, and the swap card links to it where funds are short. Escape or a click elsewhere closes it, and Escape
 // puts focus back on the button.
 function AccountMenu({ name, status }: { name: string | null; status: Status | null }) {
   const { pair } = useLocal();
@@ -265,6 +266,7 @@ function AccountMenu({ name, status }: { name: string | null; status: Status | n
         <div className="border-t border-slate-100 pt-1" onClick={() => setOpen(false)}>
           {(
             [
+              ["Wallet", "/wallet"],
               ["Activity", "/app/activity"],
               ["Help", "/help"],
             ] as const

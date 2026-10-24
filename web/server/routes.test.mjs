@@ -69,6 +69,14 @@ test("a request is rebuilt with allowlisted URLs, leg 2's fallbacks and the paus
   assert.equal(buildRoute({ ...ok, maker1: 0, maker2: [2] }, { list, resolve, legs: LEGS }).body.maker2[0].name, "Ibis");
 });
 
+test("payout_to goes through on the person's own node only", () => {
+  const to = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
+  assert.equal(buildRoute({ ...ok, payout_to: to }, { list, resolve, legs: LEGS }).body.payout_to, undefined, "dropped on a public demo");
+  assert.equal(buildRoute({ ...ok, payout_to: ` ${to} ` }, { list, resolve, legs: LEGS, payout: true }).body.payout_to, to);
+  assert.equal(buildRoute({ ...ok, payout_to: "" }, { list, resolve, legs: LEGS, payout: true }).body.payout_to, undefined);
+  assert.match(buildRoute({ ...ok, payout_to: "0x90F7;rm" }, { list, resolve, legs: LEGS, payout: true }).error, /doesn't look right/);
+});
+
 test("what a browser can't do", () => {
   const no = (body, opts = {}) => buildRoute(body, { list, resolve, legs: LEGS, ...opts });
   assert.equal(no(ok, { legs: null }).status, 503);

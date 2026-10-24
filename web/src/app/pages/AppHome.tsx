@@ -12,7 +12,8 @@ import { NearCard } from "../components/NearCard";
 import { NearOnlyCard } from "../components/NearOnlyCard";
 import { OffCard } from "../components/OffCard";
 import { RouteCard } from "../components/RouteCard";
-import { Fact, FlipButton, Panel, PathLine, PrivacyLine, Section, SidePill, amountSize, capital, minutesText } from "../components/SwapParts";
+import { ReceiveTo } from "../components/ReceiveTo";
+import { Fact, FlipButton, Panel, PathLine, PrivacyLine, Section, SidePill, YouHave, amountSize, capital, minutesText } from "../components/SwapParts";
 import { CoinPicker, tokenSubtitle } from "../components/TokenPicker";
 import { Sheet } from "../components/ui/sheet";
 import { cn } from "../lib/utils";
@@ -22,6 +23,7 @@ import { comboSummary, isActive as nearActive, nearSummary, useNear } from "../l
 import { pairName } from "../lib/pairs";
 import { following, nearAssetOf, usePathCtx, useSelection, type CardProps, type Side } from "../lib/paths";
 import { plainSummary } from "../lib/progress";
+import { receiveFor, useReceive } from "../lib/receive";
 import { secondsLeft, useQuotes, withFirm } from "../lib/quotes";
 import { isRunning, legSwapIds, routeSummary, useRoutes } from "../lib/routes";
 import { useActivityRows } from "./Activity";
@@ -217,8 +219,11 @@ function RouteBanner({ route }: { route: RouteView }) {
 // works it out. The rate comes from the best partner for the direction; the partner and details
 // are behind the settings pill above the card.
 function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip }: CardProps & { status: Status | null }) {
-  const { role, dir, bt, daemon, pair } = useLocal();
+  const { role, dir, bt, daemon, pair, info } = useLocal();
   const buying = dir === "buy";
+  // where what you get goes: your Ferry node, or your own wallet (on your own node)
+  const receive = receiveFor(buying ? "zec" : pair, status, info.own);
+  const receiveTo = useReceive(receive?.key ?? null);
   const makers = useMakers();
   const [partner, setPartner] = useState<string | null>(null);
   const [amount, setAmount] = useState("1.00");
@@ -281,7 +286,7 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
     setBusy(true);
     setFail(null);
     try {
-      const { id } = await startSwap(zat, daemon, maker?.name, firm?.quote_id);
+      const { id } = await startSwap(zat, daemon, maker?.name, firm?.quote_id, receiveTo ? (buying ? { sweep_to: receiveTo } : { payout_to: receiveTo }) : undefined);
       navigate(`/app/swap/${id}`);
     } catch (e) {
       const msg = (e as Error).message;
@@ -298,7 +303,7 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
       Max
     </button>
   );
-  const youHave = (text: string | null) => <span className="truncate tabular-nums">{text == null ? "You have –" : `You have ${text}`}</span>;
+  const youHave = (text: string | null, add?: string) => <YouHave text={text} add={info.own ? add : undefined} />;
   const zecSide: Side = buying ? "buy" : "sell";
 
   const zecPanel = (
@@ -315,7 +320,7 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
           </>
         ) : (
           <>
-            {youHave(zecBal == null ? null : `${zec(zecBal)} ZEC`)}
+            {youHave(zecBal == null ? null : `${zec(zecBal)} ZEC`, "zec")}
             {maxButton}
           </>
         )
@@ -350,7 +355,7 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
       foot={
         buying ? (
           <>
-            {youHave(coinBal == null ? null : `${btcText(coinBal)} ${ticker}`)}
+            {youHave(coinBal == null ? null : `${btcText(coinBal)} ${ticker}`, pair)}
             {maxButton}
           </>
         ) : (
@@ -422,6 +427,7 @@ function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip 
         }}
       >
         <div className="flex flex-col">{buying ? [coinPanel, flip, zecPanel] : [zecPanel, flip, coinPanel]}</div>
+        <ReceiveTo coin={receive} />
 
         <div className="mt-3 min-h-5 space-y-0.5 px-1 text-[13px] text-slate-500">
           {quote ? (
@@ -516,6 +522,11 @@ function problemOf({
 function plainError(raw: string, buying: boolean): string {
   const refused = /maker refused/i.test(raw);
   if (/already in progress/i.test(raw)) return "Finish the swap in progress first.";
+  // a send out of the node and a swap start never run together
+  if (/withdraw/i.test(raw)) return "Your node is sending coins out. Try again in a moment.";
+  // your own wallet's address, refused by your node or by the partner
+  if (/payout_to.*(feature|can't pay)/i.test(raw)) return "That partner can't pay to your own wallet. Pick another partner in settings, or receive to your Ferry node.";
+  if (/^(payout_to|sweep_to)\b/i.test(raw)) return `Your Ferry node refused your wallet's address: ${raw.replace(/^(payout_to|sweep_to):\s*/i, "")}. Check it under Receive to.`;
   if (/api token/i.test(raw)) return "Your Ferry node refused this page. Check how the app was started.";
   if (/reach the daemon|unreachable|connection refused|timed? ?out/i.test(raw)) return "Couldn't reach your partner or your Ferry node. Try again in a moment.";
   if (/not making offers|paused/i.test(raw)) return "That partner just stopped taking swaps. Try again, or pick another one in settings.";

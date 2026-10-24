@@ -8,10 +8,12 @@ import { useMakers } from "../lib/makers";
 import { chainName, nearText, numText, shade, useHop, useNear, whole } from "../lib/near";
 import { storePause, storedPause } from "../lib/pairs";
 import { NEAR_MIN, ROUTE_MIN, aboutText, nearAssetOf, type CardProps, type Side } from "../lib/paths";
+import { nearKey, receiveFor, shortAddress, storeReceive, storedReceive, useReceive } from "../lib/receive";
 import { PAUSE, PAUSES, coinFor, parseUnits, routeQuote, startAmount, tickerOf, unitsText, zecText, type RouteQuote } from "../lib/routes";
 import { cn } from "../lib/utils";
 import { Line, Point } from "./NearCard";
 import { NearMark } from "./Logos";
+import { ReceiveNext, ReceiveTo } from "./ReceiveTo";
 import { Fact, FlipButton, Panel, PathLine, PrivacyLine, RouteChoice, Section, SidePill, amountSize } from "./SwapParts";
 import { CoinPicker, tokenSubtitle } from "./TokenPicker";
 import { Sheet } from "./ui/sheet";
@@ -114,6 +116,11 @@ export function ComboCard({ pick, path, ctx, onPick, onFlip, blocked, optOut }: 
   })();
   const loading = !problem && (hopIn.loading || hopOut.loading || (front && !hopIn.hop) || !q || (back && !hopOut.hop));
   const runs = path.runs;
+  // ending on a Ferry coin (near-route): where it goes, your Ferry node or your own wallet (swap 2's
+  // payout_to, on your own node)
+  const toStatus: Status | null = d.pairs.find((p) => p.id === C)?.sell.status ?? null;
+  const receive = !back && runs ? receiveFor(C, toStatus, d.info.own) : null;
+  const receiveTo = useReceive(receive?.key ?? null);
   const message = problem ?? blocked;
   const minutes: [number, number] = [ROUTE_MIN[pause][0] + (front ? NEAR_MIN : 0) + (back ? NEAR_MIN : 0), ROUTE_MIN[pause][1] + (front ? NEAR_MIN : 0) + (back ? NEAR_MIN : 0)];
   const inWhole = Number(amount);
@@ -244,6 +251,7 @@ export function ComboCard({ pick, path, ctx, onPick, onFlip, blocked, optOut }: 
             </output>
           </Panel>
         </div>
+        {back ? runs && d.info.own ? <ReceiveNext symbol={outName} /> : null : <ReceiveTo coin={receive} />}
 
         <div className="mt-3 min-h-5 space-y-0.5 px-1 text-[13px] text-slate-500">
           {outAbout && rate != null ? (
@@ -297,6 +305,7 @@ export function ComboCard({ pick, path, ctx, onPick, onFlip, blocked, optOut }: 
           minutes={minutes}
           outName={outName}
           outAbout={outAbout}
+          payoutTo={receiveTo}
         />
       ) : null}
     </>
@@ -320,6 +329,7 @@ function ComboConfirm({
   minutes,
   outName,
   outAbout,
+  payoutTo,
 }: {
   onClose: () => void;
   kind: "route-near" | "near-route" | "near-near";
@@ -335,12 +345,15 @@ function ComboConfirm({
   minutes: [number, number];
   outName: string;
   outAbout: string | null;
+  // near-route: the person's own wallet for coin C (null: their Ferry node)
+  payoutTo: string | null;
 }) {
   const near = useNear();
   const front = kind !== "route-near";
   const back = kind !== "near-route";
-  const [address, setAddress] = useState("");
-  const [refund, setRefund] = useState("");
+  // the addresses last used on these chains, offered again
+  const [address, setAddress] = useState(() => (assetOut ? (storedReceive(nearKey(assetOut.blockchain)) ?? "") : ""));
+  const [refund, setRefund] = useState(() => (assetIn ? (storedReceive(nearKey(assetIn.blockchain)) ?? "") : ""));
   const [busy, setBusy] = useState(false);
   const [fail, setFail] = useState<string | null>(null);
   const dest = address.trim();
@@ -383,8 +396,10 @@ function ComboConfirm({
         kind,
         route: { from: A, to: C, zec_zat: q.zat, min_out: q.minOut, pause, ...(front ? {} : { maker1: q.maker1.name, maker2: [q.maker2.name], max_in: maxIn }) },
         ...(front ? { asset_in: assetIn!.assetId, amount_in: units, refund_address: ref, min_mid: minMid! } : {}),
-        ...(back ? { asset_out: assetOut!.assetId, address: dest, min_asset_out: minAssetOut! } : {}),
+        ...(back ? { asset_out: assetOut!.assetId, address: dest, min_asset_out: minAssetOut! } : payoutTo ? { payout_to: payoutTo } : {}),
       });
+      if (back && assetOut) storeReceive(nearKey(assetOut.blockchain), dest);
+      if (front && assetIn) storeReceive(nearKey(assetIn.blockchain), ref);
       near.putCombo(job);
       onClose();
       navigate(`/app/combo/${job.id}`);
@@ -431,7 +446,7 @@ function ComboConfirm({
   return (
     <Sheet open onClose={onClose} title={back ? `Where should the ${outName} go?` : "Where should a refund go?"}>
       <div className="px-5 pb-5">
-        {back && assetOut && destState ? input(`Your ${assetOut.symbol} address on ${chainName(assetOut.blockchain)}`, address, setAddress, destState, "combo-dest-note", true, placeholderFor(assetOut)) : null}
+        {back && assetOut && destState ? input(`Receive to: your ${assetOut.symbol} address on ${chainName(assetOut.blockchain)}`, address, setAddress, destState, "combo-dest-note", true, placeholderFor(assetOut)) : null}
         {front && assetIn && refundState ? input(`Your ${assetIn.symbol} address on ${chainName(assetIn.blockchain)}, for a refund`, refund, setRefund, refundState, "combo-refund-note", !back, placeholderFor(assetIn)) : null}
 
         <dl className="mt-5 space-y-2.5 rounded-2xl bg-slate-50 px-4 py-3.5 text-sm tabular-nums">
@@ -446,6 +461,7 @@ function ComboConfirm({
             <>
               <Line label="You get at least" value={unitsText(q.minNet, C)} strong />
               <Line label="About" value={unitsText(q.out, C)} />
+              <Line label="Receive to" value={payoutTo ? `Your wallet ${shortAddress(payoutTo)}` : "Your Ferry node"} />
             </>
           )}
           <Line label="Takes" value={aboutText(minutes)} />

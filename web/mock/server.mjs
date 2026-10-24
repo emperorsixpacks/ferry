@@ -28,12 +28,22 @@
 //
 // MOCK_Z_LTC_PORT (unset: none) serves Z again as a Litecoin daemon (status and a regtest LTC
 // address), for a UI server that fronts it as the user's LTC node.
+//
+// The user's own wallet (features "withdraw", "withdraw_preview"): B takes sweep_to (its sweep pays
+// a shielded address of the mock's network, u<network>1…, which then leaves the mock world), and
+// every party sends coins out: POST /api/withdraw {asset, amount, to} from its free balance (what no
+// swap holds before its lock), with {"dry_run": true} for the fee only, and GET /api/withdrawals
+// (pending until the next block of its chain, then confirmed). POST /api/_mock/fail-next-withdraw
+// makes the next one fail after it was sent (the network drops it; the coins come back).
+// MOCK_USDC_PORT (unset: none) serves one more Ferry node, for USDC on Base Sepolia (an EVM daemon's
+// status and addresses), that holds coins and runs no swaps: for the wallet's EVM side.
 
 import http from "node:http";
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { MOCK_MAKERS, mockMakerAt, mockMakerByUrl } from "./makers.mjs";
 import { mockRouter } from "./router.mjs";
 import { mockOneClick } from "./oneclick.mjs";
+import { FEES, coinProblem, sendBook, uaPrefix, usdcNode, zecProblem } from "./wallet.mjs";
 import { bucketFor, marketOf, signingText } from "../server/quotes.mjs";
 
 const SPEED = Number(process.env.MOCK_SPEED ?? 1) || 1;
@@ -122,7 +132,8 @@ const rateOf = (makerUrl) => makerOf(makerUrl)?.rate ?? RATE;
 // `taker` proposes ("Z" sells ZEC, "B" buys it); the other party is the maker. `rate`: a firm
 // quote's, else the maker's offer. A route's swap (mock/router.mjs) carries its label (`route`), may
 // be in another coin's units (`coin`: only BTC moves balances) and sweeps to Z (`sweepTo`).
-function newSwap(taker, makerUrl, zec_zat, rate = rateOf(makerUrl), { route = null, coin = "btc", sweepTo = null, payoutTo = null } = {}) {
+// `sweepAddr`: a B taker's sweep_to, the person's own shielded address (the ZEC leaves the mock).
+function newSwap(taker, makerUrl, zec_zat, rate = rateOf(makerUrl), { route = null, coin = "btc", sweepTo = null, payoutTo = null, sweepAddr = null } = {}) {
   const btc_sat = Math.round((zec_zat / 1e8) * rate);
   const pts = { Z: { p: hex(32), s: point() }, B: { p: hex(32), s: point() } };
   const s = {
@@ -133,6 +144,7 @@ function newSwap(taker, makerUrl, zec_zat, rate = rateOf(makerUrl), { route = nu
     coin,
     sweepTo,
     payoutTo,
+    sweepAddr,
     amounts: { zec_zat, btc_sat },
     keys: { pts, joint_ak: hex(32), sigma: Math.random() < 0.5 ? 1 : -1 },
     addresses: { btc_lock: "bcrt1p" + bech(58), zec_joint: "uregtest1" + bech(104) },
@@ -275,7 +287,7 @@ function stepB(s) {
     case "BtcRedeemed":
       if (!s.tx.zec_sweep && now() >= f.sweepAt) {
         const tx = broadcast("zec", "zec_sweep", s);
-        const to = s.sweepTo ? `the route's shielded address (${parties[s.sweepTo].name}'s wallet)` : "B's own shielded address";
+        const to = s.sweepAddr ? `your own shielded address (sweep_to)` : s.sweepTo ? `the route's shielded address (${parties[s.sweepTo].name}'s wallet)` : "B's own shielded address";
         log(s, v, "zec", "zec_sweep_broadcast", `Swept the joint note to ${to}, signing with ask = σ(z + b)`, tx);
         s.observer.zec.push("Ironwood bundle: 2 actions. Only nullifiers, randomized keys (rk) and encrypted notes; nothing in it appears on Bitcoin.");
         return;
@@ -283,6 +295,10 @@ function stepB(s) {
       if (s.tx.zec_sweep && mined("zec", s.tx.zec_sweep)) {
         v.state = "ZecSwept";
         v.outcome = "swapped";
+        if (s.sweepAddr) {
+          log(s, v, "local", "swap_complete", `Swap complete. ${zecAmount(s.amounts.zec_zat)} paid to ${s.sweepAddr} (sweep_to)`);
+          return;
+        }
         credit(s.sweepTo ?? "B", "zec_shielded_zat", s.amounts.zec_zat);
         log(s, v, "local", "swap_complete", "Swap complete. B holds " + zecAmount(s.amounts.zec_zat) + " in its own Ironwood notes");
       }
@@ -509,6 +525,50 @@ function inject(s, role) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// the parties' own wallets (mock/wallet.mjs): free coins, sends out
+
+// what live swaps hold of a party's coin that is still in its wallet (not yet locked): Z's ZEC and
+// B's BTC, with what the lock's fee needs
+function heldInWallet(role, asset) {
+  let n = 0;
+  for (const s of swaps) {
+    if (s.views[role].outcome) continue;
+    if (role === "Z" && asset === "zec_shielded_zat" && !s.tx.zec_lock) n += s.amounts.zec_zat + ZEC_FEE_RESERVE;
+    if (role === "B" && asset === "btc_sat" && s.coin === "btc" && !s.tx.btc_lock) n += s.amounts.btc_sat + LOCK_FEE_RESERVE;
+  }
+  return n;
+}
+
+const books = { Z: sendBook(), B: sendBook() };
+function walletAssets(role, coin) {
+  const p = parties[role];
+  const slot = (key, sym, c, check, fee, alias) => ({
+    sym,
+    coin: c,
+    decimals: 8,
+    check,
+    fee,
+    alias,
+    units: () => BigInt(p.balances[key]),
+    free: () => BigInt(Math.max(0, p.balances[key] - heldInWallet(role, key))),
+    take: (n) => (p.balances[key] -= Number(n)),
+    give: (n) => (p.balances[key] += Number(n)),
+  });
+  const own = zecAddressOf(p);
+  return {
+    zec: slot("zec_shielded_zat", "ZEC", "zec", (to) => (to === own ? "that is this node's own address" : zecProblem(to, chains.zec.network)), FEES.zec),
+    btc: slot("btc_sat", coin === "ltc" ? "LTC" : "BTC", coin ?? "btc", (to) => coinProblem(to, coin ?? "btc", chains.btc.network), FEES.btc, coin === "ltc" ? "ltc" : undefined),
+  };
+}
+const zecAddressOf = (p) => `${uaPrefix(chains.zec.network)}mockwallet${Buffer.from(p.name).toString("hex")}`;
+const sentTx = (chain) => {
+  const tx = { txid: hex(32), kind: "withdraw", swapId: null, height: null };
+  chains[chain].txs.push(tx);
+  return tx;
+};
+const sentConfs = (r) => (r.tx?.height != null ? chains[r.asset === "zec" ? "zec" : "btc"].height - r.tx.height + 1 : 0);
+
+// ---------------------------------------------------------------------------------------------
 // views
 
 function swapView(s, role) {
@@ -540,6 +600,7 @@ function swapView(s, role) {
     // a route's swap: its label, as ferryd stores the one the router sends
     ...(s.route ? { route: s.route } : {}),
     ...(s.payoutTo && role === "Z" ? { payout_to: s.payoutTo } : {}),
+    ...(s.sweepAddr && role === "B" ? { sweep_to: s.sweepAddr } : {}),
   };
 }
 
@@ -555,15 +616,18 @@ function statusView(role, coin = null) {
       zec: { network: chains.zec.network, height: chains.zec.height, pool: chains.zec.pool },
     },
     offer: { pair: coin === "ltc" ? "ZEC/LTC" : "ZEC/BTC", rate_sat_per_zec: RATE, min_zat: 10000000, max_zat: 1000000000, fee_sat: FEE_SAT, t1_blocks: T1, t2_blocks: T2, btc_lock_confs: BTC_CONFS, zec_confs: ZEC_CONFS },
-    features: PAYOUT ? ["route", "payout"] : ["route"],
+    features: [...(PAYOUT ? ["route", "payout"] : ["route"]), "withdraw", "withdraw_preview"],
   };
 }
 
 // GET /api/addresses: where to fund this party (its BTC address is fixed for the mock's lifetime)
-function addressesView(role, coin = null) {
+// (as ferryd: the counter coin's funding address is stable; ?fresh=1 gives a new one each time)
+function addressesView(role, coin = null, fresh = false) {
   const p = parties[role];
-  const counter = coin === "ltc" ? { coin: "ltc", network: chains.btc.network, address: (p.ltcAddress ??= "rltc1q" + bech(38)) } : { coin: "btc", network: chains.btc.network, address: p.address };
-  return { role, name: p.name, btc: counter, zec: { address: `u${chains.zec.network}1mockwallet${Buffer.from(p.name).toString("hex")}` } };
+  const ltc = coin === "ltc";
+  const address = fresh ? (ltc ? "rltc1q" : "bcrt1q") + bech(38) : ltc ? (p.ltcAddress ??= "rltc1q" + bech(38)) : p.address;
+  const counter = { coin: ltc ? "ltc" : "btc", ticker: ltc ? "LTC" : "BTC", network: chains.btc.network, address };
+  return { role, name: p.name, btc: counter, zec: { address: zecAddressOf(p), network: chains.zec.network } };
 }
 
 const STARTED = now();
@@ -692,7 +756,10 @@ setInterval(() => {
     stepZ(s);
   }
   router?.tick();
+  for (const role of ["Z", "B"]) books[role].tick(sentConfs);
+  usdc?.tick();
   for (const role of ["Z", "B"]) pushEvents(role);
+  pushUsdc();
 }, 200);
 
 // ---------------------------------------------------------------------------------------------
@@ -712,6 +779,14 @@ function pushEvents(role) {
       if (body !== c.last[s.id]) {
         c.last[s.id] = body;
         c.res.write(`event: swap\ndata: ${body}\n\n`);
+      }
+    }
+    // as ferryd: each send out, whenever it changes
+    for (const w of books[role].list(sentConfs)) {
+      const body = JSON.stringify(w);
+      if (body !== c.last[`w:${w.id}`]) {
+        c.last[`w:${w.id}`] = body;
+        c.res.write(`event: withdrawal\ndata: ${body}\n\n`);
       }
     }
   }
@@ -748,7 +823,18 @@ function handler(role, coin = null) {
     if (req.method === "OPTIONS") return send(res, 204, {});
 
     if (req.method === "GET" && path === "/api/status") return send(res, 200, statusView(role, coin));
-    if (req.method === "GET" && path === "/api/addresses") return send(res, 200, addressesView(role, coin));
+    if (req.method === "GET" && path === "/api/addresses") return send(res, 200, addressesView(role, coin, url.searchParams.get("fresh") === "1"));
+    // the party's own wallet: sends out, and what it sent (mock/wallet.mjs)
+    if (req.method === "GET" && path === "/api/withdrawals") return send(res, 200, books[role].list(sentConfs));
+    if (req.method === "POST" && path === "/api/withdraw") {
+      const body = await readBody(req);
+      const [code, out] = books[role].withdraw(body, walletAssets(role, coin), { confs: sentConfs, broadcast: (r) => sentTx(r.asset === "zec" ? "zec" : "btc"), failMs: ZEC_BLOCK_MS * 1.5 });
+      return send(res, code, out);
+    }
+    if (req.method === "POST" && path === "/api/_mock/fail-next-withdraw") {
+      books[role].failNext();
+      return send(res, 200, { ok: true });
+    }
 
     // the mock makers' public offers (ferryd's GET /peer/offer): B makers on B, Z makers on Z
     const maker = req.method === "GET" ? mockMakerAt(path, role) : undefined;
@@ -780,6 +866,8 @@ function handler(role, coin = null) {
       swaps.length = 0;
       router?.reset();
       for (const r of ["Z", "B"]) parties[r].balances = { ...START[r] };
+      for (const r of ["Z", "B"]) books[r].reset();
+      usdc?.reset();
       for (const r of ["Z", "B"]) for (const c of clients[r]) c.last = {};
       return send(res, 200, { ok: true });
     }
@@ -805,6 +893,13 @@ function handler(role, coin = null) {
       // ferryd's route and payout fields, with its words
       if (body.payout_to != null && (!PAYOUT || role !== "Z")) return send(res, 400, { error: PAYOUT ? "payout_to: only a Z taker (selling ZEC) is paid out" : "unknown field payout_to" });
       if (body.payout_to != null && (typeof body.payout_to !== "string" || !/^[A-Za-z0-9:._-]{8,128}$/.test(body.payout_to))) return send(res, 400, { error: "payout_to: not an address" });
+      // sweep_to: B's sweep pays the person's own shielded address (ferryd's words)
+      if (body.sweep_to != null && role !== "B") return send(res, 400, { error: "sweep_to is for role B only: it says where B's sweep pays the ZEC it buys" });
+      const sweepAddr = typeof body.sweep_to === "string" ? body.sweep_to.trim() : null;
+      if (body.sweep_to != null) {
+        const bad = sweepAddr ? zecProblem(sweepAddr, chains.zec.network) : "not an address";
+        if (bad) return send(res, 400, { error: `sweep_to: ${bad}` });
+      }
       if (body.min_counter != null && role !== "Z") return send(res, 400, { error: "min_counter: only for role Z" });
       if (body.max_counter != null && role !== "B") return send(res, 400, { error: "max_counter: only for role B" });
       if (body.min_counter != null && sat < Number(body.min_counter)) return send(res, 400, { error: `The maker pays ${btcAmount(sat)} for ${zecAmount(zat)}, below your minimum of ${btcAmount(Number(body.min_counter))} (min_counter)` });
@@ -818,7 +913,7 @@ function handler(role, coin = null) {
       if (bHave < sat + LOCK_FEE_RESERVE)
         return send(res, 400, { error: mine(`B does not have enough BTC: ${btcAmount(sat + LOCK_FEE_RESERVE)} needed (the amount plus about ${btcAmount(LOCK_FEE_RESERVE)} for the lock's fee), ${btcAmount(bHave)} in the wallet`) });
       firm?.take();
-      const s = newSwap(role, body.maker ?? null, zat, rate, { payoutTo: body.payout_to ?? null });
+      const s = newSwap(role, body.maker ?? null, zat, rate, { payoutTo: body.payout_to ?? null, sweepAddr });
       return send(res, 201, { id: s.id });
     }
 
@@ -874,6 +969,60 @@ for (const role of ["Z", "B"]) {
 if (process.env.MOCK_Z_LTC_PORT) {
   const port = Number(process.env.MOCK_Z_LTC_PORT);
   http.createServer(handler("Z", "ltc")).listen(port, "127.0.0.1", () => console.log(`mock ferryd Z as LTC on http://127.0.0.1:${port}`));
+}
+
+// MOCK_USDC_PORT: a Ferry node for USDC on Base Sepolia that holds coins and runs no swaps
+// (mock/wallet.mjs usdcNode): its status, addresses, sends, and status events
+const USDC_PORT = process.env.MOCK_USDC_PORT ? Number(process.env.MOCK_USDC_PORT) : null;
+const usdc = USDC_PORT ? usdcNode({ zec: chains.zec, blockMs: ms(2000) }) : null;
+const usdcClients = new Set();
+function pushUsdc() {
+  if (!usdc) return;
+  for (const c of usdcClients) {
+    const status = JSON.stringify(usdc.status());
+    // its block height ticks with time: send the rest's changes, and a fresh height now and then
+    const key = status.replace(/"height":\d+,/g, "").replace(/"time":\d+/, "");
+    if (key !== c.last || now() - c.at > 5000) {
+      c.last = key;
+      c.at = now();
+      c.res.write(`event: status\ndata: ${status}\n\n`);
+    }
+    for (const w of usdc.sends()) {
+      const body = JSON.stringify(w);
+      if (body !== c.sent[w.id]) {
+        c.sent[w.id] = body;
+        c.res.write(`event: withdrawal\ndata: ${body}\n\n`);
+      }
+    }
+  }
+}
+if (USDC_PORT) {
+  http
+    .createServer(async (req, res) => {
+      const path = new URL(req.url, "http://x").pathname;
+      if (req.method === "OPTIONS") return send(res, 204, {});
+      if (req.method === "GET" && path === "/api/events") {
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
+        res.write(": connected\n\n");
+        const c = { res, last: null, at: 0, sent: {} };
+        usdcClients.add(c);
+        pushUsdc();
+        const ping = setInterval(() => res.write(": ping\n\n"), 15000);
+        req.on("close", () => {
+          clearInterval(ping);
+          usdcClients.delete(c);
+        });
+        return;
+      }
+      if (req.method === "POST" && path === "/api/_mock/fail-next-withdraw") {
+        usdc.failNext();
+        return send(res, 200, { ok: true });
+      }
+      const r = await usdc.route(req, path, readBody, () => sentTx("zec"));
+      if (r) return send(res, r[0], r[1]);
+      send(res, 404, { error: "not found" });
+    })
+    .listen(USDC_PORT, "127.0.0.1", () => console.log(`mock ferryd for USDC on Base Sepolia (holds coins, no swaps) on http://127.0.0.1:${USDC_PORT}`));
 }
 
 if (NEAR_PORT) {

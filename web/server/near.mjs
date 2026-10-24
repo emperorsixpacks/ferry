@@ -39,6 +39,7 @@ import http from "node:http";
 import https from "node:https";
 import { pairLabel } from "./quotes.mjs";
 import { symbolFamily } from "./paths.mjs";
+import { receiveAddress } from "./own.mjs";
 import { PAUSES, assetOf, buildRoute, canRoute } from "./routes.mjs";
 
 export const ONE_CLICK_URL = "https://1click.chaindefuser.com";
@@ -892,9 +893,11 @@ export function nearDesk({
   // sell {direction: "sell", zec_zat, asset, address, min_out}: a real 1Click quote paying `asset`
   //   to `address`, then the Ferry swap paying its coin into the quote's deposit address. min_out:
   //   the least of `asset` the person agreed to; a quote that promises less is refused.
-  // buy {direction: "buy", zec_zat, asset, address (refunds), max_in}: a real 1Click quote taking
-  //   `asset` and delivering coin C into the user's own Ferry node; the Ferry buy follows once it
-  //   has arrived. max_in: the most of `asset` the person agreed to send.
+  // buy {direction: "buy", zec_zat, asset, address (refunds), max_in, sweep_to?}: a real 1Click quote
+  //   taking `asset` and delivering coin C into the user's own Ferry node; the Ferry buy follows once
+  //   it has arrived. max_in: the most of `asset` the person agreed to send. sweep_to: the shielded
+  //   address the ZEC goes to instead of the node's own wallet (the UI server passes it on the
+  //   person's own node only; own.mjs).
   // `admit()` is the server's own guard (idle daemons, rate limits), called just before anything
   // is asked of 1Click; `refused()` gives back what it took if the start then fails.
   async function start(body, { admit: gate = admit, refused = () => {} } = {}) {
@@ -913,6 +916,8 @@ export function nearDesk({
     const address = String(body.address).trim();
     const limit = big(dir === "sell" ? body?.min_out : body?.max_in);
     if (limit == null || limit <= 0n) return bad(dir === "sell" ? "min_out must be a whole number of the token's smallest units" : "max_in must be a whole number of the token's smallest units");
+    const sweepTo = dir === "buy" && body?.sweep_to ? receiveAddress(body.sweep_to) : null;
+    if (dir === "buy" && body?.sweep_to && !sweepTo) return bad("That shielded address doesn't look right. Check it and try again.", "sweep_to");
 
     const routes = (await vias(dir, zat, asset)).filter((v) => v.run);
     if (!routes.length) return { status: 409, body: { error: execution && !testOk ? "NEAR Intents runs on mainnet: your Ferry node for this coin is on a test network." : "No partner takes this swap through NEAR Intents right now." } };
@@ -993,6 +998,7 @@ export function nearDesk({
       via_asset: { id: v.token.assetId, symbol: v.token.symbol, decimals: v.token.decimals },
       address,
       own_address: own,
+      sweep_to: sweepTo,
       ferry: { swap_id: null, state: null, outcome: null, counter: units.toString(), earlier: [] },
       near: {
         deposit_address: deposit,
@@ -1115,7 +1121,7 @@ export function nearDesk({
     }
     const blocked = await admit({ key: j.daemon, pair: j.via, auto: true });
     if (blocked) return wait(j, blocked.body?.error ?? "Waiting for another swap to finish.");
-    const r = await ferryStart(j.daemon, makerIndex, zat, { max_counter: budget > 0n ? budget : 0n }, firm && zat >= firm.min_zat && zat <= firm.max_zat ? firm : null);
+    const r = await ferryStart(j.daemon, makerIndex, zat, { max_counter: budget > 0n ? budget : 0n, sweep_to: j.sweep_to ?? null }, firm && zat >= firm.min_zat && zat <= firm.max_zat ? firm : null);
     if (r.status !== 201 || typeof r.body?.id !== "string") return wait(j, r.body?.error ?? "Your Ferry node didn't start the swap. Trying again.");
     if (firm && zat >= firm.min_zat && zat <= firm.max_zat) quotes.take(firm);
     if (j.ferry.swap_id) j.ferry.earlier.push(j.ferry.swap_id);
@@ -1483,7 +1489,7 @@ export function nearDesk({
     j.route.id = r.body.id;
     routeSnap(j, r.body);
     j.state = "route";
-    note(j, "route_started", `Private swap started: ${unitsText(BigInt(body.max_in), { symbol: pairLabel(j.from)?.pair.split("/")[1] ?? j.from, decimals: FERRY_ASSETS[j.from]?.decimals ?? 8 })} at most, through ${(body.zec_zat / 1e8).toFixed(4)} shielded ZEC, for ${pairLabel(j.to)?.pair.split("/")[1] ?? j.to}${payoutTo ? ", paid to NEAR Intents' deposit address" : ""}`);
+    note(j, "route_started", `Private swap started: ${unitsText(BigInt(body.max_in), { symbol: pairLabel(j.from)?.pair.split("/")[1] ?? j.from, decimals: FERRY_ASSETS[j.from]?.decimals ?? 8 })} at most, through ${(body.zec_zat / 1e8).toFixed(4)} shielded ZEC, for ${pairLabel(j.to)?.pair.split("/")[1] ?? j.to}${payoutTo ? (payoutTo === j.payout_to ? ", paid to your own wallet" : ", paid to NEAR Intents' deposit address") : ""}`);
     return null;
   }
 
@@ -1492,7 +1498,9 @@ export function nearDesk({
   //  route: {from: A, to: C, zec_zat, maker1, maker2, max_in, min_out, pause}   the card's private swap
   //  asset_in, amount_in, refund_address, min_mid     NEAR Intents first: send amount_in of X (min_mid:
   //                                                   the least A the card counted on); refunds of X
-  //  asset_out, address, min_asset_out}               NEAR Intents last: Y to `address`, at least this
+  //  asset_out, address, min_asset_out,              NEAR Intents last: Y to `address`, at least this
+  //  payout_to?}                                      near-route: where swap 2 pays coin C instead of
+  //                                                   the node's own wallet (the person's own node only)
   // route-near starts the route now, paying into a 1Click deposit address made here (payout_to, never
   // a browser's); the others wait for the person's deposit, then start the route (and ask the second
   // quote) once NEAR Intents delivered coin A into their own B node, at the price then, never under
@@ -1539,6 +1547,9 @@ export function nearDesk({
       if (p) return bad(p, "refund_address");
       refundAddress = String(body.refund_address).trim();
     }
+    // near-route ends on a Ferry coin: the person's own wallet for it, if they named one
+    const payoutTo = kind === "near-route" && body?.payout_to ? receiveAddress(body.payout_to, 100) : null;
+    if (kind === "near-route" && body?.payout_to && !payoutTo) return bad("That address doesn't look right. Check it and try again.", "payout_to");
     const minAssetOut = back ? big(body?.min_asset_out) : null;
     if (back && (minAssetOut == null || minAssetOut <= 0n)) return bad("min_asset_out must be a whole number of the token's smallest units");
     const amountIn = front ? big(body?.amount_in) : null;
@@ -1551,6 +1562,10 @@ export function nearDesk({
     if ((front && !nodeIn) || (back && !nodeOut)) return { status: 409, body: { error: "This server doesn't front your Ferry node for that coin, so NEAR Intents has nowhere to deliver it." } };
     if ([nodeIn, nodeOut].some((d) => d && !canRun(d.status))) return { status: 409, body: { error: "NEAR Intents runs on mainnet: your Ferry node for this coin is on a test network." } };
     if (nodeOut && !hasPayout(nodeOut.status)) return { status: 501, body: { error: "Your Ferry node can't pay out to NEAR Intents yet: it needs a ferryd with payout_to. Update it and try again." } };
+    if (payoutTo) {
+      const nodeC = (await daemons.list("sell")).find((d) => d.pair === to);
+      if (!nodeC || !hasPayout(nodeC.status)) return { status: 501, body: { error: "Your Ferry node can't pay out to another wallet yet: it needs a ferryd with payout_to. Update it, or receive to your Ferry node." } };
+    }
 
     const blocked = await gate({ key: (nodeIn ?? nodeOut).key, pair: from, kind: front ? "route-later" : "route" });
     if (blocked) return blocked;
@@ -1579,6 +1594,7 @@ export function nearDesk({
       via_out: viaOut ? { id: viaOut.assetId, symbol: viaOut.symbol, decimals: viaOut.decimals } : null,
       address,
       refund_address: refundAddress,
+      payout_to: payoutTo,
       own_in: ownIn,
       own_out: ownOut,
       daemon_in: nodeIn?.key ?? null,
@@ -1809,7 +1825,7 @@ export function nearDesk({
     }
     const blocked = await admit({ key: j.daemon_in, pair: j.from, kind: "route", auto: true });
     if (blocked) return comboWait(j, blocked.body?.error ?? "Waiting for another swap to finish.");
-    const r = await createRoute(j, built.body, back?.deposit_address ?? null);
+    const r = await createRoute(j, built.body, back?.deposit_address ?? j.payout_to ?? null);
     if (r) return comboWait(j, r.body?.error ?? "The private swap didn't start. Trying again.");
     if (back) {
       j.back = back;
@@ -1919,6 +1935,7 @@ export function nearDesk({
       via_asset: j.via_asset,
       address: j.address,
       own_address: j.own_address,
+      sweep_to: j.sweep_to ?? null,
       ferry: j.ferry,
       near: { ...near, signature: signed?.signature ?? null, timestamp: signed?.timestamp ?? null },
       problem: j.problem ?? null,
@@ -1992,7 +2009,9 @@ export function nearDesk({
 //   POST /api/near/combos/:id/retry one holding its coin (its route couldn't start) tries again
 // `origin(req)`: an error when the request's Origin may not post here. Returns false for a path it
 // doesn't serve.
-export function nearRoutes(desk, { send, readBody, origin = () => null, limit = () => null, admit = async () => null }) {
+// `own(req)`: the person owns the node (own.mjs), so a buy's sweep_to and a NEAR-first private swap's
+// payout_to go through; otherwise they are dropped.
+export function nearRoutes(desk, { send, readBody, origin = () => null, limit = () => null, admit = async () => null, own = () => false }) {
   const post = async (req, res, max = 2048) => {
     if (req.method !== "POST") {
       send(res, 405, { error: "Method not allowed" });
@@ -2029,6 +2048,7 @@ export function nearRoutes(desk, { send, readBody, origin = () => null, limit = 
     if (path === "/api/near/swap") {
       const body = await post(req, res, 4096);
       if (body === undefined) return true;
+      if (body && typeof body === "object" && !own(req)) delete body.sweep_to;
       // what admit() took (a rate-limit slot) comes back if the start then fails
       const r = await desk.start(body, { admit: (what) => admit(req, what), refused: () => req.ferryRefused?.() });
       send(res, r.status, r.body);
@@ -2064,6 +2084,7 @@ export function nearRoutes(desk, { send, readBody, origin = () => null, limit = 
     if (path === "/api/near/combo") {
       const body = await post(req, res, 4096);
       if (body === undefined) return true;
+      if (body && typeof body === "object" && !own(req)) delete body.payout_to;
       const r = await desk.startCombo(body, { admit: (what) => admit(req, what), refused: () => req.ferryRefused?.() });
       send(res, r.status, r.body);
       return true;

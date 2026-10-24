@@ -191,7 +191,7 @@ await desk.keyboard.press("Escape");
 await desk.getByRole("button", { name: "Sell ZEC for SOL" }).click();
 const dialog = desk.getByRole("dialog", { name: "Where should the SOL go?" });
 await dialog.waitFor();
-const field = dialog.getByRole("textbox", { name: /Your SOL address on Solana/ });
+const field = dialog.getByRole("textbox", { name: /your SOL address on Solana/i });
 await field.fill("0x2527D02599Ba641c19FEa793cD0F167589a0f10D");
 await text(desk, "That doesn't look like an address on this chain.");
 check((await dialog.getByRole("button", { name: "Start swap" }).isDisabled()) === true, "an Ethereum address for SOL is refused before anything is asked");

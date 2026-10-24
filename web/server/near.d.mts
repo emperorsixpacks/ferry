@@ -149,5 +149,7 @@ export function nearRoutes(
     origin?: (req: IncomingMessage) => string | null;
     limit?: (req: IncomingMessage) => number;
     admit?: (req: IncomingMessage, what: { key: string; pair: string; kind?: AdmitKind }) => Promise<Reply | null>;
+    // the person owns the node (own.mjs): a buy's sweep_to and a NEAR-first route's payout_to pass
+    own?: (req: IncomingMessage) => boolean;
   },
 ): (req: IncomingMessage, res: ServerResponse, path: string) => Promise<boolean>;

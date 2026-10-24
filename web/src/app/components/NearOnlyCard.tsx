@@ -4,6 +4,7 @@ import { NearError, startCombo, type NearToken } from "@/api";
 import { navigate } from "@/router";
 import { aboutTime, chainName, nearText, numText, shade, useDirect, useNear, whole, type HopQuoted } from "../lib/near";
 import { type CardProps, type Side } from "../lib/paths";
+import { nearKey, storeReceive, storedReceive } from "../lib/receive";
 import { cn } from "../lib/utils";
 import { firstAmount, toUnits } from "./ComboCard";
 import { NearMark } from "./Logos";
@@ -174,8 +175,9 @@ export function NearOnlyCard({ pick, path, ctx, onPick, onFlip, blocked, optOut 
 // amounts and what this swap is, on one sheet.
 function AloneConfirm({ onClose, from, to, units, time }: { onClose: () => void; from: NearToken; to: NearToken; units: string; time: number }) {
   const near = useNear();
-  const [address, setAddress] = useState("");
-  const [refund, setRefund] = useState("");
+  // the addresses last used on these chains, offered again
+  const [address, setAddress] = useState(() => storedReceive(nearKey(to.blockchain)) ?? "");
+  const [refund, setRefund] = useState(() => storedReceive(nearKey(from.blockchain)) ?? "");
   const [busy, setBusy] = useState(false);
   const [fail, setFail] = useState<string | null>(null);
   const dest = address.trim();
@@ -205,6 +207,8 @@ function AloneConfirm({ onClose, from, to, units, time }: { onClose: () => void;
     setFail(null);
     try {
       const job = await startCombo({ kind: "near-only", asset_in: from.assetId, amount_in: units, refund_address: ref, asset_out: to.assetId, address: dest, min_asset_out: minOut });
+      storeReceive(nearKey(to.blockchain), dest);
+      storeReceive(nearKey(from.blockchain), ref);
       near.putCombo(job);
       onClose();
       navigate(`/app/combo/${job.id}`);
@@ -247,7 +251,7 @@ function AloneConfirm({ onClose, from, to, units, time }: { onClose: () => void;
   return (
     <Sheet open onClose={onClose} title={`Where should the ${to.symbol} go?`}>
       <div className="px-5 pb-5">
-        {field(`Your ${to.symbol} address on ${chainName(to.blockchain)}`, address, setAddress, state(dest, destChecked, to, "dest"), "alone-dest-note", true)}
+        {field(`Receive to: your ${to.symbol} address on ${chainName(to.blockchain)}`, address, setAddress, state(dest, destChecked, to, "dest"), "alone-dest-note", true)}
         {field(`Your ${from.symbol} address on ${chainName(from.blockchain)}, for a refund`, refund, setRefund, state(ref, refChecked, from, "refund"), "alone-refund-note", false)}
 
         <dl className="mt-5 space-y-2.5 rounded-2xl bg-slate-50 px-4 py-3.5 text-sm tabular-nums">

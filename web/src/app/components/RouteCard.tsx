@@ -10,9 +10,11 @@ import { type CardProps, type Side } from "../lib/paths";
 import { useQuotes } from "../lib/quotes";
 import { PAUSE, PAUSES, coinFor, parseUnits, routeQuote, startAmount, tickerOf, unitsText, useRoutes, zecText, type RouteQuote } from "../lib/routes";
 import { cn } from "../lib/utils";
+import { receiveFor, shortAddress, useReceive } from "../lib/receive";
+import { ReceiveTo } from "./ReceiveTo";
 import { RouteStrip } from "./RouteStrip";
 import { CoinPicker, tokenSubtitle } from "./TokenPicker";
-import { Fact, FlipButton, Panel, PathLine, PrivacyLine, RouteChoice, Section, SidePill, amountSize } from "./SwapParts";
+import { Fact, FlipButton, Panel, PathLine, PrivacyLine, RouteChoice, Section, SidePill, YouHave, amountSize } from "./SwapParts";
 import { Sheet } from "./ui/sheet";
 
 // The swap card for two Ferry coins: a private swap, the default for any two coins. Sell one coin,
@@ -72,6 +74,9 @@ export function RouteCard({ pick, path, ctx, onPick, onFlip, blocked, optOut }: 
   const toStatus: Status | null = (d.dir === "sell" && d.pair === to ? d.status : null) ?? d.pairs.find((p) => p.id === to)?.sell.status ?? null;
   const bal = fromStatus ? counterBalance(fromStatus) : null;
   const evm = a.kind === "evm";
+  // where coin C goes: your Ferry node, or your own wallet (swap 2's payout_to, on your own node)
+  const receive = receiveFor(to, toStatus, d.info.own);
+  const receiveTo = useReceive(receive?.key ?? null);
 
   const problem = (() => {
     if (makers.list === null) return "This server has no partner list, so private swaps aren't available.";
@@ -100,7 +105,7 @@ export function RouteCard({ pick, path, ctx, onPick, onFlip, blocked, optOut }: 
     setBusy(true);
     setFail(null);
     try {
-      const v = await startRoute({ from, to, zec_zat: q.zat, maker1: q.maker1.name, maker2: [q.maker2.name], max_in: maxIn, min_out: q.minOut, pause });
+      const v = await startRoute({ from, to, zec_zat: q.zat, maker1: q.maker1.name, maker2: [q.maker2.name], max_in: maxIn, min_out: q.minOut, pause, ...(receiveTo ? { payout_to: receiveTo } : {}) });
       routes.put(v);
       setConfirm(false);
       // refused at once (the first partner said no): nothing moved, so say why here
@@ -119,9 +124,9 @@ export function RouteCard({ pick, path, ctx, onPick, onFlip, blocked, optOut }: 
   // what 1 of coin A comes to in coin C, through ZEC, at both partners' prices
   const rate = q ? amountIn(Math.round((q.rate2 / q.rate1) * 10 ** a.decimals), c) : null;
 
-  const youHave = (s: Status | null, id: PairId) => {
+  const youHave = (s: Status | null, id: PairId, add = false) => {
     const n = s ? counterBalance(s) : null;
-    return <span className="truncate tabular-nums">{n == null ? "You have –" : `You have ${unitsText(n, id)}`}</span>;
+    return <YouHave text={n == null ? null : unitsText(n, id)} add={add && d.info.own ? id : undefined} />;
   };
 
   return (
@@ -197,7 +202,7 @@ export function RouteCard({ pick, path, ctx, onPick, onFlip, blocked, optOut }: 
             pill={<SidePill token={from} side="sell" onOpen={() => setPicker("sell")} />}
             foot={
               <>
-                {youHave(fromStatus, from)}
+                {youHave(fromStatus, from, true)}
                 <button type="button" onClick={setMax} disabled={max == null} className="rounded-full px-2 py-0.5 text-xs font-semibold text-slate-900 transition-colors hover:bg-slate-200/70 disabled:text-slate-400">
                   Max
                 </button>
@@ -236,6 +241,7 @@ export function RouteCard({ pick, path, ctx, onPick, onFlip, blocked, optOut }: 
             </output>
           </Panel>
         </div>
+        <ReceiveTo coin={receive} />
 
         <div className="mt-3 space-y-0.5 px-1 text-[13px] text-slate-500">
           {q ? (
@@ -266,13 +272,13 @@ export function RouteCard({ pick, path, ctx, onPick, onFlip, blocked, optOut }: 
       <PrivacyLine text={path.privacy} />
 
       <CoinPicker open={picker !== null} onClose={() => setPicker(null)} side={picker ?? "sell"} pick={pick} ctx={ctx} makers={makers} onPick={(t) => onPick(picker ?? "sell", t)} />
-      {q ? <Confirm open={confirm} onClose={() => setConfirm(false)} from={from} to={to} q={q} pause={pause} busy={busy} onStart={start} /> : null}
+      {q ? <Confirm open={confirm} onClose={() => setConfirm(false)} from={from} to={to} q={q} pause={pause} busy={busy} onStart={start} receiveTo={receiveTo} /> : null}
     </>
   );
 }
 
 // What's different about a private swap, on one screen, before anything moves.
-function Confirm({ open, onClose, from, to, q, pause, busy, onStart }: { open: boolean; onClose: () => void; from: PairId; to: PairId; q: RouteQuote; pause: Pause; busy: boolean; onStart: () => void }) {
+function Confirm({ open, onClose, from, to, q, pause, busy, onStart, receiveTo }: { open: boolean; onClose: () => void; from: PairId; to: PairId; q: RouteQuote; pause: Pause; busy: boolean; onStart: () => void; receiveTo: string | null }) {
   const a = tickerOf(from);
   const c = tickerOf(to);
   return (
@@ -297,6 +303,12 @@ function Confirm({ open, onClose, from, to, q, pause, busy, onStart }: { open: b
 
         <p className="mt-5 text-[13px] text-slate-500 tabular-nums">
           You pay at most {unitsText(q.maxIn, from)} and get at least {unitsText(q.minNet, to)}, or keep about {zecText(q.zat)}.
+          {receiveTo ? (
+            <>
+              {" "}
+              The {c} goes to your wallet <span className="font-mono text-xs">{shortAddress(receiveTo)}</span>.
+            </>
+          ) : null}
         </p>
         <div className="mt-5 flex flex-col gap-2">
           <button
@@ -334,6 +346,7 @@ function Point({ icon, title, children }: { icon: ReactNode; title: string; chil
 // The router's and proxy's errors, for people.
 function plain(raw: string): string {
   if (/already (in progress|using)/i.test(raw)) return /private swap|route/i.test(raw) ? "Finish the private swap in progress first." : "Finish the swap in progress first.";
+  if (/withdraw/i.test(raw)) return "Your node is sending coins out. Try again in a moment.";
   if (/reach|unreachable|timed? ?out|connection refused/i.test(raw)) return "Couldn't reach a partner or your Ferry node. Try again in a moment.";
   if (/api token/i.test(raw)) return "Your Ferry node refused this page. Check how the app was started.";
   return raw.replace(/\bdaemon\b/gi, "Ferry node").replace(/\bmakers?\b/gi, "partner").replace(/\broute\b/gi, "private swap");

@@ -8,6 +8,7 @@ import { quoteDesk } from "./server/quotes.mjs";
 import { extraDaemons, mainSide, pairsBody } from "./server/pairs.mjs";
 import { buildRoute, routerLink } from "./server/routes.mjs";
 import { ONE_CLICK_PUBKEY, ONE_CLICK_URL, nearDesk, nearRoutes, oneClick, ownDaemons, requestJson } from "./server/near.mjs";
+import { ownProblem, receiveFields, withdrawBody } from "./server/own.mjs";
 
 // The UI talks to the user's ferryd daemons: Z sells ZEC, B buys it. In dev and preview the main
 // two are proxied under /daemon/z and /daemon/b: the proxy adds each daemon's API token
@@ -95,6 +96,12 @@ if (ROUTER_URL) {
 // NEAR Intents (server/near.mjs), as server/prod.mjs runs it: /api/near/... when FERRY_NEAR_URL is set
 // (the mock's 1Click in `pnpm dev`) or FERRY_NEAR_QUOTES=1 (the real API: quotes only, unless
 // FERRY_NEAR=1 on mainnet nodes). FERRY_NEAR_TESTNET=1 lets a loopback mock run swaps on test networks.
+//
+// The dev server is the person's own node (server/own.mjs): unless FERRY_OWN_NODE=0, a page opened
+// on loopback may say where a swap's coins go and send coins out of the node, as prod.mjs allows
+// with FERRY_OWN_NODE=1. FERRY_OWN_NODE=0 makes it behave like a public demo.
+const OWN_NODE = process.env.FERRY_OWN_NODE !== "0";
+
 function makers(): Plugin {
   const dir = makerDirectory(parseMakers(process.env.FERRY_MAKERS, process.env.FERRY_MAKER_URL ?? B_URL));
   const desk = quoteDesk(dir);
@@ -145,7 +152,8 @@ function makers(): Plugin {
       req.on("end", () => ok(Buffer.concat(chunks).toString("utf8")));
       req.on("error", fail);
     });
-  const nearHttp = near ? nearRoutes(near, { send, readBody }) : null;
+  const own = (req: Connect.IncomingMessage) => !ownProblem(req, OWN_NODE);
+  const nearHttp = near ? nearRoutes(near, { send, readBody, own }) : null;
   const handle: Connect.NextHandleFunction = (req, res, next) => {
     const url = req.url?.split("?")[0];
     if (url?.startsWith("/api/near/")) {
@@ -154,7 +162,7 @@ function makers(): Plugin {
       return;
     }
     if (url === "/api/pairs" && req.method === "GET") {
-      (ROUTER ? ROUTER.legs() : Promise.resolve(null)).then((routes) => send(res, 200, { ...PAIRS_BODY, routes }));
+      (ROUTER ? ROUTER.legs() : Promise.resolve(null)).then((routes) => send(res, 200, { ...PAIRS_BODY, routes, node: { own: own(req) } }));
       return;
     }
     // a private swap names its partners; they become allowlisted URLs here (routes.mjs)
@@ -168,7 +176,7 @@ function makers(): Plugin {
         } catch {
           return send(res, 400, { error: 'Send a JSON body like {"from": "btc", "to": "usdc-base", ...}' });
         }
-        const built = buildRoute(body, { list: await dir.list(), resolve: dir.resolve, legs: await ROUTER.legs() });
+        const built = buildRoute(body, { list: await dir.list(), resolve: dir.resolve, legs: await ROUTER.legs(), payout: own(req) });
         if (built.error !== undefined) return send(res, built.status, { error: built.error });
         try {
           const up = await ROUTER.call("POST", "/api/routes", built.body);
@@ -203,12 +211,42 @@ function makers(): Plugin {
       });
       return;
     }
+    // the node's addresses, what it sent out, and sending: its owner only (own.mjs)
+    const w = url?.match(/^\/daemon\/([a-z-]+)\/api\/(withdraw|withdrawals|addresses)$/);
+    if (w && TARGETS[w[1]]) {
+      const no = ownProblem(req, OWN_NODE);
+      if (no) return send(res, 403, { error: no });
+      if (w[2] !== "withdraw") return next();
+      if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });
+      readBody(req)
+        .then(async (raw) => {
+          let body: { dry_run?: unknown } | null;
+          try {
+            body = JSON.parse(raw || "{}");
+          } catch {
+            return send(res, 400, { error: 'Send a JSON body like {"asset": "zec", "amount": 10000000, "to": "u1…"}' });
+          }
+          // a fee preview only from a daemon that says it previews: any other would send for real
+          let preview = false;
+          if (body?.dry_run === true) {
+            const s = await daemonCall(w[1], "GET", "/api/status").catch(() => null);
+            const features = (s?.body as { features?: unknown } | null)?.features;
+            preview = s?.status === 200 && Array.isArray(features) && features.includes("withdraw_preview");
+          }
+          const built = withdrawBody(body, { preview });
+          if (built.error) return send(res, built.status ?? 400, { error: built.error });
+          const up = await daemonCall(w[1], "POST", "/api/withdraw", built.body);
+          send(res, up.status, up.body ?? { error: "No answer from the daemon" });
+        })
+        .catch(() => !res.headersSent && send(res, 502, { error: "Can't reach the daemon. Is it running?" }));
+      return;
+    }
     const m = url?.match(/^\/daemon\/([a-z-]+)\/api\/swaps$/);
     if (!m || !TARGETS[m[1]] || req.method !== "POST") return next();
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", async () => {
-      let body: { maker?: unknown; zec_zat?: unknown; quote?: unknown };
+      let body: { maker?: unknown; zec_zat?: unknown; quote?: unknown; payout_to?: unknown; sweep_to?: unknown };
       try {
         body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
       } catch {
@@ -218,6 +256,10 @@ function makers(): Plugin {
       if (!maker) return send(res, 400, { error: "Unknown maker. Pick one from the list." });
       // a firm quote, named by id: the signed quote this server got from that maker itself
       const quote = body.quote == null ? null : desk.find(dir.makers.indexOf(maker), body.quote);
+      // where the coins go, on the person's own node (own.mjs): payout_to on a sell, sweep_to on a buy
+      const side = m[1] === "z" ? "sell" : m[1] === "b" ? "buy" : (EXTRA.find((d) => d.key === m[1])?.side ?? "sell");
+      const receive = own(req) ? receiveFields(body, side) : { json: "" };
+      if (receive.error) return send(res, 400, { error: receive.error });
       if (body.quote != null && !quote) return send(res, 400, { error: "That firm price has expired. Get a new one." });
       if (quote) desk.take(quote);
       const headers: Record<string, string> = { "content-type": "application/json" };
@@ -229,8 +271,8 @@ function makers(): Plugin {
           method: "POST",
           headers,
           body: quote
-            ? `{"maker":${JSON.stringify(maker.url)},"zec_zat":${JSON.stringify(body.zec_zat)},"quote":${quote.json}}`
-            : JSON.stringify({ maker: maker.url, zec_zat: body.zec_zat }),
+            ? `{"maker":${JSON.stringify(maker.url)},"zec_zat":${JSON.stringify(body.zec_zat)},"quote":${quote.json}${receive.json}}`
+            : `{"maker":${JSON.stringify(maker.url)},"zec_zat":${JSON.stringify(body.zec_zat)}${receive.json}}`,
           signal: AbortSignal.timeout(30_000),
         });
         res.statusCode = up.status;
