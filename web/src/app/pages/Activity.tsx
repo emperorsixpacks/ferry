@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ArrowRight, ArrowsLeftRight } from "@phosphor-icons/react";
-import { directionOf, getSwaps, isMine, pairChain, pairCoin, type Direction, type PairId, type Status, type SwapView } from "@/api";
+import { directionOf, getSwaps, isMine, pairChain, pairCoin, type Direction, type PairId, type RouteView, type Status, type SwapView } from "@/api";
 import { coin, coinOf } from "@/format";
 import { navigate } from "@/router";
 import { phaseOf } from "@/swap/steps";
@@ -10,11 +10,13 @@ import { ToneBadge } from "../components/ui/badge";
 import { useLocal } from "../lib/daemon";
 import { pairName } from "../lib/pairs";
 import { STATUS_WORD, swapAmounts, wordsFor, type Words } from "../lib/progress";
+import { ROUTE_WORD, legSwapIds, routeAmounts, tickerOf, useRoutes, zecText } from "../lib/routes";
 
 // /app/activity: every swap the person started on their Ferry nodes, newest first, both ways
 // round (selling ZEC on their Z nodes, buying it on their B nodes) and across the coins this
 // server offers. A row opens the swap, switching the coin and direction on screen first when it's
 // another one. Swaps a node of theirs made as a maker (in a local demo) are not theirs to list.
+// A private swap (coin → shielded ZEC → coin) is one row: its two swaps aren't listed on their own.
 
 const POLL_MS = 10_000;
 
@@ -63,17 +65,23 @@ export function Activity() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
-  const seen = new Set<string>();
+  const routes = useRoutes();
+  // a private swap's own two swaps are in its row
+  const seen = legSwapIds(routes.list);
   const items: Item[] = sources
     .flatMap((x) => {
       const followed = x.daemon === d.daemon;
       // the followed daemon's views are live (the provider also holds the other side's, polled)
       const swaps = followed ? Object.values(d.swaps).filter((s) => s.role === d.role) : (extra[x.daemon] ?? []);
       const words = followed ? wordsFor(coin()) : wordsFor(coinOf(x.status ?? { chains: { btc: { coin: pairCoin(x.pair) } } }, pairChain(x.pair)));
-      return swaps.filter(isMine).map((swap) => ({ swap, pair: x.pair, dir: directionOf(swap.role), status: followed ? d.status : x.status, words }));
+      return swaps.filter((s) => isMine(s) && !s.route).map((swap) => ({ swap, pair: x.pair, dir: directionOf(swap.role), status: followed ? d.status : x.status, words }));
     })
-    .filter((it) => !seen.has(it.swap.id) && !!seen.add(it.swap.id))
-    .sort((x, y) => (y.swap.timeline[0]?.at ?? "").localeCompare(x.swap.timeline[0]?.at ?? ""));
+    .filter((it) => !seen.has(it.swap.id) && !!seen.add(it.swap.id));
+  // swaps and private swaps together, newest first
+  const rows = [
+    ...items.map((it) => ({ at: Date.parse(it.swap.timeline[0]?.at ?? "") || 0, key: `${it.pair}:${it.swap.id}`, row: <Row item={it} onOpen={() => open(it)} /> })),
+    ...routes.list.map((v) => ({ at: v.created_at * 1000, key: v.id, row: <RouteRow route={v} /> })),
+  ].sort((x, y) => y.at - x.at);
 
   const open = (it: Item) => {
     if (it.pair !== d.pair) d.choosePair(it.pair, it.dir);
@@ -86,7 +94,7 @@ export function Activity() {
       <div className="mx-auto w-full max-w-[640px]">
         <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Activity</h1>
         <p className="mt-1 text-slate-600">Your swaps both ways, newest first.</p>
-        {items.length === 0 ? (
+        {rows.length === 0 ? (
           <div className="mt-8 rounded-3xl border border-slate-200 px-6 py-14 text-center">
             <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-600">
               <ArrowsLeftRight size={22} weight="bold" aria-hidden />
@@ -106,10 +114,8 @@ export function Activity() {
           </div>
         ) : (
           <ul className="mt-8 divide-y divide-slate-100 overflow-hidden rounded-3xl border border-slate-200">
-            {items.map((it) => (
-              <li key={`${it.pair}:${it.swap.id}`}>
-                <Row item={it} onOpen={() => open(it)} />
-              </li>
+            {rows.map((r) => (
+              <li key={r.key}>{r.row}</li>
             ))}
           </ul>
         )}
@@ -147,6 +153,50 @@ function Row({ item, onOpen }: { item: Item; onOpen: () => void }) {
           {" · "}
           {started ? new Date(started).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "–"}
           <span className="hidden sm:inline"> · {pairName(pair).title}</span>
+        </span>
+      </span>
+      <ToneBadge tone={st.tone}>{st.label}</ToneBadge>
+      <ArrowRight size={14} weight="bold" className="hidden shrink-0 text-slate-400 transition-colors group-hover:text-slate-900 sm:block" aria-hidden />
+    </a>
+  );
+}
+
+// A private swap: what went in and what came out (or the ZEC held), "Private swap", its status.
+function RouteRow({ route: v }: { route: RouteView }) {
+  const a = routeAmounts(v);
+  const st = ROUTE_WORD(v);
+  const out = v.state === "holding" ? zecText(v.zec.held_zat) : a.got != null ? a.outShort : tickerOf(v.to);
+  const started = new Date(v.created_at * 1000);
+  return (
+    <a
+      href={`/app/route/${v.id}`}
+      onClick={(e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+        e.preventDefault();
+        navigate(`/app/route/${v.id}`);
+      }}
+      className="group flex items-center gap-4 px-4 py-4 transition-colors hover:bg-slate-50 sm:px-5"
+    >
+      <span className="relative flex h-10 w-[52px] shrink-0 items-center" aria-hidden>
+        <span className="absolute left-0">
+          <PairLogo pair={v.from as PairId} size={32} />
+        </span>
+        <span className="absolute left-5 rounded-full bg-white p-[2px]">
+          <PairLogo pair={v.to as PairId} size={30} />
+        </span>
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block font-medium break-words text-slate-900 tabular-nums">
+          {a.inShort} <span className="text-slate-400">→</span> <span className="whitespace-nowrap">{out}</span>
+        </span>
+        <span className="mt-0.5 block truncate text-[13px] text-slate-500">
+          <span className="font-medium text-slate-700">Private swap</span>
+          {" · "}
+          {started.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+          <span className="hidden sm:inline">
+            {" "}
+            · {tickerOf(v.from)} → shielded ZEC → {tickerOf(v.to)}
+          </span>
         </span>
       </span>
       <ToneBadge tone={st.tone}>{st.label}</ToneBadge>

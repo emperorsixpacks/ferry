@@ -47,7 +47,7 @@ export interface Pairs {
   list: Pair[];
 }
 
-const NONE: PairsInfo = { sell: [], buy: [], main: { sell: false, buy: false } };
+const NONE: PairsInfo = { sell: [], buy: [], main: { sell: false, buy: false }, routes: null };
 
 // the pair a daemon's status describes; an EVM daemon on a local chain counts as Base
 export function pairOf(s: Status | null): PairId | null {
@@ -194,3 +194,21 @@ export function storedDirection(): Direction {
 }
 
 export const storeDirection = (dir: Direction) => remember(DIR_KEY, dir);
+
+// The private swap on the card (Sell one coin, Buy another), if the viewer picked one: ?from=&to=
+// in the URL, else what this browser remembers. Whether the server can run it is the card's call.
+const ROUTE_KEY = "ferry.route";
+export function storedRoute(): { from: PairId; to: PairId } | null {
+  const params = new URLSearchParams(window.location.search);
+  const [from, to] = params.get("from") || params.get("to") ? [params.get("from"), params.get("to")] : (remembered(ROUTE_KEY) ?? "").split(">");
+  return isPair(from) && isPair(to) ? { from, to } : null;
+}
+export const storeRoute = (r: { from: PairId; to: PairId } | null) => remember(ROUTE_KEY, r ? `${r.from}>${r.to}` : "");
+
+// the privacy pause the viewer last chose for a private swap
+const PAUSE_KEY = "ferry.pause";
+export const storedPause = (): "off" | "standard" | "long" => {
+  const v = remembered(PAUSE_KEY);
+  return v === "off" || v === "long" ? v : "standard";
+};
+export const storePause = (p: string) => remember(PAUSE_KEY, p);

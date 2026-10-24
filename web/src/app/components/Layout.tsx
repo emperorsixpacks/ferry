@@ -17,7 +17,7 @@ import { Popover } from "./ui/popover";
 // stay one tap away on a phone.
 
 const nav = [
-  { to: "/app", label: "Swap", match: (p: string) => p === "/app" || p.startsWith("/app/swap/") },
+  { to: "/app", label: "Swap", match: (p: string) => p === "/app" || p.startsWith("/app/swap/") || p.startsWith("/app/route/") },
   { to: "/app/activity", label: "Activity", match: (p: string) => p === "/app/activity" },
   { to: "/help", label: "Help", match: (p: string) => p === "/help" || p === "/how-it-works" || p === "/safety" },
 ];

@@ -83,6 +83,8 @@ export interface SwapView {
   observer: { btc: string[]; zec: string[] };
   /** Our package at the watchtower (ferryd --watchtower); absent without one. */
   watchtower?: { url: string; status: "pending" | "armed" | "refused"; package_id: string | null; note: string } | null;
+  /** One of a private swap's two swaps: the router's label, "<route id>/1" or "<route id>/2". */
+  route?: string | null;
 }
 
 export const DAEMONS: Record<Role, string> = { Z: "/daemon/z", B: "/daemon/b" };
@@ -154,23 +156,92 @@ export interface PairsInfo {
   buy: PairId[];
   // "auto": used unless the daemon's status says it is a maker (offer.maker)
   main: { sell: boolean | "auto"; buy: boolean | "auto" };
+  // private swaps the server's router runs: from the pairs it buys ZEC with, to the ones it sells
+  // ZEC for; null without a router (and then the page shows none of it)
+  routes: RouteLegs | null;
 }
 
 export async function getPairs(): Promise<PairsInfo> {
   // an older server: no extra pairs, and the page's own side only
-  const old: PairsInfo = { sell: [], buy: [], main: { sell: LOCAL_ROLE === "Z", buy: LOCAL_ROLE === "B" } };
+  const old: PairsInfo = { sell: [], buy: [], main: { sell: LOCAL_ROLE === "Z", buy: LOCAL_ROLE === "B" }, routes: null };
   const res = await fetch("/api/pairs").catch(() => null);
   if (!res?.ok) return old;
-  const data = (await res.json().catch(() => null)) as { pairs?: unknown; buy?: unknown; main?: { sell?: unknown; buy?: unknown } } | null;
+  const data = (await res.json().catch(() => null)) as { pairs?: unknown; buy?: unknown; main?: { sell?: unknown; buy?: unknown }; routes?: { from?: unknown; to?: unknown } | null } | null;
   const ids = (v: unknown) => (Array.isArray(v) ? PAIR_IDS.filter((id) => (v as unknown[]).includes(id)) : []);
   if (!data) return old;
   const side = (v: unknown) => (v === true || v === false || v === "auto" ? v : "auto");
+  const routes = data.routes ? { from: ids(data.routes.from), to: ids(data.routes.to) } : null;
   return {
     sell: ids(data.pairs),
     buy: ids(data.buy),
     main: data.main ? { sell: side(data.main.sell), buy: side(data.main.buy) } : old.main,
+    routes: routes && routes.from.length && routes.to.length ? routes : null,
   };
 }
+
+// ------------------------------------------------------------------------------------------------
+// Private swaps (routes): coin A → shielded ZEC → coin C, run by the user's router (ferry-route,
+// crates/ferry-route/README.md) as two swaps on their own daemons, one after the other. The UI
+// server fronts it at /router, as it fronts the daemons.
+
+export const ROUTER = "/router";
+
+export interface RouteLegs {
+  from: PairId[];
+  to: PairId[];
+}
+
+export type RouteState = "leg1" | "settling" | "pausing" | "leg2" | "done" | "holding" | "failed";
+export type RouteOutcome = "swapped" | "holding_zec" | "refunded" | "punished" | "not_started" | null;
+// the privacy pause between the two swaps: off, 5–30 min, 1–6 h
+export type Pause = "off" | "standard" | "long";
+
+export interface RouteLeg {
+  n: 1 | 2;
+  pair: string;
+  // leg 1: the user buys ZEC (B); leg 2: they sell it (Z)
+  role: Role;
+  unit: { ticker: string; decimals: number };
+  wallet: string;
+  maker: string | null;
+  label: string | null;
+  swap_id: string | null;
+  // the leg's swap, as its daemon says (SwapView.state / outcome)
+  state: string | null;
+  outcome: string | null;
+  zec_zat: number | null;
+  counter_units: number | null;
+  watchtower: { status?: string; note?: string } | null;
+  earlier_swaps: string[];
+}
+
+export interface RouteView {
+  id: string;
+  from: string;
+  to: string;
+  state: RouteState;
+  phase: string;
+  outcome: RouteOutcome;
+  amounts: { in_max: number; zec_zat: number; zec2_zat: number; out_min: number; keep_zat: number };
+  privacy: { delay_secs: [number, number]; not_before: number | null };
+  zec: { sweep_txid: string | null; sweep_confs: number; needed_confs: number; spendable_zat: number | null; need_zat: number; held_zat: number };
+  legs: [RouteLeg, RouteLeg];
+  timeline: { at: string; kind: string; label: string }[];
+  // where the money is and what happens next, in the router's words
+  note: string;
+  problem: string | null;
+  stop_requested: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export const getRoutes = () => call<RouteView[]>(ROUTER, "/api/routes");
+// Partners are named as for a swap; the UI server maps them to allowlisted URLs and adds leg 2's
+// fallbacks. max_in / min_out are in the coins' smallest units.
+export const startRoute = (body: { from: PairId; to: PairId; zec_zat: number; maker1: string; maker2: string[]; max_in: number; min_out: number; pause: Pause }) =>
+  call<RouteView>(ROUTER, "/api/routes", body);
+// "Finish now": out of holding, try the second swap again; during the pause, start it now
+export const continueRoute = (id: string) => call<RouteView>(ROUTER, `/api/routes/${id}/continue`, {});
 
 // One maker the UI server allowlists, with its live offer (GET /api/makers).
 export interface Maker {
