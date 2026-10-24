@@ -250,7 +250,7 @@ check(r.status === 400, "one quote, one swap: the same quote is refused again");
 await reset();
 await sleep(400);
 const pairs = await (await fetch(PRD + "/api/pairs")).json();
-check(pairs.main?.sell === true && pairs.main?.buy === true && Array.isArray(pairs.buy), `prod /api/pairs says the main pair sells and buys (${JSON.stringify(pairs)})`);
+check(pairs.main?.sell === "auto" && pairs.main?.buy === "auto" && Array.isArray(pairs.buy), `prod /api/pairs leaves both main daemons to the page: it uses each unless its status says it is a maker (${JSON.stringify(pairs)})`);
 [qs, qb] = await quotes({ pair: "btc", direction: "buy", zec_zat: 70_000_000 });
 check(qs === 200 && qb.quotes.map((q) => q.maker).join() === "Sandpiper,Zoe", `buying, firm quotes come from the partners who sell ZEC, cheapest first (${qb.quotes.map((q) => q.maker)})`);
 r = await post(PRD, "/daemon/b/api/swaps", { maker: `http://127.0.0.1:${Z}/m/sandpiper`, zec_zat: 50_000_000 });

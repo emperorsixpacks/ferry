@@ -61,12 +61,13 @@ export function pairOf(s: Status | null): PairId | null {
 // (whatever pair it runs: the page learns which from its status). Null: this direction can't be
 // swapped here at all.
 export function daemonFor(info: PairsInfo, id: PairId | null, dir: Direction): string | null {
-  if (dir === "sell") return id && info.sell.includes(id) ? pairDaemon(id) : info.main.sell ? DAEMONS.Z : null;
-  return id && info.buy.includes(id) ? pairBuyDaemon(id) : info.main.buy ? DAEMONS.B : null;
+  if (dir === "sell") return id && info.sell.includes(id) ? pairDaemon(id) : info.main.sell !== false ? DAEMONS.Z : null;
+  return id && info.buy.includes(id) ? pairBuyDaemon(id) : info.main.buy !== false ? DAEMONS.B : null;
 }
 
 // whether anything here swaps this way
-export const canSwap = (info: PairsInfo, dir: Direction) => (dir === "sell" ? info.main.sell || info.sell.length > 0 : info.main.buy || info.buy.length > 0);
+export const canSwap = (info: PairsInfo, dir: Direction): boolean =>
+  dir === "sell" ? info.main.sell !== false || info.sell.length > 0 : info.main.buy !== false || info.buy.length > 0;
 
 export function usePairs(): Pairs {
   const [info, setInfo] = useState<PairsInfo | null>(null);
@@ -84,8 +85,8 @@ export function usePairs(): Pairs {
 
   const bases = info
     ? [
-        ...(info.main.sell ? [DAEMONS.Z] : []),
-        ...(info.main.buy ? [DAEMONS.B] : []),
+        ...(info.main.sell !== false ? [DAEMONS.Z] : []),
+        ...(info.main.buy !== false ? [DAEMONS.B] : []),
         ...info.sell.map(pairDaemon),
         ...info.buy.map(pairBuyDaemon),
       ]
@@ -107,9 +108,13 @@ export function usePairs(): Pairs {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
-  const i = info ?? NONE;
   const mainZ = probes[DAEMONS.Z] ?? null;
   const mainB = probes[DAEMONS.B] ?? null;
+  // "auto": a main daemon is one of the user's own unless its status says it is a maker (the
+  // usual demo's B makes offers; the user can't buy ZEC through it)
+  const resolve = (v: boolean | "auto", s: Status | null) => (v === "auto" ? s?.offer.maker !== true : v);
+  const raw = info ?? NONE;
+  const i: PairsInfo = { ...raw, main: { sell: resolve(raw.main.sell, mainZ), buy: resolve(raw.main.buy, mainB) } };
   const side = (id: PairId, own: boolean, base: string, main: boolean, mainBase: string, mainStatus: Status | null): Side => {
     if (own) return { daemon: base, status: probes[base] ?? null };
     if (main && pairOf(mainStatus) === id) return { daemon: mainBase, status: mainStatus };
@@ -118,8 +123,8 @@ export function usePairs(): Pairs {
   const list = PAIR_IDS.map(
     (id): Pair => ({
       id,
-      sell: side(id, i.sell.includes(id), pairDaemon(id), i.main.sell, DAEMONS.Z, mainZ),
-      buy: side(id, i.buy.includes(id), pairBuyDaemon(id), i.main.buy, DAEMONS.B, mainB),
+      sell: side(id, i.sell.includes(id), pairDaemon(id), i.main.sell !== false, DAEMONS.Z, mainZ),
+      buy: side(id, i.buy.includes(id), pairBuyDaemon(id), i.main.buy !== false, DAEMONS.B, mainB),
     }),
   );
   return { ready: info !== null, info: i, list };

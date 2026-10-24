@@ -20,11 +20,15 @@ export interface ExtraDaemon {
 }
 export function extraDaemons(env: Env): ExtraDaemon[];
 
+// true or false when the operator said so, else "auto": used unless its status says it's a maker
+export type MainSide = boolean | "auto";
+export function mainSide(v: string | undefined): MainSide;
+
 export interface PairsBody {
   pairs: string[];
   buy: string[];
-  main: { sell: boolean; buy: boolean };
+  main: { sell: MainSide; buy: MainSide };
 }
-export function pairsBody(extras: ExtraDaemon[], opts?: { mainSell?: boolean; mainBuy?: boolean }): PairsBody;
+export function pairsBody(extras: ExtraDaemon[], opts?: { mainSell?: MainSide; mainBuy?: MainSide }): PairsBody;
 
 export function samePair(key: string, extras: ExtraDaemon[]): string[];

@@ -2,7 +2,7 @@
 // direction, and what GET /api/pairs says about them (pairs.mjs).
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buyKey, extraDaemons, pairDaemons, pairsBody, samePair } from "./pairs.mjs";
+import { buyKey, extraDaemons, mainSide, pairDaemons, pairsBody, samePair } from "./pairs.mjs";
 
 const env = {
   FERRY_LTC_URL: "http://ltc-z:7101/",
@@ -27,10 +27,12 @@ test("a Z daemon per pair sells, a B daemon per pair buys", () => {
 
 test("GET /api/pairs: the old field, the buy side, and the main daemons", () => {
   const extra = extraDaemons(env);
-  assert.deepEqual(pairsBody(extra), { pairs: ["ltc"], buy: ["ltc", "usdc-base"], main: { sell: true, buy: true } });
-  assert.deepEqual(pairsBody([], { mainBuy: false }), { pairs: [], buy: [], main: { sell: true, buy: false } });
+  // unset: the page decides from each main daemon's status (a maker's is left out)
+  assert.deepEqual(pairsBody(extra), { pairs: ["ltc"], buy: ["ltc", "usdc-base"], main: { sell: "auto", buy: "auto" } });
+  assert.deepEqual(pairsBody([], { mainBuy: mainSide("0") }), { pairs: [], buy: [], main: { sell: "auto", buy: false } });
   // a local demo whose Z is the maker: only buying on the main pair
-  assert.deepEqual(pairsBody([], { mainSell: false }).main, { sell: false, buy: true });
+  assert.deepEqual(pairsBody([], { mainSell: mainSide("0"), mainBuy: mainSide("1") }).main, { sell: false, buy: true });
+  assert.deepEqual([mainSide(undefined), mainSide(""), mainSide("1"), mainSide("0")], ["auto", "auto", true, false]);
 });
 
 test("buy-side keys can't be caught by another daemon's exact proxy pattern", () => {

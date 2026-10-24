@@ -4,7 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 import { makerDirectory, parseMakers } from "./server/makers.mjs";
 import { quoteDesk } from "./server/quotes.mjs";
-import { extraDaemons, pairsBody } from "./server/pairs.mjs";
+import { extraDaemons, mainSide, pairsBody } from "./server/pairs.mjs";
 
 // The UI talks to the user's ferryd daemons: Z sells ZEC, B buys it. In dev and preview the main
 // two are proxied under /daemon/z and /daemon/b: the proxy adds each daemon's API token
@@ -14,13 +14,13 @@ import { extraDaemons, pairsBody } from "./server/pairs.mjs";
 // applying.
 // The daemons for other pairs (FERRY_LTC_URL, FERRY_USDC_BASE_URL, ... for selling ZEC,
 // FERRY_LTC_B_URL, ... for buying it, with FERRY_<PAIR>_TOKEN / FERRY_<PAIR>_B_TOKEN) are
-// proxied under /daemon/<pair> and /daemon/b-<pair>; see server/pairs.mjs. FERRY_B_BUYS=0
-// (FERRY_Z_SELLS=0) keeps the page from starting swaps on the main B (Z) daemon, say when it is
-// the local demo's maker.
+// proxied under /daemon/<pair> and /daemon/b-<pair>; see server/pairs.mjs. The page leaves out
+// a main daemon that is a maker (the usual demo's B); FERRY_B_BUYS / FERRY_Z_SELLS = 0 or 1 say
+// so explicitly.
 const Z_URL = process.env.FERRY_Z_URL ?? "http://127.0.0.1:7101";
 const B_URL = process.env.FERRY_B_URL ?? "http://127.0.0.1:7102";
 const EXTRA = extraDaemons(process.env);
-const PAIRS_BODY = pairsBody(EXTRA, { mainSell: process.env.FERRY_Z_SELLS !== "0", mainBuy: process.env.FERRY_B_BUYS !== "0" });
+const PAIRS_BODY = pairsBody(EXTRA, { mainSell: mainSide(process.env.FERRY_Z_SELLS), mainBuy: mainSide(process.env.FERRY_B_BUYS) });
 const TOKENS: Record<string, string | undefined> = {
   z: process.env.FERRY_Z_TOKEN,
   b: process.env.FERRY_B_TOKEN,

@@ -411,6 +411,10 @@ fn state(v: &Value) -> &str {
 
 /// The control API needs the token, refuses foreign origins and is not on the peer listener.
 async fn check_api_guard(w: &World) {
+    // Each status says whether its daemon is a maker (a UI keeps a maker out of the user's own
+    // daemons to swap on).
+    assert_eq!(w.get(&w.maker().url, "/api/status").await["offer"]["maker"], true);
+    assert_eq!(w.get(&w.taker().url, "/api/status").await["offer"]["maker"], false);
     let bare = reqwest::Client::new();
     let status = |r: reqwest::Response| r.status().as_u16();
     let url = format!("{}/api/status", w.z.url);

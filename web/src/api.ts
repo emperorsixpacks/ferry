@@ -33,6 +33,8 @@ export interface Status {
     // the largest ZEC amount this party's balance covers as maker
     liquidity_zat?: number;
     paused?: boolean;
+    // started with --maker-offer (older daemons leave it out)
+    maker?: boolean;
   };
 }
 
@@ -150,7 +152,8 @@ export const startSwap = (zec_zat: number, daemon: string = DAEMONS.Z, maker?: s
 export interface PairsInfo {
   sell: PairId[];
   buy: PairId[];
-  main: { sell: boolean; buy: boolean };
+  // "auto": used unless the daemon's status says it is a maker (offer.maker)
+  main: { sell: boolean | "auto"; buy: boolean | "auto" };
 }
 
 export async function getPairs(): Promise<PairsInfo> {
@@ -161,10 +164,11 @@ export async function getPairs(): Promise<PairsInfo> {
   const data = (await res.json().catch(() => null)) as { pairs?: unknown; buy?: unknown; main?: { sell?: unknown; buy?: unknown } } | null;
   const ids = (v: unknown) => (Array.isArray(v) ? PAIR_IDS.filter((id) => (v as unknown[]).includes(id)) : []);
   if (!data) return old;
+  const side = (v: unknown) => (v === true || v === false || v === "auto" ? v : "auto");
   return {
     sell: ids(data.pairs),
     buy: ids(data.buy),
-    main: data.main ? { sell: data.main.sell !== false, buy: data.main.buy === true } : old.main,
+    main: data.main ? { sell: side(data.main.sell), buy: side(data.main.buy) } : old.main,
   };
 }
 

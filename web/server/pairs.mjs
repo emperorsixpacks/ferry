@@ -66,8 +66,13 @@ export function extraDaemons(env) {
 // GET /api/pairs. `pairs` keeps its old meaning (the other pairs' Z daemons, so an older page
 // still finds them); `buy` lists the other pairs with a B daemon; `main` says which of the main
 // daemons the page may start swaps on: Z sells ZEC, B buys it (whatever pair they run, which the
-// page learns from their status).
-export function pairsBody(extras, { mainSell = true, mainBuy = true } = {}) {
+// page learns from their status). Each is true or false when the operator said so
+// (FERRY_Z_SELLS / FERRY_B_BUYS = 1 or 0), else "auto": the page uses it unless its status says it
+// is a maker (as the B daemon of the usual demo is), so a maker's daemon never turns up as one of
+// the user's own.
+export const mainSide = (v) => (v === "1" ? true : v === "0" ? false : "auto");
+
+export function pairsBody(extras, { mainSell = "auto", mainBuy = "auto" } = {}) {
   return {
     pairs: extras.filter((d) => d.side === "sell").map((d) => d.id),
     buy: extras.filter((d) => d.side === "buy").map((d) => d.id),

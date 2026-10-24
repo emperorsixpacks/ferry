@@ -53,7 +53,9 @@ then carry:
 ```
 
 All four are optional for a taker: an older maker leaves them out. A maker (any daemon started with
-`--maker-offer`) also publishes `"quote_key": "02…"`, the key it signs firm quotes with.
+`--maker-offer`) also publishes `"quote_key": "02…"`, the key it signs firm quotes with. In
+`/api/status`, `offer.maker` says whether the daemon was started with `--maker-offer` (paused or
+not); a Z maker's `liquidity` is its spendable shielded ZEC less the lock fee.
 
 ## Maker directory (UI server, not ferryd)
 
@@ -82,12 +84,15 @@ both of its daemons).
 ```json
 { "pairs": ["ltc"],                  // other pairs with a Z (sell-side) daemon: /daemon/<pair>
   "buy": ["ltc", "usdc-base"],       // other pairs with a B (buy-side) daemon: /daemon/b-<pair>
-  "main": { "sell": true, "buy": true } }  // /daemon/z sells ZEC, /daemon/b buys it, whatever pair they run
+  "main": { "sell": "auto", "buy": "auto" } }  // /daemon/z sells ZEC, /daemon/b buys it, whatever pair they run
 ```
 
-configured with `FERRY_<PAIR>_URL` / `FERRY_<PAIR>_B_URL` (and `_TOKEN` / `_TOKEN_FILE`), and
-`FERRY_Z_SELLS=0` / `FERRY_B_BUYS=0` to take a main daemon out (a local demo's maker). `pairs` keeps
-its old meaning for older pages.
+configured with `FERRY_<PAIR>_URL` / `FERRY_<PAIR>_B_URL` (and `_TOKEN` / `_TOKEN_FILE`). For the
+main daemons, `"auto"` (the default) means the page uses one unless its `/api/status` says it is a
+maker (`offer.maker`, true for a daemon started with `--maker-offer`): the usual demo's B makes
+offers, so the page doesn't offer buying through it. `FERRY_Z_SELLS` / `FERRY_B_BUYS` = `1` or `0`
+decide it outright (`0` also keeps visitors from starting swaps there through `prod.mjs`). `pairs`
+keeps its old meaning for older pages.
 
 ## Firm quotes
 
