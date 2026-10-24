@@ -150,6 +150,12 @@ services:
       - --api-token-file=/run/ferry-token/api-token
       - --listen=0.0.0.0:7111
       - --public-url=http://ferryd-z:7111
+      # Z makes an offer too, so B can buy ZEC from it when BUY_ZEC names the pair (docs/DEPLOY.md,
+      # "Buying ZEC"). Like B's, its peer listener is on the private network only, and the web
+      # server lists it as a maker only then.
+      - --maker-offer=${RATE:-410000}:${MIN_ZAT:-10000000}:${MAX_ZAT:-100000000}
+      - --maker-price-feed=${PRICE_FEED:-off}
+      - --maker-spread-bps=${SPREAD_BPS:-0}
       - --data-dir=/data
       - --network=signet
       - --btc-rpc=http://bitcoind:38332
@@ -275,6 +281,10 @@ services:
       - --api-token-file=/run/ferry-token/api-token
       - --listen=0.0.0.0:7111
       - --public-url=http://ferryd-z-ltc:7111
+      # an offer for BUY_ZEC, as ferryd-z's
+      - --maker-offer=${LTC_RATE:-100000000}:${LTC_MIN_ZAT:-1000000}:${LTC_MAX_ZAT:-25000000}
+      - --maker-price-feed=${LTC_PRICE_FEED:-off}
+      - --maker-spread-bps=${LTC_SPREAD_BPS:-0}
       - --data-dir=/data
       - --btc-rpc=http://litecoind:19332
       - --btc-rpc-user=ferry
@@ -363,6 +373,11 @@ services:
       - --api-token-file=/run/ferry-token/api-token
       - --listen=0.0.0.0:7111
       - --public-url=http://ferryd-z-usdc-base:7111
+      # an offer for BUY_ZEC, as ferryd-z's
+      - --maker-offer=${USDC_RATE:-40000000}:${USDC_MIN_ZAT:-1000000}:${USDC_MAX_ZAT:-25000000}
+      - --maker-price-feed=${USDC_PRICE_FEED:-off}
+      - --maker-price-pair=ZEC/USDC
+      - --maker-spread-bps=${USDC_SPREAD_BPS:-0}
       - --data-dir=/data
       - --evm-rpc=${BASE_SEPOLIA_RPC:-https://sepolia.base.org}
       - --evm-contract=${BASE_SEPOLIA_FERRYLOCK:-0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef}
@@ -448,6 +463,11 @@ services:
       - --api-token-file=/run/ferry-token/api-token
       - --listen=0.0.0.0:7111
       - --public-url=http://ferryd-z-weth-base:7111
+      # an offer for BUY_ZEC, as ferryd-z's
+      - --maker-offer=${WETH_RATE:-12000000000000000}:${WETH_MIN_ZAT:-1000000}:${WETH_MAX_ZAT:-25000000}
+      - --maker-price-feed=${WETH_PRICE_FEED:-off}
+      - --maker-price-pair=ZEC/ETH
+      - --maker-spread-bps=${WETH_SPREAD_BPS:-0}
       - --data-dir=/data
       - --evm-rpc=${BASE_SEPOLIA_RPC:-https://sepolia.base.org}
       - --evm-contract=${BASE_SEPOLIA_FERRYLOCK:-0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef}
@@ -493,15 +513,21 @@ services:
       ferryd-z-ltc: {condition: service_started, required: false}
       ferryd-z-usdc-base: {condition: service_started, required: false}
       ferryd-z-weth-base: {condition: service_started, required: false}
+      ferryd-b-ltc: {condition: service_started, required: false}
+      ferryd-b-usdc-base: {condition: service_started, required: false}
+      ferryd-b-weth-base: {condition: service_started, required: false}
     # Contract: header of web/server/prod.mjs. It strips the browser Origin after its own
     # PUBLIC_ORIGIN check, so the daemons never see one.
     environment:
       PORT: "8080"
       FERRY_Z_URL: http://ferryd-z:7101
       FERRY_B_URL: http://ferryd-b:7102
-      # ferryd-b is the operator's maker: visitors must never start swaps on it, even if a Z maker
-      # is ever listed (its BTC would then pay for a visitor's buy). See web/server/prod.mjs.
-      FERRY_B_BUYS: "0"
+      # Visitors sell ZEC on Z (which also makes offers, so the page's "auto" would skip it).
+      FERRY_Z_SELLS: "1"
+      # ferryd-b is the operator's maker: visitors start swaps on it (buying ZEC) only when BUY_ZEC
+      # names btc, and then only with the operator's own Z as the maker (infra/deploy/compose
+      # sets this and lists ferryd-z). See web/server/prod.mjs and docs/DEPLOY.md, "Buying ZEC".
+      FERRY_B_BUYS: ${FERRY_B_BUYS:-0}
       FERRY_MAKER_URL: http://ferryd-b:7112
       # The maker list on /app (empty: the one maker above). infra/deploy/compose fills it with
       # every enabled pair's maker unless .env sets it; see web/server/makers.mjs.
@@ -516,6 +542,13 @@ services:
       FERRY_USDC_BASE_TOKEN_FILE: /tokens/usdc-base/api-token
       FERRY_WETH_BASE_URL: ${FERRY_WETH_BASE_URL:-}
       FERRY_WETH_BASE_TOKEN_FILE: /tokens/weth-base/api-token
+      # B's daemon for each optional pair BUY_ZEC names (visitors buy ZEC there); empty otherwise.
+      FERRY_LTC_B_URL: ${FERRY_LTC_B_URL:-}
+      FERRY_LTC_B_TOKEN_FILE: /tokens/b-ltc/api-token
+      FERRY_USDC_BASE_B_URL: ${FERRY_USDC_BASE_B_URL:-}
+      FERRY_USDC_BASE_B_TOKEN_FILE: /tokens/b-usdc-base/api-token
+      FERRY_WETH_BASE_B_URL: ${FERRY_WETH_BASE_B_URL:-}
+      FERRY_WETH_BASE_B_TOKEN_FILE: /tokens/b-weth-base/api-token
       PUBLIC_ORIGIN: https://${DOMAIN:?set DOMAIN in infra/deploy/.env}
       TRUST_PROXY: "1"
       # The guard applies to every pair's taker: these caps are in ZEC, and each pair's maker
@@ -532,6 +565,9 @@ services:
       - token-z-ltc:/tokens/ltc:ro
       - token-z-usdc-base:/tokens/usdc-base:ro
       - token-z-weth-base:/tokens/weth-base:ro
+      - token-b-ltc:/tokens/b-ltc:ro
+      - token-b-usdc-base:/tokens/b-usdc-base:ro
+      - token-b-weth-base:/tokens/b-weth-base:ro
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
       interval: 30s

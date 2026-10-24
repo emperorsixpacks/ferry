@@ -163,9 +163,10 @@ T2 = 6 blocks after the cancel. If something stalls, the swap refunds by itself,
 protocol working.
 
 The public UI is guarded by `web/server/prod.mjs`: visitors can only read status and start a swap
-on a Z. Starts are capped at `DEMO_MAX_ZAT` (0.5 ZEC), one active swap at a time per pair,
-`DEMO_RATE_PER_HOUR` per IP and `DEMO_SWAPS_PER_HOUR` across all visitors. These limits are shared
-by every pair.
+on a Z (selling ZEC), or on a B for the pairs `BUY_ZEC` names (buying it, section 7.6). Starts
+are capped at `DEMO_MAX_ZAT` (0.5 ZEC), one active swap at a time per pair, `DEMO_RATE_PER_HOUR`
+per IP and `DEMO_SWAPS_PER_HOUR` across all visitors. These limits are shared by every pair and
+both directions.
 
 ## 7. More pairs: ZEC/LTC, ZEC/USDC, ZEC/WETH (optional)
 
@@ -324,6 +325,41 @@ infra/deploy/deploy.sh <ssh-host>
 
 The deploy stops that pair's containers and the web server stops listing it. Its volumes, keys and
 funds stay; enabling it again brings it back as it was. Let its swaps finish first (`status`).
+
+### 7.6 Buying ZEC (optional): `BUY_ZEC`
+
+By default visitors only sell ZEC: the swap starts on the pair's Z, and B is the maker. `BUY_ZEC`
+in the server's `.env` turns on the other direction for the pairs it names, comma-separated:
+`btc`, `ltc`, `usdc-base`, `weth-base` (an optional pair must also be in `COMPOSE_PROFILES`). On
+the server, add or set the line in `~/ferry/infra/deploy/.env` (a `.env` from before this option
+has no such line), then deploy:
+
+```sh
+BUY_ZEC=usdc-base,weth-base
+```
+
+```sh
+infra/deploy/deploy.sh <ssh-host>
+infra/deploy/deploy.sh <ssh-host> pairs   # "usdc-base  enabled, visitors also buy ZEC (BUY_ZEC)"
+```
+
+What changes:
+- A visitor's buy starts on the pair's **B**, and the pair's **Z** is the maker that sells the
+  ZEC. Every Z makes that offer (`--maker-offer`, at the pair's rate and sizes), on the private
+  network only like B's; the web server lists it, and so uses it, only for the pairs `BUY_ZEC`
+  names (`/api/makers`: `Demo maker (ZEC for USDC)` and so on, with `"role": "Z"`).
+- **The wallets and funding are the same as for a sell**: both sides are still this server's
+  wallets, ZEC still goes from Z to B and the coin from B to Z. Only who proposes the swap changes.
+- **The same guard** applies (section 6): the caps, both rate limits, one swap at a time per pair
+  whichever way, and no visitor can say where coins go.
+- If you set `FERRY_MAKERS` yourself, list the Z makers in it too, e.g.
+  `Demo maker (ZEC for USDC)|http://ferryd-z-usdc-base:7111|ZEC/USDC|base`, or
+  `Demo maker (ZEC for BTC)|http://ferryd-z:7111|ZEC/BTC`. List only your own Z there: a
+  visitor's buy pays B's coins to whichever listed maker it picks.
+
+Check with `curl -fsS https://<DOMAIN>/api/pairs`: `"buy"` lists the optional pairs and
+`"main": {"buy": true}` means ZEC/BTC. In the UI, the swap card's flip (receive ZEC) then works for
+those coins.
 
 ## 8. Operations
 
