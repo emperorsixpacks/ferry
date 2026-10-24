@@ -56,7 +56,13 @@ async function call<T>(base: string, path: string, body?: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data as { error?: string }).error ?? `${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    const error = (data as { error?: string }).error;
+    if (res.status === 401) throw new Error("The daemon refused the API token. Start the UI from a shell that has run `source .demo/env`, so the proxy can send FERRY_Z_TOKEN and FERRY_B_TOKEN.");
+    if (error) throw new Error(error);
+    // no JSON body: the dev proxy answering for a daemon that isn't running
+    throw new Error(res.status >= 500 ? "Can't reach the daemon. Is it running?" : `${res.status} ${res.statusText}`);
+  }
   return data as T;
 }
 

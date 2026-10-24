@@ -353,6 +353,14 @@ b {
   background: var(--ink-3);
 }
 
+.conn-error {
+  font-size: 13px;
+  color: var(--abort);
+  padding: 8px 12px;
+  background: var(--abort-wash);
+  border-radius: 6px;
+}
+
 .balances {
   display: grid;
   grid-template-columns: 1fr 1fr;

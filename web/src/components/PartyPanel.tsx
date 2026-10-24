@@ -15,12 +15,14 @@ export function PartyPanel({
   status,
   swap,
   connected,
+  error,
   stalled,
 }: {
   role: Role;
   status: Status | null;
   swap: SwapView | undefined;
   connected: boolean;
+  error: string | null;
   stalled: boolean;
 }) {
   const r = ROLE[role];
@@ -42,6 +44,7 @@ export function PartyPanel({
           </p>
         </div>
       </header>
+      {!connected && error ? <p className="conn-error" role="alert">{error}</p> : null}
 
       <dl className="balances">
         <div>

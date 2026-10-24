@@ -10,7 +10,8 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
     "preview": "vite preview",
-    "shoot": "node scripts/shoot.mjs"
+    "shoot": "node scripts/shoot.mjs",
+    "shoot:real": "node scripts/shoot.mjs --real"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",

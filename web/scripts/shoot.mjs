@@ -1,19 +1,24 @@
 // `pnpm shoot`: runs the mock and the UI, drives a happy swap, a Z stall (refund) and a B stall
 // (punish), and saves screenshots at 1440 and 390 wide, light and dark, into screenshots/.
+//
+// `pnpm shoot:real`: the same against running ferryd daemons (FERRY_Z_URL, FERRY_B_URL; the maker
+// URL defaults to FERRY_B_URL) instead of the mock, saving into screenshots/real/.
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { chromium } from "playwright";
 
+const REAL = process.argv.includes("--real");
 const SPEED = process.env.MOCK_SPEED ?? "2";
 const PORT = process.env.PORT ?? "5181";
-const OUT = new URL("../screenshots/", import.meta.url).pathname;
+const OUT = new URL(REAL ? "../screenshots/real/" : "../screenshots/", import.meta.url).pathname;
 mkdirSync(OUT, { recursive: true });
 
-const env = { ...process.env, MOCK_SPEED: SPEED, MOCK_Z_PORT: "7111", MOCK_B_PORT: "7112", FERRY_Z_URL: "http://127.0.0.1:7111", FERRY_B_URL: "http://127.0.0.1:7112", PORT };
-const procs = [
-  spawn(process.execPath, ["mock/server.mjs"], { env, stdio: "ignore" }),
-  spawn("pnpm", ["exec", "vite"], { env, stdio: "ignore" }),
-];
+const env = REAL
+  ? { ...process.env, PORT }
+  : { ...process.env, MOCK_SPEED: SPEED, MOCK_Z_PORT: "7111", MOCK_B_PORT: "7112", FERRY_Z_URL: "http://127.0.0.1:7111", FERRY_B_URL: "http://127.0.0.1:7112", PORT };
+if (REAL && !(env.FERRY_Z_URL && env.FERRY_B_URL)) throw new Error("--real needs FERRY_Z_URL and FERRY_B_URL");
+const procs = [spawn("pnpm", ["exec", "vite"], { env, stdio: "ignore" })];
+if (!REAL) procs.push(spawn(process.execPath, ["mock/server.mjs"], { env, stdio: "ignore" }));
 const cleanup = () => procs.forEach((p) => p.kill("SIGTERM"));
 process.on("exit", cleanup);
 
@@ -63,10 +68,14 @@ const api = (who, path, body) =>
     [who, path, body],
   );
 
-async function until(pred, label) {
-  for (let i = 0; i < 1200; i++) {
+// the daemons don't promise an order, so the newest swap is the one that started last
+const newest = (list) => list.sort((x, y) => (x.timeline[0]?.at ?? "").localeCompare(y.timeline[0]?.at ?? "")).at(-1);
+
+async function until(pred, label, minutes = REAL ? 10 : 3) {
+  const end = Date.now() + minutes * 60_000;
+  while (Date.now() < end) {
     const [z, b] = await Promise.all([api("z", "/api/swaps"), api("b", "/api/swaps")]);
-    if (pred(z.at(-1), b.at(-1))) return;
+    if (pred(newest(z), newest(b))) return;
     await sleep(150);
   }
   throw new Error("timed out waiting for " + label);

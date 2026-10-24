@@ -134,7 +134,7 @@ export default function App() {
       </form>
 
       <main className="board">
-        <PartyPanel role="Z" status={z.status} swap={zs} connected={z.connected} stalled={stalled.Z} />
+        <PartyPanel role="Z" status={z.status} swap={zs} connected={z.connected} error={z.error} stalled={stalled.Z} />
 
         <section className="crossing" aria-labelledby="crossing-title">
           <div className="crossing-head">
@@ -174,7 +174,7 @@ export default function App() {
           <Observer btc={(zs ?? bs)?.observer.btc ?? []} zec={(zs ?? bs)?.observer.zec ?? []} />
         </section>
 
-        <PartyPanel role="B" status={b.status} swap={bs} connected={b.connected} stalled={stalled.B} />
+        <PartyPanel role="B" status={b.status} swap={bs} connected={b.connected} error={b.error} stalled={stalled.B} />
       </main>
 
     </div>

@@ -3,46 +3,64 @@ import { DAEMONS, getStatus, getSwaps, type Role, type Status, type SwapView } f
 
 export interface Daemon {
   connected: boolean;
+  // why the daemon is unreachable, in the daemon's or proxy's words (e.g. a rejected API token)
+  error: string | null;
   status: Status | null;
   swaps: Record<string, SwapView>;
 }
 
-// Follows one ferryd: an initial fetch, then the SSE stream. EventSource reconnects on its own,
-// and every reconnect refetches so nothing is missed while the daemon was away.
+const RETRY_MS = 2000;
+
+// Follows one ferryd: a fetch, then the SSE stream. EventSource only retries network errors and
+// gives up for good on an HTTP error (a 401, or the proxy's 502 while the daemon restarts), so the
+// stream is reopened by hand. Every (re)connect refetches so nothing is missed while it was away.
 export function useDaemon(role: Role): Daemon {
-  const [state, setState] = useState<Daemon>({ connected: false, status: null, swaps: {} });
+  const [state, setState] = useState<Daemon>({ connected: false, error: null, status: null, swaps: {} });
 
   useEffect(() => {
     let alive = true;
-    const es = new EventSource(DAEMONS[role] + "/api/events");
+    let es: EventSource | null = null;
+    let retry: ReturnType<typeof setTimeout> | undefined;
 
     const refresh = async () => {
       try {
         const [status, list] = await Promise.all([getStatus(role), getSwaps(role)]);
         if (!alive) return;
-        setState((s) => ({ ...s, status, swaps: { ...s.swaps, ...Object.fromEntries(list.map((x) => [x.id, x])) } }));
-      } catch {
-        /* the stream's error handler marks the daemon offline */
+        setState((s) => ({ ...s, error: null, status, swaps: { ...s.swaps, ...Object.fromEntries(list.map((x) => [x.id, x])) } }));
+      } catch (e) {
+        if (alive) setState((s) => ({ ...s, connected: false, error: (e as Error).message }));
       }
     };
 
-    es.onopen = () => {
-      setState((s) => ({ ...s, connected: true }));
-      refresh();
+    const open = () => {
+      es = new EventSource(DAEMONS[role] + "/api/events");
+      es.onopen = () => {
+        setState((s) => ({ ...s, connected: true }));
+        refresh();
+      };
+      es.onerror = () => {
+        setState((s) => ({ ...s, connected: false }));
+        if (es?.readyState === EventSource.CLOSED) {
+          es.close();
+          refresh(); // records the reason, e.g. the daemon's 401 message
+          retry = setTimeout(() => alive && open(), RETRY_MS);
+        }
+      };
+      es.addEventListener("status", (e) => {
+        const status = JSON.parse((e as MessageEvent).data) as Status;
+        setState((s) => ({ ...s, status }));
+      });
+      es.addEventListener("swap", (e) => {
+        const swap = JSON.parse((e as MessageEvent).data) as SwapView;
+        setState((s) => ({ ...s, swaps: { ...s.swaps, [swap.id]: swap } }));
+      });
     };
-    es.onerror = () => setState((s) => ({ ...s, connected: false }));
-    es.addEventListener("status", (e) => {
-      const status = JSON.parse((e as MessageEvent).data) as Status;
-      setState((s) => ({ ...s, status }));
-    });
-    es.addEventListener("swap", (e) => {
-      const swap = JSON.parse((e as MessageEvent).data) as SwapView;
-      setState((s) => ({ ...s, swaps: { ...s.swaps, [swap.id]: swap } }));
-    });
+    open();
 
     return () => {
       alive = false;
-      es.close();
+      clearTimeout(retry);
+      es?.close();
     };
   }, [role]);
 
