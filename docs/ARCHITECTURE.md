@@ -108,7 +108,8 @@ the live API on 2026-10-20). The two meet only on the coin side:
 
 What the user trusts on the NEAR leg (custody during settlement, its bridges, a public trail) is
 in [THREAT-MODEL.md](THREAT-MODEL.md#paying-out-to-another-address-payout_to-near-intents). The
-web side (1Click proxy, quotes, progress) is the UI server's; ferryd itself never calls NEAR.
+web side (1Click proxy, quotes, progress) is the UI server's
+([API.md](API.md#near-intents-ui-server-not-ferryd)); ferryd itself never calls NEAR.
 
 ## Firm quotes
 
