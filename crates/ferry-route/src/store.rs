@@ -34,15 +34,28 @@ impl Store {
         std::fs::File::open(&self.dir)?.sync_all()
     }
 
+    /// Every route on disk. A route saved by a ferry-route from before parts (no `parts`) is left
+    /// where it is and not resumed: its swaps run on in ferryd without the router, and its ZEC
+    /// waits in the leg-2 wallet. Any other file that doesn't read is an error.
     pub fn load_all(&self) -> std::io::Result<Vec<Route>> {
-        let mut out = vec![];
+        let mut out: Vec<Route> = vec![];
         for entry in std::fs::read_dir(&self.dir)? {
             let path = entry?.path();
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             if path.extension().is_some_and(|e| e == "json") && !name.starts_with('.') {
-                let route: Route = serde_json::from_slice(&std::fs::read(&path)?)
-                    .map_err(|e| std::io::Error::other(format!("{}: {e}", path.display())))?;
-                out.push(route);
+                let bad = |e: serde_json::Error| {
+                    std::io::Error::other(format!("{}: {e}", path.display()))
+                };
+                let v: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path)?).map_err(bad)?;
+                if v.get("parts").is_none() && v.get("legs").is_some() {
+                    tracing::warn!(
+                        "{} was saved by an older ferry-route (one swap per leg); it is not resumed",
+                        path.display()
+                    );
+                    continue;
+                }
+                out.push(serde_json::from_value(v).map_err(bad)?);
             }
         }
         out.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
@@ -102,13 +115,26 @@ mod tests {
         let store = Store::open(tmp.path()).unwrap();
         let mut r = new_route(&Policy::default());
         store.save(&r).unwrap();
-        r.not_before = Some(42);
+        r.parts[1].not_before = Some(42);
         store.save(&r).unwrap();
         let all = store.load_all().unwrap();
         assert_eq!(all, vec![r]);
         // A leftover temp file from a crash mid-write is ignored.
         std::fs::write(tmp.path().join("routes/.rdead.json.tmp"), b"{").unwrap();
         assert_eq!(store.load_all().unwrap().len(), 1);
+        // A route from before parts is left alone, not resumed; a broken one is an error.
+        std::fs::write(
+            tmp.path().join("routes/rold.json"),
+            br#"{"id": "rold", "legs": [{}, {}], "phase": "leg2"}"#,
+        )
+        .unwrap();
+        assert_eq!(store.load_all().unwrap().len(), 1);
+        std::fs::write(
+            tmp.path().join("routes/rbad.json"),
+            br#"{"id": "rbad", "parts": 3}"#,
+        )
+        .unwrap();
+        assert!(store.load_all().is_err());
     }
 
     #[test]
@@ -138,7 +164,7 @@ mod tests {
         let routes = data.join("routes");
         std::fs::set_permissions(&routes, std::fs::Permissions::from_mode(0o500)).unwrap();
         let mut r2 = r.clone();
-        r2.not_before = Some(1);
+        r2.parts[1].not_before = Some(1);
         assert!(
             store.save(&r2).is_err(),
             "a read-only directory surfaces as an error"

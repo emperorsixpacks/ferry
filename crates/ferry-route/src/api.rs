@@ -3,10 +3,11 @@
 //! unless that origin was allowed. The listener is loopback unless explicitly opened.
 //!
 //! - `POST /api/routes` → `201` RouteView
+//! - `POST /api/routes/plan` (the same body) → how it would be split, without starting anything
 //! - `GET  /api/routes`, `GET /api/routes/:id`
-//! - `POST /api/routes/:id/continue` `{maker2?, min_out?, zec_zat?}`: leave `holding`, or skip
-//!   the privacy pause
-//! - `POST /api/routes/:id/stop`: before leg 2 only; the user keeps the ZEC
+//! - `POST /api/routes/:id/continue` `{maker2?, min_out?, zec_zat?}`: leave `holding` (what is
+//!   left to sell is planned again), or skip the gaps of the parts that wait
+//! - `POST /api/routes/:id/stop`: parts not yet started won't run; the user keeps the ZEC
 //! - `GET  /api/events`: Server-Sent Events, `event: route` with a RouteView
 //! - `GET  /api/status`: the configured legs
 
@@ -29,7 +30,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::hub::{ContinueArg, CreateRoute, Hub, HubError};
 use crate::legs::Ferryd;
 use crate::route::Obs;
-use crate::view::RouteView;
+use crate::view::{PlanView, RouteView};
 
 impl IntoResponse for HubError {
     fn into_response(self) -> Response {
@@ -51,6 +52,7 @@ pub fn router<F: Ferryd>(api: Arc<Api<F>>) -> Router {
     Router::new()
         .route("/api/status", get(status::<F>))
         .route("/api/routes", get(list::<F>).post(create::<F>))
+        .route("/api/routes/plan", post(plan::<F>))
         .route("/api/routes/{id}", get(get_route::<F>))
         .route("/api/routes/{id}/continue", post(resume::<F>))
         .route("/api/routes/{id}/stop", post(stop::<F>))
@@ -108,6 +110,9 @@ async fn status<F: Ferryd>(State(a): S<F>) -> Json<serde_json::Value> {
         "needed_confs": a.hub.policy.needed_confs,
         "default_delay_secs": a.hub.settings.default_delay_secs,
         "leg2_window_secs": a.hub.policy.leg2_window_secs,
+        "standard_amounts": a.hub.settings.standard_amounts,
+        "denominations_zat": a.hub.settings.denominations,
+        "max_parts": a.hub.settings.max_parts,
     }))
 }
 
@@ -135,6 +140,12 @@ async fn create<F: Ferryd>(
         .map_err(|e| HubError(400, format!("bad request body: {e}")))?;
     let r = a.hub.create(req).await?;
     Ok((StatusCode::CREATED, Json(a.hub.view(&r))))
+}
+
+async fn plan<F: Ferryd>(State(a): S<F>, bytes: Bytes) -> Result<Json<PlanView>, HubError> {
+    let req: CreateRoute = serde_json::from_slice(&bytes)
+        .map_err(|e| HubError(400, format!("bad request body: {e}")))?;
+    Ok(Json(a.hub.plan(req).await?))
 }
 
 async fn resume<F: Ferryd>(
@@ -214,13 +225,81 @@ mod tests {
         )
     }
 
+    /// One swap each way (standard amounts off).
     fn create_body() -> serde_json::Value {
         json!({
             "from": "btc", "to": "usdc-base", "zec_zat": 100_000_000,
             "maker1": {"url": "http://127.0.0.1:7111", "name": "Kestrel"},
             "maker2": [{"url": "http://127.0.0.1:7912", "name": "Heron"}],
-            "max_in": 412_500, "min_out": 39_200_000
+            "max_in": 412_500, "min_out": 39_200_000, "standard_amounts": false
         })
+    }
+
+    /// The router's default: standard amounts, here 0.85 ZEC.
+    fn standard_body() -> serde_json::Value {
+        let mut b = create_body();
+        b.as_object_mut().unwrap().remove("standard_amounts");
+        b["zec_zat"] = json!(85_000_000);
+        b["maker2"] = json!([
+            {"url": "http://127.0.0.1:7912", "name": "Heron"},
+            {"url": "http://127.0.0.1:7913", "name": "Egret"}
+        ]);
+        b
+    }
+
+    #[tokio::test]
+    async fn standard_amounts_show_their_parts() {
+        let rig = Rig::new();
+        let app = app(&rig);
+        let (code, s) = call(&app, "GET", "/api/status", None).await;
+        assert_eq!(code, 200);
+        assert_eq!(s["standard_amounts"], true);
+        assert_eq!(s["denominations_zat"][0], 10_000_000);
+        assert_eq!(s["max_parts"], 8);
+
+        // The plan: nothing starts, nothing is saved.
+        let (code, plan) = call(&app, "POST", "/api/routes/plan", Some(standard_body())).await;
+        assert_eq!(code, 200, "{plan}");
+        assert_eq!(plan["standard_amounts"], true);
+        assert_eq!(plan["parts"].as_array().unwrap().len(), 7, "{plan}");
+        assert_eq!(plan["amounts"]["zec_zat"], 85_000_000);
+        assert_eq!(plan["amounts"]["zec2_zat"], 80_000_000);
+        assert_eq!(plan["amounts"]["left_zat"], 5_000_000);
+        assert!(plan["parts"][0].get("maker_url").is_none());
+        assert!(rig.l1.starts().is_empty());
+        assert_eq!(call(&app, "GET", "/api/routes", None).await.1, json!([]));
+        let mut bad = standard_body();
+        bad["zec_zat"] = json!(5_000_000);
+        let (code, e) = call(&app, "POST", "/api/routes/plan", Some(bad)).await;
+        assert_eq!(code, 400);
+        assert!(e["error"]
+            .as_str()
+            .unwrap()
+            .contains("smallest standard amount"));
+
+        // The route: its parts, the first one under way, and the old fields as before.
+        let (code, v) = call(&app, "POST", "/api/routes", Some(standard_body())).await;
+        assert_eq!(code, 201, "{v}");
+        assert_eq!(v["standard_amounts"], true);
+        let parts = v["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 7);
+        assert_eq!(parts[0]["leg"], 1);
+        assert_eq!(parts[0]["status"], "running");
+        assert_eq!(
+            parts[0]["label"],
+            format!("{}/1/1", v["id"].as_str().unwrap())
+        );
+        assert!(parts[1..].iter().all(|p| p["status"] == "planned"));
+        assert_eq!(v["legs"][0]["parts"], 3);
+        assert_eq!(v["legs"][1]["parts"], 4);
+        assert_eq!(v["state"], "leg1");
+        assert_eq!(v["amounts"]["asked_zat"], 85_000_000);
+        assert_eq!(
+            v["privacy"]["denominations_zat"].as_array().unwrap().len(),
+            10
+        );
+        assert_eq!(rig.l1.starts().len(), 1);
+        assert!([10_000_000, 25_000_000, 50_000_000].contains(&rig.l1.starts()[0].zec_zat));
     }
 
     #[tokio::test]

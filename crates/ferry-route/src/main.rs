@@ -12,12 +12,13 @@ use clap::Parser;
 use ferry_route::api::{self, Api};
 use ferry_route::hub::{os_random, system_clock, Hub, Settings};
 use ferry_route::legs::{self, Ferryd, HttpFerryd, Role};
-use ferry_route::route::Policy;
+use ferry_route::route::{check_denominations, parse_zec, zec_str, Policy, MAX_PARTS_LIMIT};
 use ferry_route::store::write_private;
 
 /// Chains two Ferry swaps through shielded ZEC: leg 1 buys ZEC with coin A (your B daemon on
-/// pair A) and pays it straight into the shielded wallet of your Z daemon on pair C; after the
-/// note can be spent and a random privacy pause, leg 2 sells it for coin C.
+/// pair A) and pays it straight into the shielded wallet of your Z daemon on pair C; once the
+/// ZEC can be spent, leg 2 sells it for coin C. By default both legs are split into parts of
+/// standard sizes, each its own swap after its own random gap.
 #[derive(Debug, Parser)]
 #[command(name = "ferry-route", version)]
 struct Cli {
@@ -46,10 +47,21 @@ struct Cli {
     /// That daemon's API token file (its <data-dir>/api-token): PAIR:ROLE=FILE. Repeatable.
     #[arg(long = "leg-token-file", value_name = "PAIR:ROLE=FILE")]
     leg_tokens: Vec<String>,
-    /// Privacy pause for routes that name none, MIN:MAX seconds (Standard: 5–30 min; Off is
-    /// 0:0, Long is 3600:21600).
+    /// The random gap before each part (the privacy pause) for routes that name none, MIN:MAX
+    /// seconds (Standard: 5–30 min; Off is 0:0, Long is 3600:21600).
     #[arg(long, default_value = "300:1800")]
     delay_secs: String,
+    /// Split routes into parts of standard sizes (`on`), so the amounts on both outer chains are
+    /// ones every swap of that size shares. `off` (for testing) runs each leg as one swap; a
+    /// request may still ask either way (`standard_amounts`).
+    #[arg(long, value_parser = ["on", "off"], default_value = "on")]
+    standard_amounts: String,
+    /// The standard sizes, in ZEC, comma-separated (default: the firm-quote buckets).
+    #[arg(long, default_value = "0.1,0.25,0.5,1,2.5,5,10,25,50,100")]
+    denominations: String,
+    /// Most parts per leg; a larger amount is rounded down to what this many parts can carry.
+    #[arg(long, default_value_t = 8)]
+    max_parts: usize,
     /// Longest privacy pause a route may ask for.
     #[arg(long, default_value_t = 24 * 3600)]
     max_delay_secs: u64,
@@ -218,12 +230,37 @@ async fn main() -> anyhow::Result<()> {
         start_grace_secs: cli.start_grace_secs,
         spendable_grace_secs: cli.spendable_grace_secs,
     };
+    let denominations = cli
+        .denominations
+        .split(',')
+        .map(|d| {
+            parse_zec(d).with_context(|| format!("--denominations: {d:?} is not an amount of ZEC"))
+        })
+        .collect::<anyhow::Result<Vec<u64>>>()?;
+    let denominations =
+        check_denominations(&denominations).map_err(|e| anyhow::anyhow!("--denominations: {e}"))?;
+    if !(1..=MAX_PARTS_LIMIT).contains(&cli.max_parts) {
+        bail!("--max-parts must be 1 to {MAX_PARTS_LIMIT}");
+    }
     let settings = Settings {
         default_delay_secs: delay,
         max_delay_secs: cli.max_delay_secs,
         max_keep_bps: cli.max_keep_bps.min(10_000),
         allow_same_partner: cli.allow_same_partner,
+        standard_amounts: cli.standard_amounts == "on",
+        denominations,
+        max_parts: cli.max_parts,
     };
+    if settings.standard_amounts {
+        let sizes: Vec<String> = settings.denominations.iter().map(|d| zec_str(*d)).collect();
+        tracing::info!(
+            max_parts = settings.max_parts,
+            "standard amounts: {}",
+            sizes.join(", ")
+        );
+    } else {
+        tracing::warn!("standard amounts are off: each leg runs as one swap, and its amounts can link the legs");
+    }
     let hub = Arc::new(Hub::open(
         &cli.data_dir,
         policy,
