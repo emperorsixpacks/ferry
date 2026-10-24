@@ -114,6 +114,8 @@ impl OfferView {
 pub struct EvmSwapView {
     pub id: String,
     pub role: Role,
+    /// We started this swap (proposed to a maker); false: we are the maker.
+    pub taker: bool,
     pub counterparty: String,
     pub state: String,
     pub outcome: Option<&'static str>,
@@ -193,6 +195,7 @@ pub fn swap_view(rec: &EvmRecord) -> EvmSwapView {
     EvmSwapView {
         id: rec.id.clone(),
         role: rec.role(),
+        taker: rec.taker,
         counterparty: rec.counterparty.clone(),
         state: rec.state(),
         outcome: rec.outcome(),

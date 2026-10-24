@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use ferry_btc::bitcoin::Transaction;
-use ferry_core::{Action, Envelope, Role, Secret32, Swap};
+use ferry_core::{Action, Envelope, Message, Role, Secret32, Swap};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -198,6 +198,25 @@ impl SwapRecord {
         self.timeline.iter().any(|e| e.kind == kind)
     }
 
+    /// How many of our outbox messages may reach the peer now. All of them, except B's redeem
+    /// adaptor (always B's last message): it is handed over only while B waits for Z's redeem
+    /// and nobody has spent the lock note. B's state machine only makes it then; this keeps a
+    /// delivery that happens later (a taker retrying its push, or a maker's outbox read late)
+    /// from handing it over once the note is spent or the swap was called off. Whichever side
+    /// is the taker, the rule is the same.
+    pub fn deliverable(&self) -> usize {
+        let may = |env: &Envelope| match env.message {
+            Message::RedeemAdaptor { .. } => {
+                self.state() == "RedeemSigSent" && self.zec_spent_by.is_none()
+            }
+            _ => true,
+        };
+        self.outbox
+            .iter()
+            .position(|e| !may(e))
+            .unwrap_or(self.outbox.len())
+    }
+
     pub fn outcome(&self) -> Option<&'static str> {
         match (self.role(), self.state().as_str()) {
             (Role::B, "ZecSwept") | (Role::Z, "BtcRedeemed") => Some("swapped"),
@@ -217,7 +236,9 @@ impl SwapRecord {
         // the joint address, so a note that lands anyway is reclaimed rather than stranded.
         let late_note_possible = self.role() == Role::Z
             && self.state() == "Refunded"
-            && (self.zec_send_intent || self.has("zec_lock_refused") || self.has("zec_send_uncertain"));
+            && (self.zec_send_intent
+                || self.has("zec_lock_refused")
+                || self.has("zec_send_uncertain"));
         !late_note_possible
             && self.swap.is_final()
             && self.pending.is_empty()
@@ -355,6 +376,148 @@ pub(crate) mod tests {
             false,
             "u1".into(),
         )
+    }
+
+    /// B as the taker (buying ZEC from a Z maker), driven through the protocol to
+    /// RedeemSigSent, with everything it sent in its outbox: LockTemplate, CancelSig and the
+    /// redeem adaptor. Also returns the lock output (for chain events).
+    pub(crate) fn b_taker_with_redeem_adaptor() -> (SwapRecord, ferry_btc::bitcoin::TxOut) {
+        use ferry_btc::bitcoin::{
+            absolute::LockTime, hashes::Hash, transaction::Version, Address, Network, OutPoint,
+            Sequence, TxIn, TxOut, Txid, Witness,
+        };
+        use ferry_core::{accept, ChainEvent, Event, Proposal, SwapParams};
+        let secp = ferry_btc::bitcoin::key::Secp256k1::new();
+        let addr = || {
+            Address::p2tr(
+                &secp,
+                ferry_btc::BtcKey::random().xonly(),
+                None,
+                Network::Regtest,
+            )
+        };
+        let params = SwapParams {
+            coin: ferry_btc::Coin::Btc,
+            network: Network::Regtest,
+            btc_amount: 1_000_000,
+            zec_amount: 1_000_000,
+            t1: 12,
+            t2: 24,
+            btc_fee: 2_000,
+            btc_lock_confirmations: 1,
+            zec_confirmations: 1,
+            cancel_confirmations: 1,
+            redeem_margin: 3,
+            refund_margin: 3,
+            keypath: true,
+        };
+        let sends = |actions: Vec<Action>| -> Vec<Envelope> {
+            actions
+                .into_iter()
+                .filter_map(|a| match a {
+                    Action::SendMessage(env) => Some(env),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut rng = rand_core::OsRng;
+        let (proposal, propose) =
+            Proposal::new(&mut rng, [5; 32], Role::B, params.clone(), addr()).unwrap();
+        let (mut z, z_actions) = accept(&mut rng, &propose, addr()).unwrap();
+        let Action::SendMessage(acc) = &z_actions[0] else {
+            panic!("expected Accept")
+        };
+        let (mut b, b_actions) = proposal.on_accept(&mut rng, acc).unwrap();
+        let Some(Action::FundBtcLock { address, amount }) = b_actions.first().cloned() else {
+            panic!("expected FundBtcLock")
+        };
+        let lock = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_raw_hash(Hash::all_zeros()),
+                    vout: 1,
+                },
+                sequence: Sequence::MAX,
+                witness: Witness::from_slice(&[[1u8; 64]]),
+                ..Default::default()
+            }],
+            output: vec![TxOut {
+                value: amount,
+                script_pubkey: address.script_pubkey(),
+            }],
+        };
+        let mut outbox = vec![];
+        let mut to_z = sends(
+            b.handle(Event::LockFunded {
+                tx: lock.clone(),
+                vout: 0,
+            })
+            .unwrap(),
+        );
+        outbox.extend(to_z.clone());
+        while !to_z.is_empty() {
+            let mut to_b = vec![];
+            for env in to_z.drain(..) {
+                to_b.extend(sends(z.handle(Event::Peer(env)).unwrap()));
+            }
+            for env in to_b {
+                let out = sends(b.handle(Event::Peer(env)).unwrap());
+                outbox.extend(out.clone());
+                to_z.extend(out);
+            }
+        }
+        let txout = lock.output[0].clone();
+        b.handle(Event::Chain(ChainEvent::BtcLockConfirmed {
+            confs: 1,
+            txout: txout.clone(),
+        }))
+        .unwrap();
+        outbox.extend(sends(
+            b.handle(Event::Chain(ChainEvent::ZecNoteSeen {
+                value: params.zec_amount,
+                confs: 1,
+                spent: false,
+            }))
+            .unwrap(),
+        ));
+        assert_eq!(b.state_name(), "RedeemSigSent");
+        let mut rec = SwapRecord::new("05".repeat(32), b, "http://maker".into(), true, "u1".into());
+        rec.outbox = outbox;
+        (rec, txout)
+    }
+
+    /// B hands over the redeem adaptor only while it waits for Z's redeem with the lock note
+    /// unspent, whether it pushes it (taker) or Z reads it (maker): never once the note is spent
+    /// by anyone else, nor once the swap is called off.
+    #[test]
+    fn redeem_adaptor_leaves_only_while_b_waits_for_the_redeem() {
+        use ferry_core::{ChainEvent, Event};
+        let (rec, txout) = b_taker_with_redeem_adaptor();
+        assert!(rec.taker);
+        let names: Vec<_> = rec.outbox.iter().map(|e| e.message.name()).collect();
+        assert_eq!(names, ["LockTemplate", "CancelSig", "RedeemAdaptor"]);
+        assert_eq!(rec.deliverable(), 3);
+
+        let mut spent = rec.clone();
+        spent.zec_spent_by = Some("someone-else".into());
+        assert_eq!(spent.deliverable(), 2, "a spent lock note keeps it back");
+
+        let mut late = rec.clone();
+        late.swap
+            .handle(Event::Chain(ChainEvent::BtcLockConfirmed {
+                confs: 12,
+                txout,
+            }))
+            .unwrap();
+        assert_eq!(late.state(), "Cancelled");
+        assert_eq!(late.deliverable(), 2, "T1 reached: it stays back");
+
+        // Every other message goes out whatever the state (here the first two, after T1).
+        let mut early = late.clone();
+        early.outbox.truncate(2);
+        assert_eq!(early.deliverable(), 2);
     }
 
     #[test]

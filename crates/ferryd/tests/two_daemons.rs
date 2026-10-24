@@ -1,5 +1,6 @@
-//! Two real `ferryd` processes (Z taker, B maker) swap over HTTP against a regtest bitcoind,
-//! with the file-backed mock Zcash chain. The test plays block producer.
+//! Two real `ferryd` processes swap over HTTP against a regtest bitcoind, with the file-backed
+//! mock Zcash chain. The test plays block producer. The three stories (happy, refund, punish) run
+//! both ways: selling ZEC (Z takes from a B maker) and buying ZEC (B takes from a Z maker).
 //!
 //! Needs `spikes/btc/scripts/regtest.sh start` (override the RPC with FERRY_BTC_RPC).
 //! Run: `cargo test -p ferryd --test two_daemons -- --ignored --test-threads=1 --nocapture`
@@ -11,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use ferry_btc::bitcoin::{Amount, Network};
 use ferry_btc::rpc::BitcoinRpc;
+use ferry_core::Role;
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Value};
 
@@ -87,6 +89,8 @@ struct World {
     miner: ferry_btc::bitcoin::Address,
     z: Party,
     b: Party,
+    /// Who makes (`--maker-offer`); the other one takes.
+    maker: Role,
     _dir: tempfile::TempDir,
 }
 
@@ -155,8 +159,13 @@ impl World {
         Self::start_with(zec_confs, &[]).await
     }
 
-    /// `b_extra`: more flags for the maker.
+    /// `b_extra`: more flags for the maker (B).
     async fn start_with(zec_confs: u32, b_extra: &[&str]) -> World {
+        Self::start_as(zec_confs, Role::B, b_extra).await
+    }
+
+    /// `maker` makes at 410000 sat/ZEC, with `maker_extra`; the other party takes.
+    async fn start_as(zec_confs: u32, maker: Role, maker_extra: &[&str]) -> World {
         let dir = tempfile::tempdir().unwrap();
         let zec_file = dir.path().join("zec-chain.json");
         let tag = format!("{:08x}", OsRng.next_u32());
@@ -178,6 +187,12 @@ impl World {
             args: vec![],
             log: dir.path().join("zoe.log"),
         };
+        let offer = [&["--maker-offer", "410000"], maker_extra].concat();
+        let z_extra = [
+            &["--zec-mock-balance", "500000000"][..],
+            if maker == Role::Z { &offer } else { &[] },
+        ]
+        .concat();
         z.args = party_args(
             "z",
             "zoe",
@@ -186,7 +201,7 @@ impl World {
             &zec_file,
             &z.wallet,
             zec_confs,
-            &["--zec-mock-balance", "500000000"],
+            &z_extra,
         );
         let mut b = Party {
             child: None,
@@ -203,7 +218,7 @@ impl World {
             &zec_file,
             &b.wallet,
             zec_confs,
-            &[&["--maker-offer", "410000"], b_extra].concat(),
+            if maker == Role::B { &offer } else { &[] },
         );
         z.spawn();
         b.spawn();
@@ -222,6 +237,7 @@ impl World {
             miner,
             z,
             b,
+            maker,
             _dir: dir,
         };
         w.wait_ready(&w.z.url).await;
@@ -237,6 +253,21 @@ impl World {
             .unwrap();
         w.mine().await;
         w
+    }
+
+    fn party(&self, role: Role) -> &Party {
+        match role {
+            Role::Z => &self.z,
+            Role::B => &self.b,
+        }
+    }
+
+    fn maker(&self) -> &Party {
+        self.party(self.maker)
+    }
+
+    fn taker(&self) -> &Party {
+        self.party(self.maker.peer())
     }
 
     fn zec_file(&self) -> PathBuf {
@@ -303,12 +334,13 @@ impl World {
         self.get(url, &format!("/api/swaps/{id}")).await
     }
 
+    /// The taker proposes to the maker: one call on the taker's API, whichever role it holds.
     async fn start_swap(&self, zec_zat: u64) -> String {
         let (code, body) = self
             .post(
-                &self.z.url,
+                &self.taker().url,
                 "/api/swaps",
-                json!({"maker": self.b.peer_url(), "zec_zat": zec_zat}),
+                json!({"maker": self.maker().peer_url(), "zec_zat": zec_zat}),
             )
             .await;
         assert_eq!(
@@ -396,13 +428,28 @@ async fn check_api_guard(w: &World) {
         status(bare.get(&url).bearer_auth(TOKEN).send().await.unwrap()),
         200
     );
-    let on_peer = format!("{}/api/status", w.b.peer_url());
+    let on_peer = format!("{}/api/status", w.maker().peer_url());
     assert_eq!(
         status(bare.get(&on_peer).bearer_auth(TOKEN).send().await.unwrap()),
         404
     );
-    let offer = format!("{}/peer/offer", w.b.peer_url());
-    assert_eq!(status(bare.get(&offer).send().await.unwrap()), 200);
+    let offer = format!("{}/peer/offer", w.maker().peer_url());
+    let got: Value = bare.get(&offer).send().await.unwrap().json().await.unwrap();
+    assert_eq!(got["making"], true, "{got}");
+    assert_eq!(got["role"], if w.maker == Role::Z { "Z" } else { "B" });
+    // A Z maker quotes what its shielded ZEC can fill (the mock wallet keeps no fee reserve),
+    // once its first status refresh has read the balance.
+    if w.maker == Role::Z {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let got: Value = bare.get(&offer).send().await.unwrap().json().await.unwrap();
+            if got["liquidity"]["zec_zat"] == 500_000_000 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Z maker liquidity: {got}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
 
     let token_file = w._dir.path().join("zoe").join("api-token");
     assert_eq!(std::fs::read_to_string(&token_file).unwrap(), TOKEN);
@@ -418,11 +465,30 @@ async fn check_api_guard(w: &World) {
 #[tokio::test]
 #[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
 async fn happy_swap_over_http_with_restart() {
-    let mut w = World::start(2).await;
+    happy_swap(Role::B).await;
+}
+
+/// Buying ZEC: B proposes to a Z maker, locks BTC, receives the ZEC and sweeps it.
+#[tokio::test]
+#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+async fn buy_zec_happy_swap_with_a_z_maker() {
+    happy_swap(Role::Z).await;
+}
+
+async fn happy_swap(maker: Role) {
+    let mut w = World::start_as(2, maker, &[]).await;
     check_api_guard(&w).await;
     let id = w.start_swap(100_000_000).await;
+    let (taker_view, maker_view) = (
+        w.swap(&w.taker().url, &id).await,
+        w.swap(&w.maker().url, &id).await,
+    );
+    assert_eq!(
+        (taker_view["taker"].as_bool(), maker_view["taker"].as_bool()),
+        (Some(true), Some(false))
+    );
     // The maker's outbox is only readable with the ECDH-derived peer token.
-    let outbox = format!("{}/peer/swaps/{id}/messages?after=0", w.b.peer_url());
+    let outbox = format!("{}/peer/swaps/{id}/messages?after=0", w.maker().peer_url());
     let bare = reqwest::Client::new();
     assert_eq!(
         bare.get(&outbox).send().await.unwrap().status().as_u16(),
@@ -439,7 +505,8 @@ async fn happy_swap_over_http_with_restart() {
         401
     );
 
-    // Restart Z mid-swap, once its ZEC is locked: it must resume from its swap file.
+    // Restart Z mid-swap (taker or maker), once its ZEC is locked: it must resume from its
+    // swap file.
     w.run_until(&id, 700, 20, |z, _| {
         state(z) == "ZecLocked" || state(z) == "RedeemSigReceived"
     })
@@ -564,9 +631,19 @@ async fn happy_swap_over_http_with_restart() {
 #[tokio::test]
 #[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
 async fn refund_swap_when_z_stalls() {
+    refund_swap(Role::B).await;
+}
+
+#[tokio::test]
+#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+async fn buy_zec_refund_when_the_z_maker_stalls() {
+    refund_swap(Role::Z).await;
+}
+
+async fn refund_swap(maker: Role) {
     // Z stalls with its ZEC locked; B cancels at T1 and refunds; Z wakes on the cancel,
     // extracts b from the refund witness and reclaims its ZEC.
-    let w = World::start(4).await;
+    let w = World::start_as(4, maker, &[]).await;
     let id = w.start_swap(50_000_000).await;
     w.run_until(&id, 700, 20, |z, _| state(z) == "ZecLocked")
         .await;
@@ -635,8 +712,18 @@ async fn refund_swap_when_z_stalls() {
 #[tokio::test]
 #[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
 async fn punish_swap_when_b_stalls() {
+    punish_swap(Role::B).await;
+}
+
+#[tokio::test]
+#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+async fn buy_zec_punish_when_the_b_taker_stalls() {
+    punish_swap(Role::Z).await;
+}
+
+async fn punish_swap(maker: Role) {
     // Slow ZEC confirmations keep B in BtcLocked/ZecSeen long enough to stall it there.
-    let w = World::start(6).await;
+    let w = World::start_as(6, maker, &[]).await;
     let id = w.start_swap(50_000_000).await;
     let deadline = Instant::now() + Duration::from_secs(20);
     while state(&w.swap(&w.b.url, &id).await) != "CancelSigned" {

@@ -103,9 +103,17 @@ fn peer_name(role: Role) -> &'static str {
 }
 
 fn btc_str(sat: u64) -> String {
-    let s = format!("{:.8}", Amount::from_sat(sat).to_btc());
-    format!("{} BTC", s.trim_end_matches('0').trim_end_matches('.'))
+    coin_str(sat, "BTC")
 }
+
+/// `sat` base units of an 8-decimal coin, e.g. "0.0041 LTC".
+fn coin_str(sat: u64, ticker: &str) -> String {
+    let s = format!("{:.8}", Amount::from_sat(sat).to_btc());
+    format!("{} {ticker}", s.trim_end_matches('0').trim_end_matches('.'))
+}
+
+/// What B keeps on top of the amount for the lock transaction's own (wallet-chosen) fee.
+const LOCK_FEE_RESERVE_SAT: u64 = 10_000;
 
 /// Rescan window when importing a swap's addresses (recent blocks are kept even when pruned).
 const WATCH_RESCAN_SECS: u64 = 2 * 24 * 3600;
@@ -500,8 +508,15 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     .map_err(|e| ApiError(503, e.to_string()))?
                     .to_sat();
                 // The lock pays its own (wallet-chosen) fee on top of the amount.
-                if have < params.btc_amount + 10_000 {
-                    return Err(ApiError::bad("B does not have enough BTC"));
+                let need = params.btc_amount.saturating_add(LOCK_FEE_RESERVE_SAT);
+                if have < need {
+                    let t = self.cli.chain.ticker();
+                    return Err(ApiError::bad(format!(
+                        "B does not have enough {t}: {} needed (the amount plus about {} for the lock's fee), {} in the wallet",
+                        coin_str(need, t),
+                        coin_str(LOCK_FEE_RESERVE_SAT, t),
+                        coin_str(have, t)
+                    )));
                 }
             }
         }
@@ -698,7 +713,8 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         if rec.stalled {
             return Err(ApiError(503, "stalled".into()));
         }
-        Ok(rec.outbox.get(after..).unwrap_or_default().to_vec())
+        let end = rec.deliverable().max(after);
+        Ok(rec.outbox.get(after..end).unwrap_or_default().to_vec())
     }
 
     /// Demo fault injection.
@@ -1423,7 +1439,19 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     async fn exchange(&self, rec: &mut SwapRecord) {
         let base = format!("{}/peer/swaps/{}/messages", rec.counterparty, rec.id);
         let token = rec.swap.session().peer_token().unwrap_or_default();
-        while rec.sent < rec.outbox.len() {
+        let deliverable = rec.deliverable();
+        if rec.sent == deliverable
+            && deliverable < rec.outbox.len()
+            && !rec.has("redeem_adaptor_withheld")
+        {
+            rec.log(
+                "local",
+                "redeem_adaptor_withheld",
+                "Kept the redeem adaptor back: the swap moved on before Z received it, so it is never handed over",
+                None,
+            );
+        }
+        while rec.sent < deliverable {
             let resp = self
                 .http
                 .post(&base)

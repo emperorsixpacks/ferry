@@ -391,7 +391,10 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             // swap can carry; neither side can fill more than that at the current rate.
             let one_swap = zat_for(u64::MAX, offer.rate_sat_per_zec);
             let fillable = match self.role {
-                Role::Z => b.zec_shielded_zat,
+                // less the lock's fee: the bar `check_funds` sets a proposal
+                Role::Z => b
+                    .zec_shielded_zat
+                    .saturating_sub(self.leg.send_fee_reserve()),
                 Role::B => zat_for(b.btc_sat, offer.rate_sat_per_zec),
             };
             offer.liquidity = Some(crate::config::Liquidity {
@@ -885,7 +888,8 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         if rec.stalled {
             return Err(ApiError(503, "stalled".into()));
         }
-        Ok(rec.outbox.get(after..).unwrap_or_default().to_vec())
+        let end = rec.deliverable().max(after);
+        Ok(rec.outbox.get(after..end).unwrap_or_default().to_vec())
     }
 
     /// Demo fault injection: `stall`.
@@ -1642,7 +1646,19 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
     async fn exchange(&self, rec: &mut EvmRecord) {
         let base = format!("{}/peer/swaps/{}/messages", rec.counterparty, rec.id);
         let token = rec.swap.session().peer_token().unwrap_or_default();
-        while rec.sent < rec.outbox.len() {
+        let deliverable = rec.deliverable();
+        if rec.sent == deliverable
+            && deliverable < rec.outbox.len()
+            && !rec.has("redeem_adaptor_withheld")
+        {
+            rec.log(
+                "local",
+                "redeem_adaptor_withheld",
+                "Kept the Ready(id) signature back: the swap moved on before Z received it, so it is never handed over",
+                None,
+            );
+        }
+        while rec.sent < deliverable {
             let resp = self
                 .http
                 .post(&base)
