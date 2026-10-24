@@ -149,7 +149,7 @@ cmd_status() {
 import json, sys
 r = json.load(sys.stdin)
 state = "synced" if not r["initialblockdownload"] and r["blocks"] == r["headers"] else "syncing"
-print("signet node  %s: block %d of %d headers (%.2f%%)" % (state, r["blocks"], r["headers"], 100 * r["verificationprogress"]))' \
+print("signet node  %s: block %d of %d headers (%.2f%%)" % (state, r["blocks"], r["headers"], 100 * r["verificationprogress"]))' 2>/dev/null \
     || echo "signet node  not answering"
   for key in z b; do
     api "$key" /api/status | python3 -c '
@@ -157,12 +157,12 @@ import json, sys
 s = json.load(sys.stdin)
 b = s["balances"]
 print("ferryd %s  %s: btc %d sat  zec %d zat  (zec %s height %d)"
-      % (s["role"], s["name"], b["btc_sat"], b["zec_shielded_zat"], s["chains"]["zec"]["network"], s["chains"]["zec"]["height"]))' \
+      % (s["role"], s["name"], b["btc_sat"], b["zec_shielded_zat"], s["chains"]["zec"]["network"], s["chains"]["zec"]["height"]))' 2>/dev/null \
       || echo "ferryd $key  not answering"
     api "$key" /api/swaps | python3 -c '
 import json, sys
 for s in json.load(sys.stdin):
-    print("  swap %s…  %-18s outcome %s" % (s["id"][:12], s["state"], s["outcome"]))' || true
+    print("  swap %s…  %-18s outcome %s" % (s["id"][:12], s["state"], s["outcome"]))' 2>/dev/null || true
   done
   echo
   rctl status
@@ -178,7 +178,7 @@ if a["role"] == "B":
     print("B (%s) holds the BTC. Send %s sats to:\n  %s" % (a["name"], btc["network"], btc["address"]))
 else:
     print("Z (%s) holds the ZEC. Send testnet ZEC (TAZ) to:\n  %s" % (a["name"], zec or "(not available yet)"))
-    print("  (Z is paid in %s BTC at %s)" % (btc["network"], btc["address"]))' \
+    print("  (Z is paid in %s BTC at %s)" % (btc["network"], btc["address"]))' 2>/dev/null \
       || echo "ferryd $key is not answering yet"
   done
   echo
