@@ -20,7 +20,7 @@ MAKER_URL="http://127.0.0.1:$B_PEER_PORT"
 Z_NAME="${Z_NAME:-zoe}"
 B_NAME="${B_NAME:-bram}"
 RATE="${RATE:-410000}"
-MIN_ZAT="${MIN_ZAT:-1000000}"
+MIN_ZAT="${MIN_ZAT:-10000000}"
 MAX_ZAT="${MAX_ZAT:-100000000}"
 # Signet blocks come about every 10 minutes; Zcash testnet blocks every 75 seconds.
 T1="${T1:-6}"
@@ -64,7 +64,7 @@ default policy for notes from another wallet), so fund Z first.
 Then start a swap from the UI or with:
   source $STATE/env
   curl -XPOST localhost:$Z_PORT/api/swaps -H "authorization: Bearer \$FERRY_Z_TOKEN" \\
-       -H 'content-type: application/json' -d '{"maker":"$MAKER_URL","zec_zat":1000000}'
+       -H 'content-type: application/json' -d '{"maker":"$MAKER_URL","zec_zat":10000000}'
 The UI: cd web && source $STATE/env && pnpm dev:ui
 
 Timelocks (in signet blocks of about 10 minutes):

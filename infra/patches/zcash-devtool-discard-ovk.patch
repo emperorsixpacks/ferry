@@ -1,0 +1,28 @@
+--- a/src/commands/pczt/create_max.rs
++++ b/src/commands/pczt/create_max.rs
+@@ -52,6 +52,12 @@
+     #[arg(long)]
+     only_spendable: bool,
+ 
++    /// Encrypt the outputs' outCiphertext to no one (OvkPolicy::Discard) instead of the
++    /// sending account's OVK. For accounts whose viewing key is shared with others, who could
++    /// otherwise recover the recipient, amount and memo of what this account sends.
++    #[arg(long)]
++    discard_ovk: bool,
++
+     /// Path to a file to which to write the PCZT. If not provided, writes to stdout.
+     #[arg(long)]
+     output: Option<PathBuf>,
+@@ -105,7 +111,11 @@
+             &SystemClock,
+             &mut UnwrapErr(SysRng),
+             account.id(),
+-            OvkPolicy::Sender,
++            if self.discard_ovk {
++                OvkPolicy::Discard
++            } else {
++                OvkPolicy::Sender
++            },
+             &proposal,
+             // Use the builder-derived expiry and a standard Orchard-pool bundle.
+             None,

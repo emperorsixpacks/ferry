@@ -91,7 +91,7 @@ Environment (defaults in brackets):
       ($ZAINO_CONTAINER, :$ZAINO_PORT). A miner wallet takes the (Ironwood) coinbase and pays Z
       ZEC_BALANCE_ZAT; a ZEC block every ~ZEC_BLOCK_SECS+2s (blocks take ~2s under amd64 emulation).
       Setup mines ~125 blocks first (coinbase maturity), a few minutes. Needs ZEC_DEVTOOL
-      [vendor/zcash-devtool, built with --features regtest_support]; builds ZEC_SIGNER
+      [vendor/zcash-devtool + infra/patches/zcash-devtool-discard-ovk.patch, built with --features regtest_support]; builds ZEC_SIGNER
       [tools/ferry-zec-signer] if missing. Extra ferryd flags: ZEC_ARGS_Z / ZEC_ARGS_B
   FERRYD_ARGS (extra flags for both daemons)   FERRY_DEMO_DIR [$STATE]
 EOF
@@ -165,7 +165,7 @@ start_ferryd() { # start_ferryd <key> <role> <name> <api port> <peer port> [extr
   local origins=()
   for o in $UI_ORIGINS; do origins+=(--ui-origin "$o"); done
   "$FERRYD" --role "$role" --name "$name" --api-listen "127.0.0.1:$port" --listen "127.0.0.1:$peer_port" \
-    --data-dir "$STATE/$key" --demo-faults ${origins[@]+"${origins[@]}"} \
+    --data-dir "$STATE/$key" --demo-faults --dev-policy ${origins[@]+"${origins[@]}"} \
     --btc-rpc "$BTC_RPC" --btc-wallet "$name" "${zec_args[@]}" \
     --t1 "$T1" --t2 "$T2" --delta "$DELTA" --btc-lock-confs "$BTC_LOCK_CONFS" --zec-confs "$ZEC_CONFS" \
     --poll-ms "$POLL_MS" "$@" ${extra[@]+"${extra[@]}"} >>"$STATE/logs/$key.log" 2>&1 &
@@ -251,7 +251,10 @@ TOML
 # then pays Z its starting balance. Z's and B's wallets are created here too.
 start_zec() {
   [ -x "$ZEC_DEVTOOL" ] || die "ZEC_DEVTOOL not found: $ZEC_DEVTOOL
-  build it: (cd vendor/zcash-devtool && cargo build --release --features regtest_support)"
+  build it: (cd vendor/zcash-devtool && patch -p1 < ../../infra/patches/zcash-devtool-discard-ovk.patch \\
+    && cargo build --release --features regtest_support)"
+  "$ZEC_DEVTOOL" pczt create-max --help 2>/dev/null | grep -q -- --discard-ovk ||
+    die "$ZEC_DEVTOOL lacks create-max --discard-ovk: (cd vendor/zcash-devtool && patch -p1 < ../../infra/patches/zcash-devtool-discard-ovk.patch && cargo build --release --features regtest_support)"
   if [ ! -x "$ZEC_SIGNER" ]; then
     log "building ferry-zec-signer"
     (cd "$ROOT/tools/ferry-zec-signer" && cargo build -q --release) || die "building ferry-zec-signer failed"
