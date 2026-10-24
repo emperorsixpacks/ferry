@@ -1,7 +1,12 @@
 //! Minimal async bitcoind JSON-RPC client: what a swap needs, nothing more.
+//!
+//! It also drives litecoind (Litecoin Core ≥ 0.21.2), whose RPC is the same for every call
+//! used here; only addresses are written differently, see [`BitcoinRpc::with_coin`].
 
 use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
 use bitcoin::{Address, Amount, BlockHash, Network, Transaction, Txid};
+
+use crate::chain::{Chain, Coin};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
@@ -50,6 +55,7 @@ pub struct BitcoinRpc {
     pass: String,
     wallet: Option<String>,
     watch_wallet: Option<String>,
+    coin: Coin,
 }
 
 impl BitcoinRpc {
@@ -61,7 +67,45 @@ impl BitcoinRpc {
             pass: pass.into(),
             wallet: None,
             watch_wallet: None,
+            coin: Coin::Btc,
         }
+    }
+
+    /// Talk to the node of `coin` (default Bitcoin): addresses sent to and read from the node
+    /// use that coin's text encoding, and new wallet addresses its supported type.
+    pub fn with_coin(mut self, coin: Coin) -> Self {
+        self.coin = coin;
+        self
+    }
+
+    pub fn coin(&self) -> Coin {
+        self.coin
+    }
+
+    /// `addr` as the node writes it. The network tier (main / test / regtest) is the
+    /// address's own.
+    fn addr_str(&self, addr: &Address) -> String {
+        let network = [Network::Bitcoin, Network::Regtest, Network::Testnet]
+            .into_iter()
+            .find(|n| addr.as_unchecked().is_valid_for_network(*n))
+            .unwrap_or(Network::Bitcoin);
+        Chain {
+            coin: self.coin,
+            network,
+        }
+        .encode_address(addr)
+    }
+
+    fn parse_addr(&self, method: &str, s: &str, network: Network) -> Result<Address, RpcError> {
+        Chain {
+            coin: self.coin,
+            network,
+        }
+        .parse_address(s)
+        .map_err(|e| RpcError::Decode {
+            method: method.into(),
+            detail: e.to_string(),
+        })
     }
 
     /// Route wallet RPCs to `/wallet/<name>`.
@@ -102,9 +146,14 @@ impl BitcoinRpc {
             .await
             .is_err()
         {
-            // name, disable_private_keys, blank, passphrase, avoid_reuse, descriptors
-            self.call::<Value>("createwallet", json!([name, true, true, "", false, true]))
-                .await?;
+            // name, disable_private_keys, blank, passphrase, avoid_reuse, descriptors.
+            // Litecoin Core 0.21 has no descriptor wallets: a legacy watch-only wallet then.
+            let descriptors = self.coin == Coin::Btc;
+            self.call::<Value>(
+                "createwallet",
+                json!([name, true, true, "", false, descriptors]),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -115,6 +164,30 @@ impl BitcoinRpc {
         let Some(w) = &self.watch_wallet else {
             return Ok(());
         };
+        let address = self.addr_str(address);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let timestamp = now.saturating_sub(rescan_secs);
+        if self.coin == Coin::Ltc {
+            // Legacy watch-only wallet (see ensure_watch_wallet).
+            let res: Value = self
+                .watch_call(
+                    w,
+                    "importmulti",
+                    json!([[{"scriptPubKey": {"address": address}, "timestamp": timestamp,
+                             "watchonly": true}]]),
+                )
+                .await?;
+            if res[0]["success"].as_bool() != Some(true) {
+                return Err(RpcError::Decode {
+                    method: "importmulti".into(),
+                    detail: res.to_string(),
+                });
+            }
+            return Ok(());
+        }
         let info: Value = self
             .call("getdescriptorinfo", json!([format!("addr({address})")]))
             .await?;
@@ -122,15 +195,11 @@ impl BitcoinRpc {
             "addr({address})#{}",
             info["checksum"].as_str().unwrap_or_default()
         );
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
         let res: Value = self
             .watch_call(
                 w,
                 "importdescriptors",
-                json!([[{"desc": desc, "timestamp": now.saturating_sub(rescan_secs)}]]),
+                json!([[{"desc": desc, "timestamp": timestamp}]]),
             )
             .await?;
         if res[0]["success"].as_bool() != Some(true) {
@@ -267,14 +336,12 @@ impl BitcoinRpc {
 
     pub async fn new_address(&self, network: Network) -> Result<Address, RpcError> {
         let s: String = self
-            .wallet_call("getnewaddress", json!(["", "bech32m"]))
+            .wallet_call(
+                "getnewaddress",
+                json!(["", self.coin.wallet_address_type()]),
+            )
             .await?;
-        s.parse::<Address<_>>()
-            .and_then(|a| a.require_network(network))
-            .map_err(|e| RpcError::Decode {
-                method: "getnewaddress".into(),
-                detail: e.to_string(),
-            })
+        self.parse_addr("getnewaddress", &s, network)
     }
 
     /// A stable receiving address of the wallet under `label` (created on first use).
@@ -283,10 +350,6 @@ impl BitcoinRpc {
         label: &str,
         network: Network,
     ) -> Result<Address, RpcError> {
-        let decode = |detail: String| RpcError::Decode {
-            method: "labeled_address".into(),
-            detail,
-        };
         let existing: Result<Value, _> = self
             .wallet_call("getaddressesbylabel", json!([label]))
             .await;
@@ -296,13 +359,14 @@ impl BitcoinRpc {
         {
             Some(a) => a,
             None => {
-                self.wallet_call::<String>("getnewaddress", json!([label, "bech32m"]))
-                    .await?
+                self.wallet_call::<String>(
+                    "getnewaddress",
+                    json!([label, self.coin.wallet_address_type()]),
+                )
+                .await?
             }
         };
-        addr.parse::<Address<_>>()
-            .and_then(|a| a.require_network(network))
-            .map_err(|e| decode(e.to_string()))
+        self.parse_addr("labeled_address", &addr, network)
     }
 
     /// Regtest only: mine `n` blocks to `to`.
@@ -311,7 +375,7 @@ impl BitcoinRpc {
         n: u64,
         to: &Address,
     ) -> Result<Vec<BlockHash>, RpcError> {
-        self.call("generatetoaddress", json!([n, to.to_string()]))
+        self.call("generatetoaddress", json!([n, self.addr_str(to)]))
             .await
     }
 
@@ -325,7 +389,7 @@ impl BitcoinRpc {
         let raw: String = self
             .wallet_call(
                 "createrawtransaction",
-                json!([[], {to.to_string(): amount.to_btc()}]),
+                json!([[], {self.addr_str(to): amount.to_btc()}]),
             )
             .await?;
         let funded: Value = self.wallet_call("fundrawtransaction", json!([raw])).await?;

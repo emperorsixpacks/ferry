@@ -2,12 +2,16 @@
 //!
 //! Needs `spikes/btc/scripts/regtest.sh start` (RPC 127.0.0.1:18543, ferry/ferry; override
 //! with FERRY_BTC_RPC). Run: `cargo test -p ferry-core --test regtest -- --ignored --test-threads=1`
+//!
+//! The same tests run against litecoind with `FERRY_CHAIN=ltc` (after
+//! `infra/ltc/regtest.sh start`, RPC 127.0.0.1:19443).
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use ferry_btc::bitcoin::{Address, Amount, Network, OutPoint, Txid};
 use ferry_btc::rpc::BitcoinRpc;
+use ferry_btc::Coin;
 use ferry_core::{
     accept, Action, BState, ChainEvent, Envelope, Event, Message, Proposal, Role, Spend, Swap,
     SwapParams, ZState, ZecLeg, ZecNote, ZecStatus,
@@ -161,9 +165,18 @@ fn idx(role: Role) -> usize {
 
 impl World {
     async fn new(faults: Faults) -> World {
-        let url =
-            std::env::var("FERRY_BTC_RPC").unwrap_or_else(|_| "http://127.0.0.1:18543".into());
-        let rpc = BitcoinRpc::new(url, "ferry", "ferry").with_wallet("ferry-core-it");
+        let coin: Coin = std::env::var("FERRY_CHAIN")
+            .unwrap_or_else(|_| "btc".into())
+            .parse()
+            .unwrap();
+        let default_url = match coin {
+            Coin::Btc => "http://127.0.0.1:18543",
+            Coin::Ltc => "http://127.0.0.1:19443",
+        };
+        let url = std::env::var("FERRY_BTC_RPC").unwrap_or_else(|_| default_url.into());
+        let rpc = BitcoinRpc::new(url, "ferry", "ferry")
+            .with_wallet("ferry-core-it")
+            .with_coin(coin);
         rpc.ensure_wallet()
             .await
             .expect("bitcoind up? (spikes/btc/scripts/regtest.sh start)");

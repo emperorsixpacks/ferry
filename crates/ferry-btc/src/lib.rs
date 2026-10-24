@@ -14,6 +14,7 @@
 //! corresponding Zcash key share.
 
 pub mod adaptor;
+pub mod chain;
 pub mod musig;
 pub mod scripts;
 pub mod tx;
@@ -22,6 +23,7 @@ pub mod tx;
 pub mod rpc;
 
 pub use adaptor::{BtcKey, EncryptionKey};
+pub use chain::{Chain, ChainError, Coin};
 pub use scripts::{SwapScripts, TapOut};
 pub use tx::{Spend, SwapTxs, TxError};
 pub use {bitcoin, schnorr_fun};

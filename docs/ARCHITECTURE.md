@@ -5,7 +5,8 @@ ferry/
   Cargo.toml                 workspace
   crates/
     ferry-dleq/              cross-group DLEQ (Pallas SpendAuthG <-> secp256k1 G), Serai dleq 0.4.1
-    ferry-btc/               Taproot lock/cancel scripts, tx templates, BIP340 adaptor sigs, bitcoind RPC
+    ferry-btc/               Taproot lock/cancel scripts, tx templates, BIP340 adaptor sigs, bitcoind/litecoind
+                             RPC, chain parameters (BTC or LTC: address encoding, dust, confirmations)
     ferry-zec/               joint Ironwood key (ak = ±(Z_p+B_p)), UFVK/UA, PCZT signer with raw ask,
                              wallet ops (drives zcash-devtool / zcash_client_* at devtool's pinned revs)
     ferry-core/              swap session: params, messages, state machine, timelock policy (no I/O)
@@ -14,8 +15,8 @@ ferry/
     ferry-watchtower/        keyless tower: broadcasts an offline party's presigned cancel/refund/punish
                              on time (HTTP upload, bitcoind polling; docs/WATCHTOWER.md)
   web/                       demo UI (two parties side by side + "what each chain sees")
-  infra/                     docker: bitcoind regtest, Zebra regtest (NU6.3 at 1), Zaino
-  docs/                      PROTOCOL.md, ARCHITECTURE.md, THREAT-MODEL.md, DEMO.md
+  infra/                     docker: bitcoind regtest, litecoind regtest (infra/ltc), Zebra regtest (NU6.3 at 1), Zaino
+  docs/                      PROTOCOL.md, ARCHITECTURE.md, THREAT-MODEL.md, LITECOIN.md, DEMO.md
   vendor/                    (gitignored) zcash-devtool, frost-tools checkouts
   spikes/                    day-0 go/no-go spikes, kept as evidence
 ```
