@@ -97,16 +97,20 @@ and observer lines name the coin ("0.5 LTC", "fee 2000 lit", "the Litecoin trans
 A taker refuses a maker whose offer is for another coin, and a maker refuses a Propose for
 another coin; the coin is part of `SwapParams` and so of the transcript.
 
-**USDC on an EVM chain.** A daemon started with `--counter evm` swaps ZEC against an ERC-20 in
-FerryLock (docs/EVM.md). The same paths answer, in the same shape:
-- `chains.btc` is `{ "coin": "usdc", "ticker": "USDC", "decimals": 6, "network", "height",
-  "time" }`, where `time` is the latest block's unix time and `network` is one of `anvil`,
-  `ethereum`, `optimism`, `base`, `arbitrum`, `sepolia`, `op-sepolia`, `base-sepolia`,
-  `arbitrum-sepolia`, or `evm-<chain id>` for an unlisted chain (`--evm-testnet-policy`).
-- `btc_sat` fields hold token base units.
+**USDC or WETH on an EVM chain.** A daemon started with `--counter evm` swaps ZEC against an
+ERC-20 in FerryLock (docs/EVM.md). The same paths answer, in the same shape:
+- `chains.btc` is `{ "coin": "usdc" | "weth", "ticker": "USDC" | "WETH", "decimals": 6 | 18,
+  "network", "height", "time" }`, where `coin` is the configured token's symbol in lowercase,
+  `time` is the latest block's unix time and `network` is one of `anvil`, `ethereum`,
+  `optimism`, `base`, `arbitrum`, `sepolia`, `op-sepolia`, `base-sepolia`, `arbitrum-sepolia`,
+  or `evm-<chain id>` for an unlisted chain (`--evm-testnet-policy`).
+- `btc_sat` fields hold token base units (WETH: wei, so they pass 2^53 and lose precision as JS
+  numbers; fine for display). Swap amounts are u64. `balances.btc_sat` saturates at
+  18446744073709551615 (2^64 − 1; 100 WETH is 10^20 wei), and `balances.token_units` is the
+  exact balance as a decimal string.
 - `balances.eth_wei` is gas money.
-- `offer` has `pair: "ZEC/USDC"`, `rate_sat_per_zec` in token units per ZEC, and `t1_secs`,
-  `refund_secs` and `delta_secs` instead of block counts.
+- `offer` has `pair: "ZEC/USDC"` (or `"ZEC/WETH"`), `rate_sat_per_zec` in token units per ZEC,
+  and `t1_secs`, `refund_secs` and `delta_secs` instead of block counts.
 - A `counter` block names the chain id, contract, token and our account.
 
 Swap views add `deadlines.t1_unix`, `t2_unix` and `now_unix` (block time) and a `counter` block

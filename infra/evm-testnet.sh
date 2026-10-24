@@ -580,6 +580,7 @@ start_ferryd() { # start_ferryd <key> <role> <name> <api port> <peer port> [extr
     --listen "127.0.0.1:$peer_port" --data-dir "$STATE/$key" "${zec_args[@]}" \
     ${origins[@]+"${origins[@]}"} \
     --evm-rpc "$EVM_RPC" --evm-contract "$lock" --evm-token "$USDC" --evm-key-file "$STATE/$key.key" \
+    --evm-token-symbol USDC --evm-token-decimals 6 \
     --evm-t1-secs "$T1_SECS" --evm-refund-secs "$REFUND_SECS" --evm-delta-secs "$DELTA_SECS" \
     --evm-lock-confs "$LOCK_CONFS" --evm-log-chunk "$LOG_CHUNK" --zec-confs "$ZEC_CONFS" \
     --poll-ms "$POLL_MS" "$@" ${extra[@]+"${extra[@]}"} >>"$STATE/logs/$key.log" 2>&1 &

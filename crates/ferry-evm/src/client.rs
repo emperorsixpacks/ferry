@@ -60,6 +60,13 @@ pub struct OnChainSwap {
     pub state: SwapState,
 }
 
+/// What an ERC-20 says about itself (`symbol()`, `decimals()`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenInfo {
+    pub symbol: String,
+    pub decimals: u8,
+}
+
 /// A mined, successful transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TxInfo {
@@ -205,6 +212,19 @@ impl EvmClient {
             return Err(Error::UnknownContract);
         }
         Ok(())
+    }
+
+    /// The token's own `symbol()` and `decimals()`. An address without code, or a token whose
+    /// `symbol()` is not an ABI string (some old tokens return bytes32), is an error.
+    pub async fn token_info(&self, token: Address) -> Result<TokenInfo, Error> {
+        if self.provider.get_code_at(token).await?.is_empty() {
+            return Err(Error::Rpc(format!("no contract at {token}")));
+        }
+        let t = IERC20::new(token, &self.provider);
+        Ok(TokenInfo {
+            symbol: t.symbol().call().await?,
+            decimals: t.decimals().call().await?,
+        })
     }
 
     pub async fn token_balance(&self, token: Address, who: Address) -> Result<U256, Error> {

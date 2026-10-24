@@ -91,12 +91,16 @@ fn addr20(a: Address) -> [u8; 20] {
 
 impl Sim {
     fn new(faults: Faults) -> Sim {
+        Sim::with_params(faults, params())
+    }
+
+    fn with_params(faults: Faults, params: EvmParams) -> Sim {
         let b_key = PrivateKeySigner::random();
         let z_addr = addr20(PrivateKeySigner::random().address());
         // Z is the taker, B the maker (as in the demo UI).
         let sid = [7u8; 32];
         let (proposal, propose) =
-            EvmProposal::new(&mut OsRng, sid, Role::Z, params(), z_addr).unwrap();
+            EvmProposal::new(&mut OsRng, sid, Role::Z, params, z_addr).unwrap();
         let (b, b_actions) = evm_accept(&mut OsRng, &propose, addr20(b_key.address())).unwrap();
         let EvmAction::SendMessage(accept) = &b_actions[0] else {
             panic!("expected Accept")
@@ -502,6 +506,32 @@ fn wrong_lock_terms_never_get_zec() {
     assert!(sim.zec_note.is_none(), "Z locked ZEC under the wrong bAddr");
     assert_eq!(sim.z_state(), EvmZState::Negotiated);
     assert!(sim.rejected.iter().any(|r| r.contains("does not match")));
+}
+
+/// WETH: 18 decimals, at the per-swap cap (u64::MAX wei, about 18.44 WETH) with a tip cap.
+/// The machines do no arithmetic on token amounts: the amount travels through negotiation
+/// (JSON and the transcript), the lock terms and Z's check of the on-chain lock unchanged.
+#[test]
+fn weth_at_the_swap_cap() {
+    let p = EvmParams {
+        token: [0x33; 20],
+        token_amount: u64::MAX,
+        token_symbol: "WETH".into(),
+        token_decimals: 18,
+        max_tip: 10_000_000_000_000_000, // 0.01 WETH
+        ..params()
+    };
+    let mut sim = Sim::with_params(Faults::default(), p.clone());
+    let terms = sim.z.session().lock_terms().unwrap();
+    assert_eq!((terms.amount, terms.max_tip), (u64::MAX, p.max_tip));
+    assert_eq!(sim.b.session().lock_terms().unwrap(), terms);
+    sim.run_until(T2, |s| s.b_state() == EvmBState::ZecSwept);
+    assert_eq!(sim.z_state(), EvmZState::Claimed);
+    assert_eq!(sim.contract.lock.as_ref().unwrap().0.amount, u64::MAX);
+    sim.assert_clean();
+    assert!(sim.rejected.is_empty(), "{:?}", sim.rejected);
+    let back: EvmSwap = serde_json::from_str(&serde_json::to_string(&sim.z).unwrap()).unwrap();
+    assert_eq!(back.session().params, p);
 }
 
 #[test]

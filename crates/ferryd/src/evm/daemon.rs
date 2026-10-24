@@ -19,12 +19,12 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, Mutex};
 
 use super::config::{
-    addr_str, network_name, parse_address, policy_opt_in, token_str, Counter, EvmOffer,
-    EvmProposeRequest, EvmTerms,
+    addr_str, check_feed_pair, check_token_metadata, network_name, parse_address, policy_opt_in,
+    token_str, Counter, EvmOffer, EvmProposeRequest, EvmTerms,
 };
 use super::record::{bytes, EvmPending, EvmRecord, EvmStore};
 use super::view::{self, EvmStatusView};
-use crate::config::{Cli, Delivery};
+use crate::config::{zat_for, Cli, Delivery};
 use crate::daemon::{ApiError, SseEvent};
 use crate::record::fvk_from_hex;
 
@@ -104,19 +104,26 @@ fn to_terms(t: &LockTerms) -> ferry_evm::Terms {
     }
 }
 
-/// On-chain terms in plain bytes; amounts above u64 cannot be ours, so they never match.
+/// On-chain terms in plain bytes. Agreed amounts are u64, so a lock whose amount or tip cap
+/// does not fit cannot be ours: it comes out with amount 0, which no valid `EvmParams` has
+/// (`validate` refuses a zero amount), so Z's term check always refuses it. Saturating to
+/// u64::MAX instead could match terms agreed at exactly u64::MAX.
 fn from_terms(t: &ferry_evm::Terms) -> LockTerms {
-    let small = |v: U256| u64::try_from(v).unwrap_or(u64::MAX);
+    let fits = |v: U256| u64::try_from(v).ok();
+    let (amount, max_tip) = match (fits(t.amount), fits(t.maxTip)) {
+        (Some(a), Some(m)) => (a, m),
+        _ => (0, 0),
+    };
     LockTerms {
         token: t.token.0 .0,
-        amount: small(t.amount),
+        amount,
         z_addr: t.zAddr.0 .0,
         b_addr: t.bAddr.0 .0,
         claimer: t.claimer.0 .0,
         refunder: t.refunder.0 .0,
         t1: t.t1,
         t2: t.t2,
-        max_tip: small(t.maxTip),
+        max_tip,
     }
 }
 
@@ -151,6 +158,23 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 addr_str(&contract)
             )
         })?;
+        // Both roles: the token is what the flags say. Its decimals set the scale of every
+        // amount we quote, check and show, so a mislabeled token must not get this far.
+        let info = client
+            .token_info(Address::from(token))
+            .await
+            .with_context(|| {
+                format!(
+                    "reading symbol() and decimals() of the token at {}",
+                    addr_str(&token)
+                )
+            })?;
+        check_token_metadata(&info, &e.evm_token_symbol, e.evm_token_decimals)
+            .map_err(|m| anyhow::anyhow!("--evm-token {}: {m}", addr_str(&token)))?;
+        let price = cli.live_rate().map(Arc::new);
+        if let Some(live) = &price {
+            check_feed_pair(live.cfg.pair, e.evm_token_decimals).map_err(anyhow::Error::msg)?;
+        }
         let policy = EvmPolicy::for_chain(chain_id, policy_opt_in(&cli)).map_err(|e| {
             anyhow::anyhow!(
                 "{e} (--dev-policy for a local anvil; --evm-testnet-policy for an unlisted test \
@@ -212,7 +236,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         }
         let (events, _) = broadcast::channel(256);
         let daemon = EvmDaemon {
-            price: cli.live_rate().map(Arc::new),
+            price,
             role,
             offer,
             leg,
@@ -232,14 +256,21 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             cli,
         };
         if daemon.offer.making {
-            // Our own maker terms must pass our own policy.
+            // Our own maker terms must pass our own policy, and our largest swap must fit the
+            // per-swap cap (u64 base units) at our rate.
+            let o = &daemon.offer;
+            let token_amount = o.token_for(o.max_zat).with_context(|| {
+                format!(
+                    "--maker-offer: {} at {} {} units per ZEC is more than one swap can carry ({}); lower the maximum",
+                    zec_str(o.max_zat),
+                    o.rate_sat_per_zec,
+                    o.token_symbol,
+                    o.swap_cap()
+                )
+            })?;
             let now = daemon.client.latest_timestamp().await?;
             daemon
-                .params_for(
-                    daemon.offer.max_zat,
-                    daemon.offer.token_for(daemon.offer.max_zat),
-                    now,
-                )
+                .params_for(o.max_zat, token_amount, now)
                 .check_policy(&daemon.policy, now)
                 .map_err(|e| anyhow::anyhow!("our own maker terms: {e}"))?;
         }
@@ -263,7 +294,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
     /// Our offer's terms applied to an amount, with deadlines from `now`.
     fn params_for(&self, zec_zat: u64, token_amount: u64, now: u64) -> EvmParams {
         let t = &self.offer.terms;
-        let t1 = now + t.t1_secs;
+        let t1 = now.saturating_add(t.t1_secs);
         EvmParams {
             chain_id: self.chain_id,
             contract: self.offer.contract,
@@ -273,7 +304,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             token_decimals: self.offer.token_decimals,
             zec_amount: zec_zat,
             t1,
-            t2: t1 + t.refund_secs,
+            t2: t1.saturating_add(t.refund_secs),
             claim_margin: t.claim_margin,
             refund_margin: t.refund_margin,
             lock_confirmations: t.lock_confirmations,
@@ -294,7 +325,10 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         let eth = self.client.eth_balance().await?;
         let balances = view::Balances {
             zec_shielded_zat: zec.shielded_balance,
+            // 100 WETH is 1e20 wei, beyond u64: saturate here (u64::MAX is also the most one
+            // swap can carry) and give the exact figure as a decimal string.
             btc_sat: u64::try_from(tokens).unwrap_or(u64::MAX),
+            token_units: tokens.to_string(),
             eth_wei: eth.to_string(),
         };
         let offer = self.offer_with(Some(&balances));
@@ -353,16 +387,15 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             },
         }
         if let Some(b) = balances.filter(|_| self.offer.making) {
+            // B's token balance saturates at u64::MAX base units, which is also the most one
+            // swap can carry; neither side can fill more than that at the current rate.
+            let one_swap = zat_for(u64::MAX, offer.rate_sat_per_zec);
             let fillable = match self.role {
                 Role::Z => b.zec_shielded_zat,
-                Role::B if offer.rate_sat_per_zec == 0 => 0,
-                Role::B => {
-                    (u128::from(b.btc_sat) * 100_000_000 / u128::from(offer.rate_sat_per_zec))
-                        as u64
-                }
+                Role::B => zat_for(b.btc_sat, offer.rate_sat_per_zec),
             };
             offer.liquidity = Some(crate::config::Liquidity {
-                zec_zat: fillable.min(self.offer.max_zat),
+                zec_zat: fillable.min(one_swap).min(self.offer.max_zat),
             });
         }
         offer
@@ -382,7 +415,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
     fn rate_matches(&self, zec_amount: u64, token_amount: u64) -> bool {
         match &self.price {
             Some(live) => live.amount_matches(zec_amount, token_amount),
-            None => self.offer.token_for(zec_amount) == token_amount,
+            None => self.offer.token_for(zec_amount) == Some(token_amount),
         }
     }
 
@@ -448,11 +481,10 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 self.role.as_str()
             ));
         }
-        if offer.chain_id != self.chain_id
-            || offer.contract != self.offer.contract
-            || offer.token != self.offer.token
-        {
-            return bad("the counterparty uses another chain, FerryLock or token".into());
+        // Same chain, FerryLock and token (address, symbol and decimals): a USDC taker never
+        // matches a WETH maker, nor one that labels the same token differently.
+        if let Err(m) = self.offer.check_same_token(&offer) {
+            return bad(m);
         }
         // Whoever sees Z's claim in the mempool can resubmit it with the largest tip the lock
         // allows, so Z never takes a maker's tip cap above its own --evm-max-tip (0 by default).
@@ -469,23 +501,32 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 zec_str(offer.max_zat)
             ));
         }
+        // Token amounts are u64 base units: refuse a swap above that cap rather than wrap it.
+        let Some(token_amount) = offer.token_for(zec_zat) else {
+            return bad(format!(
+                "{} at this maker's rate is more than one swap can carry ({}); swap less",
+                zec_str(zec_zat),
+                offer.swap_cap()
+            ));
+        };
         let (head, now) = self
             .client
             .latest_block()
             .await
             .map_err(|e| ApiError(503, e.to_string()))?;
         let t = &offer.terms;
-        let t1 = now + t.t1_secs;
+        // The maker's numbers are untrusted: saturate, and let the policy check refuse them.
+        let t1 = now.saturating_add(t.t1_secs);
         let params = EvmParams {
             chain_id: self.chain_id,
             contract: self.offer.contract,
             token: self.offer.token,
-            token_amount: offer.token_for(zec_zat),
-            token_symbol: offer.token_symbol.clone(),
-            token_decimals: offer.token_decimals,
+            token_amount,
+            token_symbol: self.offer.token_symbol.clone(),
+            token_decimals: self.offer.token_decimals,
             zec_amount: zec_zat,
             t1,
-            t2: t1 + t.refund_secs,
+            t2: t1.saturating_add(t.refund_secs),
             claim_margin: t.claim_margin,
             refund_margin: t.refund_margin,
             lock_confirmations: t.lock_confirmations,
@@ -594,7 +635,9 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                     .await
                     .map_err(|e| unavailable(e.to_string()))?
                     .shielded_balance;
-                let need = params.zec_amount + self.leg.send_fee_reserve();
+                let need = params
+                    .zec_amount
+                    .saturating_add(self.leg.send_fee_reserve());
                 if have < need {
                     return Err(ApiError(
                         400,
@@ -611,10 +654,15 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                     .token_balance(Address::from(params.token), self.client.address())
                     .await
                     .map_err(|e| unavailable(e.to_string()))?;
+                // Compared in U256: a WETH balance can exceed u64.
                 if have < U256::from(params.token_amount) {
                     return Err(ApiError(
                         400,
-                        format!("B does not have enough {}", params.token_symbol),
+                        format!(
+                            "B does not have enough {}: {} needed",
+                            params.token_symbol,
+                            self.token(params.token_amount)
+                        ),
                     ));
                 }
             }
@@ -696,16 +744,13 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         if setup.role != self.role.peer() {
             return bad("taker has our role");
         }
-        if params.chain_id != self.chain_id
-            || params.contract != self.offer.contract
-            || params.token != self.offer.token
-        {
-            return bad("another chain, FerryLock or token than this maker's");
-        }
-        if params.token_symbol != self.offer.token_symbol
-            || params.token_decimals != self.offer.token_decimals
-        {
-            return bad("token symbol or decimals differ from the offer");
+        // The taker's numbers are untrusted: the hard sanity checks come before any arithmetic.
+        params
+            .validate()
+            .map_err(|e| ApiError(400, e.to_string()))?;
+        // Same chain, FerryLock and token (address, symbol and decimals) as ours.
+        if let Err(m) = self.offer.check_params_token(params) {
+            return bad(m);
         }
         if !self.offer.terms.same_shape(params) {
             return bad("timing terms differ from the offer");
@@ -721,7 +766,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             .latest_block()
             .await
             .map_err(|e| ApiError(503, e.to_string()))?;
-        let want_t1 = now + self.offer.terms.t1_secs;
+        let want_t1 = now.saturating_add(self.offer.terms.t1_secs);
         if params.t1.abs_diff(want_t1) > T1_TOLERANCE_SECS {
             return bad("t1 is not the offer's claim window from now");
         }
@@ -1699,13 +1744,15 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 }
                 SwapEventKind::Claimed { z, caller, tip } => {
                     o.claimed = Some((*z, c));
+                    // FerryLock keeps tip <= maxTip <= amount; saturate anyway, never panic.
+                    let tip_units = u64::try_from(*tip).unwrap_or(u64::MAX);
                     (
                         "claim",
                         format!(
                             "FerryLock.claim: publishes a 32-byte scalar (Z's share z) in calldata and in the Claimed event; pays {} to {}{} (sent by {}, tx {}…). Nothing here points to Zcash.",
-                            self.token(p.token_amount - u64::try_from(*tip).unwrap_or(0)),
+                            self.token(p.token_amount.saturating_sub(tip_units)),
                             short_addr(&ferry_evm::Address::from(p_claimer(rec))),
-                            if tip.is_zero() { String::new() } else { format!(" and a {} tip", self.token(u64::try_from(*tip).unwrap_or(0))) },
+                            if tip.is_zero() { String::new() } else { format!(" and a {} tip", self.token(tip_units)) },
                             short_addr(caller),
                             &hash[..10]
                         ),

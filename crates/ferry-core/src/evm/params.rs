@@ -25,12 +25,15 @@ pub struct EvmParams {
     /// The FerryLock deployment both parties use.
     #[serde(with = "crate::hex_serde")]
     pub contract: [u8; 20],
-    /// The ERC-20 B locks (USDC).
+    /// The ERC-20 B locks (USDC, WETH).
     #[serde(with = "crate::hex_serde")]
     pub token: [u8; 20],
-    /// Token base units B locks (USDC: 10^-6). Z receives this minus any relayer tip.
+    /// Token base units B locks (USDC: 10^-6, WETH: 10^-18). Z receives this minus any relayer
+    /// tip. A u64, so one swap carries at most about 18.44 WETH (FerryLock itself takes any
+    /// uint256); kept so the wire format stays the same for USDC peers.
     pub token_amount: u64,
-    /// Display only, agreed so both UIs say the same thing.
+    /// Agreed (and part of the transcript) so both sides name, scale and show the same token;
+    /// each daemon checks them against the token's own `symbol()` and `decimals()` at startup.
     pub token_symbol: String,
     pub token_decimals: u8,
     /// ZEC Z locks (zatoshi).

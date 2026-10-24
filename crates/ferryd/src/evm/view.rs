@@ -24,8 +24,12 @@ pub struct EvmStatusView {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct Balances {
     pub zec_shielded_zat: u64,
-    /// Token base units (USDC: 10^-6).
+    /// Token base units (USDC: 10^-6, WETH: 10^-18), saturating at u64::MAX: 18.44 WETH, which
+    /// is also the most one swap can carry. `token_units` has the exact balance.
     pub btc_sat: u64,
+    /// The exact token balance in base units, as a decimal string (it can exceed u64 and,
+    /// for display, JS numbers lose precision above 2^53).
+    pub token_units: String,
     /// For gas (wei, decimal string).
     pub eth_wei: String,
 }
@@ -41,7 +45,7 @@ pub struct CounterChain {
     /// e.g. "anvil", "base-sepolia"
     pub network: String,
     pub height: u64,
-    /// The token, lowercase ("usdc").
+    /// The token's symbol, lowercase ("usdc", "weth").
     pub coin: String,
     pub ticker: String,
     pub decimals: u8,

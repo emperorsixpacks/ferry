@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::{btc_for, Offer};
+use crate::config::{checked_btc_for, zat_for, Offer};
 
 /// How often the rate is refreshed.
 pub const REFRESH: Duration = Duration::from_secs(60);
@@ -36,14 +36,17 @@ pub enum Asset {
     Ltc,
     Usd,
     Usdc,
+    /// Ether, priced for WETH (which is 1:1 with it): wei, 18 decimals.
+    Eth,
 }
 
 impl Asset {
-    /// Decimal places of the asset's smallest unit (sat, litoshi, cent-of-a-cent...).
+    /// Decimal places of the asset's smallest unit (sat, litoshi, cent-of-a-cent, wei...).
     pub fn decimals(self) -> u32 {
         match self {
             Asset::Zec | Asset::Btc | Asset::Ltc => 8,
             Asset::Usd | Asset::Usdc => 6,
+            Asset::Eth => 18,
         }
     }
 
@@ -54,6 +57,7 @@ impl Asset {
             Asset::Ltc => "LTC",
             Asset::Usd => "USD",
             Asset::Usdc => "USDC",
+            Asset::Eth => "ETH",
         }
     }
 
@@ -64,6 +68,7 @@ impl Asset {
             Asset::Btc => Some("bitcoin"),
             Asset::Ltc => Some("litecoin"),
             Asset::Usdc => Some("usd-coin"),
+            Asset::Eth => Some("ethereum"),
             Asset::Usd => None,
         }
     }
@@ -74,6 +79,7 @@ impl Asset {
             Asset::Btc => Some("btc"),
             Asset::Ltc => Some("ltc"),
             Asset::Usd => Some("usd"),
+            Asset::Eth => Some("eth"),
             Asset::Zec | Asset::Usdc => None,
         }
     }
@@ -85,6 +91,7 @@ impl Asset {
             Asset::Ltc => "LTC",
             Asset::Usd => "USD",
             Asset::Usdc => "USDC",
+            Asset::Eth => "ETH",
         }
     }
 }
@@ -98,7 +105,12 @@ impl FromStr for Asset {
             "LTC" => Asset::Ltc,
             "USD" => Asset::Usd,
             "USDC" => Asset::Usdc,
-            other => return Err(format!("unknown asset {other} (ZEC, BTC, LTC, USD, USDC)")),
+            "ETH" | "WETH" => Asset::Eth,
+            other => {
+                return Err(format!(
+                    "unknown asset {other} (ZEC, BTC, LTC, USD, USDC, ETH/WETH)"
+                ))
+            }
         })
     }
 }
@@ -521,12 +533,14 @@ impl LiveRate {
         if q.paused {
             return false;
         }
-        if btc_for(zec_amount, q.rate) == btc_amount {
+        // A quote that does not fit in u64 matches nothing (rather than a saturated amount).
+        if checked_btc_for(zec_amount, q.rate) == Some(btc_amount) {
             return true;
         }
         let st = self.state.read().expect("not poisoned");
         st.previous.is_some_and(|(old, replaced)| {
-            now.duration_since(replaced) <= self.cfg.grace && btc_for(zec_amount, old) == btc_amount
+            now.duration_since(replaced) <= self.cfg.grace
+                && checked_btc_for(zec_amount, old) == Some(btc_amount)
         })
     }
 
@@ -633,12 +647,7 @@ pub fn live_offer(
             ferry_core::Role::Z => f.zec_shielded_zat,
             ferry_core::Role::B => {
                 let spendable = f.btc_sat.saturating_sub(base.terms.btc_fee);
-                if offer.rate_sat_per_zec == 0 {
-                    0
-                } else {
-                    (u128::from(spendable) * 100_000_000 / u128::from(offer.rate_sat_per_zec))
-                        as u64
-                }
+                zat_for(spendable, offer.rate_sat_per_zec)
             }
         };
         // capped at the offer's max, so it says nothing about a balance above it
@@ -677,7 +686,7 @@ impl<L: ferry_core::ZecLeg + 'static> crate::daemon::Daemon<L> {
     pub fn rate_matches(&self, zec_amount: u64, btc_amount: u64) -> bool {
         match &self.price {
             Some(live) => live.amount_matches(zec_amount, btc_amount),
-            None => self.offer.btc_for(zec_amount) == btc_amount,
+            None => checked_btc_for(zec_amount, self.offer.rate_sat_per_zec) == Some(btc_amount),
         }
     }
 }
@@ -757,6 +766,30 @@ mod tests {
         assert_eq!(usdc.rate_units(52.5, 0), Some(52_500_000));
         assert_eq!(Pair::ZEC_BTC.rate_units(f64::NAN, 0), None);
         assert_eq!(Pair::ZEC_BTC.rate_units(0.0, 0), None);
+        // WETH is priced as ETH, in wei: 0.012 ETH per ZEC.
+        let weth = "ZEC/WETH".parse::<Pair>().unwrap();
+        assert_eq!(weth, "zec/eth".parse::<Pair>().unwrap());
+        assert_eq!(weth.quote.decimals(), 18);
+        assert_eq!(weth.rate_units(0.012, 0), Some(12_000_000_000_000_000));
+        // A rate that does not fit in u64 wei (over ~18.4 ETH per ZEC) is no price at all.
+        assert_eq!(weth.rate_units(20.0, 0), None);
+    }
+
+    /// At WETH's scale a quote overflows u64 for a large swap: it then matches no amount,
+    /// not even u64::MAX, instead of wrapping or saturating into a match.
+    #[test]
+    fn amount_matching_at_18_decimals() {
+        let mut c = cfg(vec![], 0);
+        c.pair = "ZEC/ETH".parse().unwrap();
+        let live = LiveRate::new(c);
+        let t0 = Instant::now();
+        live.apply(&[(SourceKind::Kraken, Ok(0.012))], t0, 1);
+        let rate = 12_000_000_000_000_000;
+        assert_eq!(live.quote_at(t0).unwrap().rate, rate);
+        assert!(live.amount_matches_at(100_000_000, rate, t0));
+        assert!(!live.amount_matches_at(100_000_000, rate + 1, t0));
+        let too_big = 200_000_000_000; // 2000 ZEC = 24 WETH > u64::MAX wei
+        assert!(!live.amount_matches_at(too_big, u64::MAX, t0));
     }
 
     #[test]

@@ -168,8 +168,9 @@ pub struct Cli {
     #[arg(long, default_value_t = 0, allow_negative_numbers = true,
           value_parser = clap::value_parser!(i32).range(-5_000..=5_000))]
     pub maker_spread_bps: i32,
-    /// The pair the price feed quotes (BASE/QUOTE: ZEC/BTC, ZEC/LTC, ZEC/USD, ZEC/USDC). A BTC or
-    /// LTC quote follows --chain, so `--chain ltc` quotes ZEC/LTC.
+    /// The pair the price feed quotes (BASE/QUOTE: ZEC/BTC, ZEC/LTC, ZEC/USD, ZEC/USDC, ZEC/ETH
+    /// for WETH). A BTC or LTC quote follows --chain, so `--chain ltc` quotes ZEC/LTC. With
+    /// --counter evm the quote's decimals must be the token's (ferryd refuses to start otherwise).
     #[arg(long, default_value = "ZEC/BTC")]
     pub maker_price_pair: crate::pricefeed::Pair,
     /// Testing and mirrors: SOURCE=BASE_URL to reach a feed somewhere else (repeatable).
@@ -463,9 +464,30 @@ impl Offer {
     }
 }
 
-/// `zec_zat · rate / 10^8`, rounded to the nearest sat.
+/// `zec_zat · rate / 10^8`, rounded to the nearest base unit (sat, or an EVM token's smallest
+/// unit), or None when the result does not fit in u64. A WETH rate is about 1.2e16 wei per ZEC,
+/// so this caps one swap at about 18.4 WETH. Never overflows: the product of two u64 values plus
+/// the rounding term stays below 2^128.
+pub fn checked_btc_for(zec_zat: u64, rate_sat_per_zec: u64) -> Option<u64> {
+    let units = (u128::from(zec_zat) * u128::from(rate_sat_per_zec) + 50_000_000) / 100_000_000;
+    u64::try_from(units).ok()
+}
+
+/// [`checked_btc_for`], saturating at u64::MAX (an amount no one can fund) instead of wrapping.
+/// Bitcoin amounts never come near it; EVM quotes use [`checked_btc_for`], so an oversized swap
+/// is refused with a clear error instead.
 pub fn btc_for(zec_zat: u64, rate_sat_per_zec: u64) -> u64 {
-    ((u128::from(zec_zat) * u128::from(rate_sat_per_zec) + 50_000_000) / 100_000_000) as u64
+    checked_btc_for(zec_zat, rate_sat_per_zec).unwrap_or(u64::MAX)
+}
+
+/// The zatoshi that `units` base units buy at `rate_sat_per_zec`, rounded down, saturating at
+/// u64::MAX (0 at a zero rate).
+pub fn zat_for(units: u64, rate_sat_per_zec: u64) -> u64 {
+    if rate_sat_per_zec == 0 {
+        return 0;
+    }
+    u64::try_from(u128::from(units) * 100_000_000 / u128::from(rate_sat_per_zec))
+        .unwrap_or(u64::MAX)
 }
 
 /// `POST /peer/swaps`
@@ -543,5 +565,31 @@ mod tests {
         let d: DelayArg = "3:9".parse().unwrap();
         assert_eq!((d.min_secs, d.max_secs), (3, 9));
         assert!("9:3".parse::<DelayArg>().is_err());
+    }
+
+    /// 18-decimal tokens: `zec_zat × rate` is far beyond u64 (1 ZEC at 0.012 WETH is
+    /// 1e8 × 1.2e16), and the result must be exact, or refused, never wrapped.
+    #[test]
+    fn rate_at_18_decimals() {
+        const WETH_RATE: u64 = 12_000_000_000_000_000; // 0.012 WETH per ZEC, in wei
+        assert_eq!(checked_btc_for(100_000_000, WETH_RATE), Some(WETH_RATE));
+        assert_eq!(
+            checked_btc_for(12_345_678, WETH_RATE),
+            Some(1_481_481_360_000_000)
+        );
+        // The per-swap cap: u64::MAX wei is about 18.44 WETH, about 1537 ZEC at this rate.
+        let cap_zat = 153_722_867_280;
+        assert!(checked_btc_for(cap_zat, WETH_RATE).is_some());
+        assert_eq!(checked_btc_for(cap_zat + 1, WETH_RATE), None);
+        assert_eq!(btc_for(cap_zat + 1, WETH_RATE), u64::MAX);
+        // The extremes neither panic nor wrap.
+        assert_eq!(checked_btc_for(u64::MAX, u64::MAX), None);
+        assert_eq!(checked_btc_for(u64::MAX, 100_000_000), Some(u64::MAX));
+        assert_eq!(checked_btc_for(0, u64::MAX), Some(0));
+        // ...and back: what a balance can fill.
+        assert_eq!(zat_for(WETH_RATE, WETH_RATE), 100_000_000);
+        assert_eq!(zat_for(u64::MAX, WETH_RATE), cap_zat);
+        assert_eq!(zat_for(u64::MAX, 1), u64::MAX);
+        assert_eq!(zat_for(5, 0), 0);
     }
 }
