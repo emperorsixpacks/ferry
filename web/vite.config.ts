@@ -3,14 +3,14 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 import { makerDirectory, parseMakers } from "./server/makers.mjs";
-import { pairDaemons } from "./server/pairs.mjs";
+import { envName, pairDaemons } from "./server/pairs.mjs";
 
 // The UI talks to two ferryd daemons. In dev and preview they are proxied under /daemon/z and
 // /daemon/b: the proxy adds each daemon's API token (FERRY_Z_TOKEN, FERRY_B_TOKEN; infra/demo.sh
 // writes them to .demo/env), so the token never reaches the browser and EventSource, which can't
 // set headers, still authenticates. The browser's Origin header is passed through unchanged, so
 // ferryd's --ui-origin allowlist keeps applying.
-// The local party's daemons for other pairs (FERRY_LTC_URL, FERRY_USDC_URL, FERRY_BTC_URL, with
+// The local party's daemons for other pairs (FERRY_LTC_URL, FERRY_USDC_BASE_URL, ..., with
 // FERRY_<PAIR>_TOKEN) are proxied under /daemon/<pair>; see server/pairs.mjs.
 const Z_URL = process.env.FERRY_Z_URL ?? "http://127.0.0.1:7101";
 const B_URL = process.env.FERRY_B_URL ?? "http://127.0.0.1:7102";
@@ -18,7 +18,7 @@ const PAIRS: { id: string; url: string }[] = pairDaemons(process.env);
 const TOKENS: Record<string, string | undefined> = {
   z: process.env.FERRY_Z_TOKEN,
   b: process.env.FERRY_B_TOKEN,
-  ...Object.fromEntries(PAIRS.map((p) => [p.id, process.env[`FERRY_${p.id.toUpperCase()}_TOKEN`]])),
+  ...Object.fromEntries(PAIRS.map((p) => [p.id, process.env[`FERRY_${envName(p.id)}_TOKEN`]])),
 };
 const TARGETS: Record<string, string> = { z: Z_URL, b: B_URL, ...Object.fromEntries(PAIRS.map((p) => [p.id, p.url])) };
 
@@ -65,7 +65,7 @@ function makers(): Plugin {
       );
       return;
     }
-    const m = url?.match(/^\/daemon\/([a-z]+)\/api\/swaps$/);
+    const m = url?.match(/^\/daemon\/([a-z-]+)\/api\/swaps$/);
     if (!m || !TARGETS[m[1]] || req.method !== "POST") return next();
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));

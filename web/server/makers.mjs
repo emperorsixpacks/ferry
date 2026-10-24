@@ -5,8 +5,10 @@
 // ever names a maker by index or name: no URL from a client is ever fetched or handed to a daemon.
 //
 // FERRY_MAKERS is either JSON, [{"name": "Kestrel", "url": "http://maker:7112", "pair": "ZEC/BTC"}],
-// or a comma list of name|url|pair entries (pair optional, default ZEC/BTC):
+// or a comma list of name|url|pair|chain entries (pair optional, default ZEC/BTC):
 //   FERRY_MAKERS='Kestrel|http://10.0.0.5:7112|ZEC/BTC, Heron|https://heron.example/ferry'
+// An EVM maker's chain (base, ethereum, arbitrum, optimism) comes from its offer's network; `chain`
+// in the entry only names it for a local chain (anvil) that doesn't say.
 import http from "node:http";
 import https from "node:https";
 
@@ -14,6 +16,18 @@ export const MAX_MAKERS = 20;
 const NAME = /^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,39}$/;
 const PAIR = /^[A-Z]{2,5}\/[A-Z]{2,5}$/;
 const OFFER_BYTES = 16 * 1024;
+const CHAINS = ["base", "ethereum", "arbitrum", "optimism"];
+// an EVM offer's network (ferryd's network_name) and the chain it belongs to
+const NETWORK_CHAIN = {
+  base: "base",
+  "base-sepolia": "base",
+  ethereum: "ethereum",
+  sepolia: "ethereum",
+  arbitrum: "arbitrum",
+  "arbitrum-sepolia": "arbitrum",
+  optimism: "optimism",
+  "op-sepolia": "optimism",
+};
 
 // Parse and validate the allowlist. Throws with a readable message on a bad entry, so a typo
 // stops the server at startup instead of silently dropping a maker.
@@ -35,8 +49,8 @@ export function parseMakers(raw, fallbackUrl) {
       .map((s) => s.trim())
       .filter(Boolean)
       .map((s) => {
-        const [name, url, pair] = s.split("|").map((p) => p.trim());
-        return { name, url, pair };
+        const [name, url, pair, chain] = s.split("|").map((p) => p.trim());
+        return { name, url, pair, chain };
       });
   }
   if (entries.length > MAX_MAKERS) throw new Error(`FERRY_MAKERS lists ${entries.length} makers; the limit is ${MAX_MAKERS}`);
@@ -56,8 +70,10 @@ export function parseMakers(raw, fallbackUrl) {
     if (url.username || url.password || url.search || url.hash) throw new Error(`FERRY_MAKERS entry ${i} (${name}): no credentials, query or fragment in the URL`);
     const pair = String(e?.pair ?? "ZEC/BTC").trim().toUpperCase();
     if (!PAIR.test(pair)) throw new Error(`FERRY_MAKERS entry ${i} (${name}): pair "${pair}" must look like ZEC/BTC`);
+    const chain = e?.chain == null || e.chain === "" ? null : String(e.chain).trim().toLowerCase();
+    if (chain !== null && !CHAINS.includes(chain)) throw new Error(`FERRY_MAKERS entry ${i} (${name}): chain "${chain}" must be one of ${CHAINS.join(", ")}`);
     // the peer URL the daemon gets, without a trailing slash
-    return { name, url: url.href.replace(/\/+$/, ""), pair };
+    return { name, url: url.href.replace(/\/+$/, ""), pair, chain };
   });
 }
 
@@ -107,10 +123,13 @@ function summarize(m, index, offer, now) {
   // An EVM maker (ferryd --counter evm) names its token instead.
   const token = offer?.counter === "evm" && /^[A-Za-z0-9]{1,11}$/.test(offer?.token_symbol ?? "") ? offer.token_symbol.toUpperCase() : null;
   const pair = token ? `ZEC/${token}` : offer?.coin === "ltc" ? "ZEC/LTC" : offer?.coin === "btc" ? "ZEC/BTC" : m.pair;
+  // a public chain's network names its chain; a local one (anvil) leaves it to the operator
+  const chain = offer?.counter === "evm" ? (NETWORK_CHAIN[offer?.network] ?? m.chain) : null;
   return {
     index,
     name: m.name,
     pair,
+    chain,
     online: rate != null,
     // can take a swap right now
     available: rate != null && making && !paused,
@@ -132,6 +151,7 @@ function offline(m, index, error) {
     index,
     name: m.name,
     pair: m.pair,
+    chain: m.chain,
     online: false,
     available: false,
     paused: false,

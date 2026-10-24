@@ -19,9 +19,10 @@
 //   FERRY_Z_TOKEN / FERRY_Z_TOKEN_FILE, FERRY_B_TOKEN / FERRY_B_TOKEN_FILE
 //                                              the daemons' API tokens (<data-dir>/api-token); a file is
 //                                              re-read every 30 s, so a restarted daemon is picked up
-//   FERRY_BTC_URL, FERRY_LTC_URL, FERRY_USDC_URL [unset]
-//                           Z's daemons for other pairs (one ferryd per pair), with
-//                           FERRY_<PAIR>_TOKEN / FERRY_<PAIR>_TOKEN_FILE; proxied at /daemon/<pair>
+//   FERRY_BTC_URL, FERRY_LTC_URL, FERRY_USDC_BASE_URL, FERRY_WETH_ARBITRUM_URL, ... [unset]
+//                           Z's daemons for other pairs (one ferryd per pair; tokens USDC or WETH
+//                           on BASE, ETHEREUM, ARBITRUM or OPTIMISM), with FERRY_<PAIR>_TOKEN /
+//                           FERRY_<PAIR>_TOKEN_FILE; proxied at /daemon/<pair> (usdc-base, ...)
 //                           and listed by GET /api/pairs, so the swap page offers them (pairs.mjs)
 //   PUBLIC_ORIGIN [unset]   e.g. https://ferry.example: POSTs whose Origin is something else get 403
 //   TRUST_PROXY [0]         1 behind a reverse proxy: the client IP is the last X-Forwarded-For hop
@@ -42,7 +43,7 @@ import { createReadStream, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makerDirectory, parseMakers } from "./makers.mjs";
-import { pairDaemons } from "./pairs.mjs";
+import { envName, pairDaemons } from "./pairs.mjs";
 
 const env = process.env;
 const PORT = Number(env.PORT ?? 5300);
@@ -87,7 +88,7 @@ const PAIRS = pairDaemons(env);
 const DAEMONS = {
   z: { url: new URL(env.FERRY_Z_URL ?? "http://127.0.0.1:7101"), token: tokenSource("Z") },
   b: { url: new URL(env.FERRY_B_URL ?? "http://127.0.0.1:7102"), token: tokenSource("B") },
-  ...Object.fromEntries(PAIRS.map((p) => [p.id, { url: new URL(p.url), token: tokenSource(p.id.toUpperCase()) }])),
+  ...Object.fromEntries(PAIRS.map((p) => [p.id, { url: new URL(p.url), token: tokenSource(envName(p.id)) }])),
 };
 // the daemons a visitor starts swaps on: Z's, and Z's for each other pair
 const TAKERS = new Set(["z", ...PAIRS.map((p) => p.id)]);
@@ -500,7 +501,7 @@ function serveStatic(pathname, req, res) {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://ui");
-  const m = url.pathname.match(/^\/daemon\/([a-z]+)(\/.*)?$/);
+  const m = url.pathname.match(/^\/daemon\/([a-z-]+)(\/.*)?$/);
   if (m && !Object.hasOwn(DAEMONS, m[1])) return json(res, 404, { error: "No such daemon on this server" });
   if (m) {
     proxy(m[1], m[2] ?? "/", url.search, req, res).catch((e) => {

@@ -4,12 +4,14 @@ export interface MakerEntry {
   name: string;
   url: string;
   pair: string;
+  chain: string | null;
 }
 
 export interface MakerSummary {
   index: number;
   name: string;
   pair: string;
+  chain: string | null;
   online: boolean;
   available: boolean;
   paused: boolean;

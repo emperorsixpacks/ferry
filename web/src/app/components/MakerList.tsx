@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { Maker, Role } from "@/api";
-import { coin, zec } from "@/format";
+import { CHAIN_NAMES, coin, zec } from "@/format";
 import { btcText } from "@/swap/shared";
 import { Label } from "./Layout";
 import { StatusBadge } from "./ui/badge";
@@ -27,7 +27,7 @@ export function MakerList({
   now: number;
   error: string | null;
 }) {
-  const mine = (makers ?? []).filter((m) => swappable(m.pair));
+  const mine = (makers ?? []).filter(swappable);
   const online = mine.filter((m) => m.online).length;
   return (
     // beside the swap card (lg) the panel takes the card's height, not its own, and scrolls
@@ -35,12 +35,16 @@ export function MakerList({
       <div className="flex items-baseline justify-between gap-4 border-b border-slate-100 px-5 py-4">
         <h2 id="makers-title" className="font-mono text-[11px] tracking-[0.16em] text-slate-900 uppercase">
           Makers · ZEC ⇄ {coin().ticker}
+          {coin().chain ? ` on ${CHAIN_NAMES[coin().chain!]}` : null}
         </h2>
         <Label>{makers === undefined ? "Loading" : `${online} of ${mine.length} online`}</Label>
       </div>
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
         {makers === undefined ? null : mine.length === 0 ? (
-          <p className="px-2 py-10 text-center text-sm text-slate-500">No makers swap ZEC for {coin().ticker} on this server yet.</p>
+          <p className="px-2 py-10 text-center text-sm text-slate-500">
+            No makers swap ZEC for {coin().ticker}
+            {coin().chain ? ` on ${CHAIN_NAMES[coin().chain!]}` : ""} on this server yet.
+          </p>
         ) : (
           <div role="radiogroup" aria-label="Maker" className="space-y-2">
             {mine.map((m) => (

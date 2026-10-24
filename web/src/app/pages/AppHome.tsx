@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ArrowDown, ArrowRight, ShieldCheck } from "@phosphor-icons/react";
-import { startSwap, type Maker, type Status, type SwapView } from "@/api";
-import { amountIn, coin, coinInfo, zec } from "@/format";
+import { EVM_CHAINS, pairChain, pairCoin, pairId, startSwap, type CoinId, type Maker, type PairId, type Status, type SwapView } from "@/api";
+import { CHAIN_NAMES, amountIn, coin, coinInfo, zec } from "@/format";
 import { Link, navigate } from "@/router";
 import { btcText } from "@/swap/shared";
 import { phaseOf } from "@/swap/steps";
@@ -84,36 +84,79 @@ export function AppHome() {
   );
 }
 
-// What the ZEC is swapped for. A pair without a daemon on this server can't be picked.
+// What the ZEC is swapped for: the coin, and for a token (USDC, WETH) the chain it's on. A pair
+// without a daemon on this server can't be picked.
+const COINS: CoinId[] = ["btc", "ltc", "usdc", "weth"];
+
 function PairToggle() {
   const { pairs, pair, choosePair } = useLocal();
+  const has = (id: PairId) => !!pairs.find((p) => p.id === id)?.daemon;
+  const active = pairCoin(pair);
+  const evm = active === "usdc" || active === "weth";
+  // a token keeps the chain on screen when it can, else its first chain with a daemon
+  const pickCoin = (c: CoinId) => {
+    if (c === "btc" || c === "ltc") return choosePair(c);
+    const same = pairId(c, pairChain(pair));
+    choosePair(has(same) ? same : (EVM_CHAINS.map((ch) => pairId(c, ch)).find(has) ?? same));
+  };
   return (
-    <div role="radiogroup" aria-label="What you swap ZEC for" className="mt-8 inline-flex border border-slate-200 bg-white p-1">
-      {pairs.map((p) => {
-        const c = coinInfo(p.id);
-        const active = p.id === pair;
-        const can = !!p.daemon;
-        return (
-          <button
-            key={p.id}
-            type="button"
-            role="radio"
-            aria-checked={active}
-            disabled={!can}
-            title={can ? `${c.ticker} on ${p.id === "usdc" ? "an EVM chain" : c.name}` : `This server has no ${c.ticker} daemon`}
-            onClick={() => choosePair(p.id)}
-            className={cn(
-              "flex items-center gap-2.5 px-4 py-2 transition-colors focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-brand-500/30 sm:px-5",
-              active ? "bg-slate-900 text-white" : can ? "text-slate-700 hover:bg-slate-50" : "cursor-not-allowed text-slate-300",
-            )}
-          >
-            <CoinMark id={p.id} size={18} className={can || active ? undefined : "opacity-40"} />
-            <span className="font-mono text-xs tracking-[0.14em] uppercase">{c.ticker}</span>
-            {can && p.status == null && !active ? <span className="h-1.5 w-1.5 rounded-full bg-rose-400" aria-label="offline" /> : null}
-          </button>
-        );
-      })}
+    <div className="mt-8 flex w-full flex-col items-center gap-3">
+      <Segments label="What you swap ZEC for">
+        {COINS.map((c) => {
+          const info = coinInfo(c);
+          const can = c === "btc" || c === "ltc" ? has(c) : EVM_CHAINS.some((ch) => has(pairId(c, ch)));
+          return (
+            <Segment key={c} active={c === active} can={can} title={can ? info.asset : `This server has no ${info.ticker} daemon`} onClick={() => pickCoin(c)}>
+              <CoinMark id={c} size={18} className={can || c === active ? undefined : "opacity-40"} />
+              <span className="font-mono text-xs tracking-[0.14em] uppercase">{info.ticker}</span>
+            </Segment>
+          );
+        })}
+      </Segments>
+      {evm ? (
+        <div className="flex items-center gap-3">
+          <Label>On</Label>
+          <Segments label={`Chain for ${coinInfo(active).ticker}`} small>
+            {EVM_CHAINS.map((ch) => {
+              const id = pairId(active, ch);
+              return (
+                <Segment key={ch} small active={id === pair} can={has(id)} title={has(id) ? CHAIN_NAMES[ch] : `This server has no ${coinInfo(active).ticker} daemon on ${CHAIN_NAMES[ch]}`} onClick={() => choosePair(id)}>
+                  <span className="text-xs">{CHAIN_NAMES[ch]}</span>
+                </Segment>
+              );
+            })}
+          </Segments>
+        </div>
+      ) : null}
     </div>
+  );
+}
+
+function Segments({ label, small, children }: { label: string; small?: boolean; children: ReactNode }) {
+  return (
+    <div role="radiogroup" aria-label={label} className={cn("inline-flex max-w-full overflow-x-auto border border-slate-200 bg-white", small ? "p-0.5" : "p-1")}>
+      {children}
+    </div>
+  );
+}
+
+function Segment({ active, can, small, title, onClick, children }: { active: boolean; can: boolean; small?: boolean; title: string; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      disabled={!can}
+      title={title}
+      onClick={onClick}
+      className={cn(
+        "flex shrink-0 items-center gap-2 transition-colors focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-brand-500/30 sm:gap-2.5",
+        small ? "px-3 py-1.5" : "px-3 py-2 sm:px-5",
+        active ? "bg-slate-900 text-white" : can ? "text-slate-700 hover:bg-slate-50" : "cursor-not-allowed text-slate-300",
+      )}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -211,7 +254,7 @@ function SwapCard({ status, makers, maker, busySwap }: { status: Status | null; 
       <Panel
         label={role === "Z" ? "You receive" : "You pay"}
         side={`Balance ${coinBalance}`}
-        chip={<Chip id={pair} ticker={coin().ticker} />}
+        chip={<Chip id={pairCoin(pair)} ticker={coin().ticker} />}
         note={evm ? `On ${coin().name}, in the open, like any token transfer.` : `On ${coin().name}, in the open, like any ${coin().name} payment.`}
       >
         <span className={cn("block truncate font-mono text-4xl font-medium tracking-tight", valid && offer ? "text-slate-900" : "text-slate-300")}>{valid && offer ? btcSide : "0"}</span>
@@ -263,7 +306,7 @@ function Panel({ label, side, chip, note, editable, children }: { label: string;
   );
 }
 
-function Chip({ id, ticker }: { id: "zec" | "btc" | "ltc" | "usdc"; ticker: string }) {
+function Chip({ id, ticker }: { id: CoinId | "zec"; ticker: string }) {
   return (
     <span className="inline-flex h-10 shrink-0 items-center gap-2 border border-slate-200 bg-white pr-3.5 pl-2.5">
       <CoinMark id={id} size={22} />

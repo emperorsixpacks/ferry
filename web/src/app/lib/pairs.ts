@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { DAEMONS, LOCAL_ROLE, PAIR_IDS, getPairs, getStatus, pairDaemon, type PairId, type Status } from "@/api";
+import { DAEMONS, LOCAL_ROLE, PAIR_IDS, getPairs, getStatus, pairDaemon, pairId, type CoinId, type PairId, type Status } from "@/api";
+import { chainOfNetwork } from "@/format";
 
 // The pairs this UI can swap: the main daemon's (whatever coin it runs) and one per extra daemon
 // the UI server fronts (GET /api/pairs). Each is probed now and then for its offer, so the pair
@@ -23,7 +24,13 @@ export interface Pairs {
 }
 
 export const MAIN = DAEMONS[LOCAL_ROLE];
-export const coinOf = (s: Status | null): PairId | null => (s ? (s.chains.btc.coin ?? "btc") : null);
+// the pair a daemon's status describes; an EVM daemon on a local chain counts as Base
+export function pairOf(s: Status | null): PairId | null {
+  if (!s) return null;
+  const raw = (s.chains.btc.ticker ?? s.chains.btc.coin ?? "btc").toLowerCase();
+  const coin: CoinId = raw === "ltc" || raw === "usdc" || raw === "weth" ? raw : "btc";
+  return pairId(coin, chainOfNetwork(s.chains.btc.network));
+}
 
 export function usePairs(): Pairs {
   const [extra, setExtra] = useState<PairId[] | null>(null);
@@ -58,7 +65,7 @@ export function usePairs(): Pairs {
   const main = probes[MAIN] ?? null;
   const list = PAIR_IDS.map((id): Pair => {
     if (extra?.includes(id)) return { id, daemon: pairDaemon(id), status: probes[pairDaemon(id)] ?? null };
-    if (coinOf(main) === id) return { id, daemon: MAIN, status: main };
+    if (pairOf(main) === id) return { id, daemon: MAIN, status: main };
     return { id, daemon: null, status: null };
   });
   return { ready: extra !== null, extra: extra ?? [], list };

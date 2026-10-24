@@ -1,9 +1,9 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
-import { LOCAL_ROLE, pairDaemon, type PairId, type Role, type Status, type SwapView } from "@/api";
-import { coin, setCoinFrom } from "@/format";
+import { LOCAL_ROLE, pairChain, pairCoin, pairDaemon, type PairId, type Role, type Status, type SwapView } from "@/api";
+import { setChainHint, setCoinFrom } from "@/format";
 import { useDaemon, type Daemon } from "@/useDaemon";
 import { useBlockTimes, type BlockTimes } from "@/swap/timing";
-import { MAIN, storePair, storedPair, usePairs, type Pair } from "./pairs";
+import { MAIN, pairOf, storePair, storedPair, usePairs, type Pair } from "./pairs";
 import { noteRunning } from "./walletSync";
 
 // One connection to this party's ferryd (fetch + SSE), shared by every page of the app. With a
@@ -29,7 +29,10 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
   const [chosen, setChosen] = useState<PairId | null>(storedPair);
   // a picked pair with its own daemon, else the main one; nothing until the server said which
   // pairs it has, so a remembered pair doesn't connect to the main daemon first
-  const daemon = chosen && pairs.extra.includes(chosen) ? pairDaemon(chosen) : MAIN;
+  const own = chosen && pairs.extra.includes(chosen) ? chosen : null;
+  const daemon = own ? pairDaemon(own) : MAIN;
+  // a pair's own daemon on a local chain stands in for the pair's chain (the main one: Base)
+  setChainHint(own ? pairChain(own) : null);
   const d = useDaemon(pairs.ready ? daemon : null);
   const bt = useBlockTimes(d.status);
   const list = useMemo(() => {
@@ -44,10 +47,11 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
     if (!p?.daemon) return;
     storePair(id);
     // the page re-renders in the new coin right away, before the daemon's first status
-    setCoinFrom(p.status ?? ({ chains: { btc: { coin: id } } } as Partial<Status>));
+    setChainHint(pairs.extra.includes(id) ? pairChain(id) : null);
+    setCoinFrom(p.status ?? { chains: { btc: { coin: pairCoin(id) } } });
     setChosen(id);
   };
-  const pair: PairId = d.status ? coin().id : (chosen ?? "btc");
+  const pair: PairId = own ?? pairOf(d.status) ?? chosen ?? "btc";
 
   return <Ctx.Provider value={{ ...d, role: LOCAL_ROLE, bt, list, daemon, pairs: pairs.list, pair, choosePair }}>{children}</Ctx.Provider>;
 }
