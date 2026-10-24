@@ -97,20 +97,153 @@ leave coins locked that the node doesn't track.
 - **No link between the two chains.** The ZEC amount is hidden, nothing on one chain refers to the
   other, and the ZEC sweep waits a random delay so it doesn't line up in time with the bitcoin claim.
 
-## Known limits (disclosed)
+## Known limits
 
-- **Unaudited cross-chain proof.** The proof linking the two halves across curves is Serai's
-  experimental `dleq` code. A bug there could break the fairness guarantee.
-- **Fixed fees on prepared Bitcoin transactions.** The call-off, refund and penalty transactions are
-  signed in advance with a fixed fee. If fees spike, they could confirm slowly. Mainnet needs a
-  fee-bump plan [anchor output / CPFP].
+Most of these are the price of having no middleman. Each says what Ferry does about it and what
+is still open. What has actually run, and where, is in [WHAT-IS-REAL.md](WHAT-IS-REAL.md); the
+README's [Known gaps](../README.md#known-gaps) lists them in one line each.
+
+Z holds the ZEC. B holds the other coin (BTC, LTC, USDC or WETH). B always locks first. When you
+sell ZEC you are Z; when you buy ZEC you are B.
+
+### A partner must be online
+
+Every trustless swap needs someone who holds the other coin and is there to answer, lock and sign.
+
+- **What Ferry does.** Any Ferry daemon can be a partner [maker, `--maker-offer`]. The app asks
+  every listed partner for a signed price and takes the best one. If no partner is online, nothing
+  is locked and nothing is at risk.
+- **What is still open.** Today the only partners are ours: one per pair on the public demo. No
+  outside partner is listed for nodes (`infra/node/makers.txt` is empty), so a node swaps between
+  its own two wallets. Outside nodes can't reach the demo's partner yet
+  ([DEPLOY.md](DEPLOY.md#9-firewall)). Each partner takes one swap at a time, so one taker who
+  walks away keeps it busy until the first deadline.
+  <!-- update after many-swaps / safer-settings merge -->
+
+### Either side can walk away, and no chain can fine them
+
+- **The free option.** Z locks second, so after B has locked, Z can watch the price and decide
+  not to lock. After Z has locked, B can hold back the go-ahead [redeem adaptor signature, or
+  Ready on EVM] and let the swap run out. Research calls an atomic swap "an American Call Option
+  without the premium" ([Han, Lin and Yu, 2019](https://eprint.iacr.org/2019/896)).
+- **Why nobody can be fined.** Both cases end the same way on the other chain: B's refund after
+  the first deadline. The ZEC lock is a shielded note with no scripts, so no contract on Bitcoin or
+  Base can see whether Z ever locked. A refund looks the same whether Z never locked or B held back.
+  So no contract can tell who walked away, and a deposit would not help: whichever side could
+  claim it could also cause the refund. Ferry does not pretend to fine anyone. This is the cost of
+  keeping the ZEC side fully shielded.
+- **What Ferry does.** Deadlines limit the option. Ferry's own daemon locks as soon as it can, but
+  a Z that wanted to wait would still have to lock in time to claim before the first deadline: on
+  Base mainnet, about 4 hours after the start at most. Walking away costs the walker only
+  fees, and costs the other side time: B's coin waits until the first deadline (5 h 15 min after
+  the start on Base mainnet), and Z's ZEC waits until B refunds. A partner can charge for the
+  option in its price [`--maker-spread-bps`]; the node's own mainnet partners charge none today.
+  <!-- update after many-swaps / safer-settings merge -->
+- **What is still open.** Either side can stall at almost no cost to itself. Ferry has no
+  deposits, bonds or reputation system.
+
+### Swaps take minutes
+
+Each side waits until the other's lock is confirmed deeply enough.
+
+- **Measured.** The live Base Sepolia swap: the ZEC seller had its USDC about 2 minutes after the
+  start, and the buyer's ZEC arrived at about 7 minutes. Test networks ask for 3 Zcash
+  confirmations ([log](evidence/evm-base-sepolia-live-2026-10-20.txt)).
+- **Expected.** Base mainnet: about 15-20 minutes, mostly the 10 Zcash confirmations (75-second
+  blocks) ([MAINNET-DEMO.md](MAINNET-DEMO.md#expected-timeline-and-costs)). Bitcoin signet: about
+  half an hour ([RUN-A-NODE.md](RUN-A-NODE.md)). <!-- update after many-swaps / safer-settings merge -->
+- **What is still open.** Minutes, not seconds. Zcash's planned NU7 upgrade would cut blocks to
+  25 seconds ([ZIP 218](https://zips.z.cash/zip-0218), a draft), which would shorten the wait.
+
+### Fees on both chains
+
+A swap is at least two transactions on each chain: a lock and a claim on the other chain, a lock
+and a sweep on Zcash.
+
+- **Zcash:** 5,000 zatoshi per shielded action, at least two per transaction
+  ([ZIP 317](https://zips.z.cash/zip-0317)): 0.0001 ZEC for a sweep, more for a lock that spends
+  several notes (0.00025 ZEC for a five-action lock in our regtest run).
+- **Base mainnet:** about $0.25 per swap in all at 2026-10-20 prices, mostly the two Zcash fees
+  ([MAINNET-DEMO.md](MAINNET-DEMO.md#expected-timeline-and-costs)).
+- **Bitcoin and Litecoin:** each prepared transaction pays one fixed fee (2,000 sat by default,
+  1,500 on the signet demo). A called-off swap costs B two of them (call-off and refund). A fee may
+  be at most 5% of the amount, so at 2,000 sat the smallest Bitcoin swap is 40,000 sat.
+- **What is still open.** A called-off swap still pays fees, and very small swaps don't pay off.
+
+### B must refund in time, or use its own watchtower
+
+- **The rule.** If a swap is called off, B must send its refund inside a window: after the first
+  deadline, and before the second deadline minus a safety margin. On Base mainnet that window is
+  1 hour, opening 5 h 15 min after the start. Test networks use shorter windows. If B misses it,
+  Z takes B's coin (next section). <!-- update after many-swaps / safer-settings merge -->
+- **Z has no such deadline.** An offline Z loses only the trade: its ZEC comes back whenever B
+  refunds, and reclaiming it has no deadline.
+- **What Ferry does.** Your node refunds by itself while it runs. A
+  [watchtower](WATCHTOWER.md) can do it while you are offline. B's must be its own
+  (`--watchtower-own`): B's refund reveals B's half of the key, so a tower that leaked it early
+  could let Z take both sides.
+- **What is still open.** Neither the node installer nor the public demo starts a watchtower. You
+  run one yourself; it must stay up and, on Base, have money for gas.
+
+### If B vanishes after Z locks, the ZEC stays locked
+
+This is a known critique of this design, so here it is exactly:
+
+- B locks its coin, Z locks its ZEC, and then B goes silent: no go-ahead and no refund.
+- After the second deadline, Z takes B's coin [tx_punish on Bitcoin and Litecoin, `punish` on
+  FerryLock]. On Bitcoin that is B's locked amount minus two fixed fees; on Base it is the whole
+  locked amount, paid to Z's payout address. So Z is paid in B's coin, as if the swap had
+  completed, only hours later.
+- Z's ZEC stays in the joint address. Spending it needs both halves of the key. Z holds one and B
+  the other, and neither was revealed, because Z never claimed and B never refunded. Nobody can
+  spend it unless one side later hands its half to the other, and Ferry has no step for that
+  today. B has lost its coin and gets no ZEC.
+- If Z had not locked its ZEC (its wallet refused the lock, say), Z takes B's coin the same way and
+  no ZEC is stuck.
+- **What Ferry does.** The refund window and the watchtower above exist so that B never gets here.
+  Not built: after a final punish, Z could hand its half to B so that B can sweep the ZEC.
+
+### The cross-chain proof is unaudited
+
+- One proof shows that each party's half of the key is the same number on Zcash's curve and on
+  Bitcoin's [cross-group DLEQ, Pallas and secp256k1]. Ferry uses Serai's `dleq` crate, version
+  0.4.1, with its `experimental` feature (`crates/ferry-dleq/Cargo.toml`).
+- Serai's README says the library, "except for the `experimental` feature, was audited by Cypher
+  Stack in March 2023", that "Any subsequent changes have not undergone auditing", and, of the
+  cross-group proofs: "neither the original postulation (which had flaws) nor any construction
+  here has been proven nor audited. Accordingly, they are solely experimental, and none are
+  recommended." ([README](https://github.com/serai-dex/serai/blob/develop/crypto/dleq/README.md))
+- A bug there could break the fairness guarantee: one side might be able to take both coins.
+- **What Ferry does.** It binds each proof to its swap, checks the keys against Zcash's own
+  signature scheme [RedPallas], derives its extra generators by hash-to-curve, and tests tampered,
+  spliced and wrong-context proofs (`crates/ferry-dleq`). Nobody outside the project has reviewed
+  Ferry.
+- **This is why mainnet is capped**: 0.02 ZEC per swap in the node's mainnet mode
+  (`./infra/node/ferry --mainnet`) and in the mainnet demo script.
+
+### Fixed fees on prepared Bitcoin transactions, so Bitcoin and Litecoin stay on test networks
+
+- The call-off, refund and penalty transactions are signed in advance, each with one fixed fee
+  (`crates/ferry-btc/src/tx.rs`). Nothing can raise that fee later: there is no anchor output and
+  no child-pays-for-parent [CPFP]. If fees spike, they could confirm slowly, and a claim or refund
+  still unconfirmed at its deadline could reveal a party's half of the key while the other side can
+  still take its own coins back.
+- **What Ferry does.** Bitcoin and Litecoin run on test networks only: the node's mainnet mode
+  offers only Base (USDC and WETH).
+- **What is still open.** Mainnet needs a fee-bump design: an anchor output on the call-off
+  transaction, which Bitcoin Core 28 made standard
+  ([release notes](https://bitcoincore.org/en/releases/28.0/)), and CPFP for the rest. Not built.
+
+### Other limits
+
 - **Zcash reorganisations.** Zcash blocks are only probably final, so B waits for a set number of
   confirmations; a deeper reorganisation than that is a risk.
 - **Not quantum-recoverable.** The shared shielded address uses a key built in a way that Zcash's
   quantum-recovery plan doesn't cover [ZIP 2005]. The address is single-use and short-lived, and
   today's FROST multisig setups use the same method.
-- **Testnet only.** Ferry has run real swaps on test networks and in a full local test with real
-  shielded notes. It has not been independently reviewed, and it has not run on mainnet.
+- **Test networks so far.** One live swap on public test networks (ZEC ⇄ USDC on Base Sepolia,
+  2026-10-20) and a full local test with real shielded notes. Nothing has run on mainnet, and
+  nobody outside the project has reviewed Ferry ([WHAT-IS-REAL.md](WHAT-IS-REAL.md)).
 
 ## USDC on Base
 
