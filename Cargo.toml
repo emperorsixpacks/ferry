@@ -8,6 +8,7 @@ members = [
     "crates/ferry-zec",
     "crates/ferry-watchtower",
     "crates/ferry-evm",
+    "crates/ferry-route",
 ]
 exclude = ["spikes", "third_party", "vendor"]
 
