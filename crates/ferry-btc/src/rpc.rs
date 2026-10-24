@@ -1224,22 +1224,35 @@ mod tests {
         let r = parse_package(&ok).unwrap();
         assert!(r.success && r.errors.is_empty() && r.replaced.is_empty());
 
-        // The shape of a failure follows rpc/mempool.cpp (`package_msg` plus a per-transaction
-        // `error`); the text of the error here is made up, not a recorded reply.
+        // Recorded from Bitcoin Core 28.1 (regtest, -minrelaytxfee=0.0003): a 2000-sat parent
+        // below the static relay fee, with its child.
         let bad = json(
             r#"{"package_msg": "transaction failed",
                 "tx-results": {
-                  "43431444f176f3811a5fb2ea8bf57f781bfa95f53101658d8f7797bb78b3b357": {
-                    "txid": "4ee66cb92c6b923c31052c8e5391cd9e013bb4ee40b169695def7f84f2081640",
-                    "error": "mempool min fee not met, 1 < 2"}},
-                "replaced-transactions": ["633fd32121ea37e1eda217eae4d0e109d212d9af87445aef7b1f50970f03b780"]}"#,
+                  "4cb9b8530c4b09f985591e81e66433c4eeef3595831847ef3389920cf8035436": {
+                    "txid": "70be85f5ca405eb325640a9e5484c3d06df7de560a223d475ca3920be033c943",
+                    "error": "min relay fee not met, 2000 < 3330"},
+                  "da3b4d5796861c6f7f286c09871458c8d337648918ebf4ab54df1f9316e091a8": {
+                    "txid": "0e583bd8f705d569e9286d73120bd46a21d6fb3dd2a90646d67a1f56215ad7b6",
+                    "error": "bad-txns-inputs-missingorspent"}},
+                "replaced-transactions": []}"#,
         );
         let r = parse_package(&bad).unwrap();
         assert!(!r.success);
         assert_eq!(r.message, "transaction failed");
-        assert_eq!(r.errors.len(), 1);
-        assert_eq!(r.errors[0].1, "mempool min fee not met, 1 < 2");
-        assert_eq!(r.replaced.len(), 1);
+        assert_eq!(r.errors.len(), 2);
+        assert!(r
+            .errors
+            .iter()
+            .any(|(t, e)| t.to_string().starts_with("70be85f5")
+                && e == "min relay fee not met, 2000 < 3330"));
+        assert!(r.replaced.is_empty());
+        // A package that replaced something names it.
+        let replaced = json(
+            r#"{"package_msg": "success", "tx-results": {},
+                "replaced-transactions": ["633fd32121ea37e1eda217eae4d0e109d212d9af87445aef7b1f50970f03b780"]}"#,
+        );
+        assert_eq!(parse_package(&replaced).unwrap().replaced.len(), 1);
         assert!(parse_package(&json("{}")).is_err());
     }
 

@@ -267,7 +267,7 @@ share `b`, which becomes public only on a refund. Nothing about the ZEC side.
 | Take or redirect your USDC | **No.** FerryLock pays only the swap's own refunder or claimer, whoever calls. |
 | Broadcast early | **No.** `tx_cancel` and `tx_punish` are timelocked by consensus, and `tx_refund` needs a confirmed `tx_cancel`. FerryLock refuses `punish` before t2 and `refund` outside [t1, t2). |
 | Fail to act | **Yes.** If it is down, eclipsed or censored, or (EVM) its own account has no gas, you are back to the old rule: be online yourself. |
-| Bump fees | **No** on Bitcoin and Litecoin: the transactions carry fixed presigned fees, as everywhere in Ferry. On EVM it pays the going gas price from its own account. |
+| Bump fees | **No** on Bitcoin and Litecoin: the transactions carry fixed presigned fees, and a tower has no keys and cannot spend your refund's output, which is how a fee is raised (`ferryd --bump on`, off by default, does it for its own party while it is online; the tower never does). On EVM it pays the going gas price from its own account. |
 | **Leak B's refund (or, on EVM, `b`) to Z early** | **Yes, and this is what B trusts it with.** On EVM it could even publish `b` itself with a refund that reverts. |
 
 **Why B's package is sensitive.** The completed `tx_refund` carries Z's signature, decrypted with

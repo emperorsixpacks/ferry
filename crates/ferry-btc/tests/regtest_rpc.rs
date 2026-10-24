@@ -910,3 +910,109 @@ async fn t1_race_a_bumped_redeem_cannot_be_displaced_by_the_fixed_fee_cancel() {
     assert_eq!(rpc.confirmations(&redeem_txid).await.unwrap(), Some(1));
     println!("T1 race: the fixed-fee cancel never displaced the bumped redeem");
 }
+
+/// A parent whose own fee is below the node's static `minrelaytxfee` cannot be rescued by a
+/// package, whatever the child pays: the node refuses the parent for its own fee. Only a parent
+/// that fell below the mempool's rising floor can be (see the test above). Needs a node started
+/// with `-minrelaytxfee=0.0003` (30 sat/vB), e.g. `FERRY_BTC_RPC=http://127.0.0.1:28444`.
+/// Bitcoin only.
+#[tokio::test]
+#[ignore = "needs a regtest bitcoind started with -minrelaytxfee=0.0003"]
+async fn package_cannot_rescue_a_parent_below_the_static_relay_fee() {
+    use ferry_btc::child::{build_child, ChildLimits};
+
+    let coin = coin();
+    assert!(coin.supports_packages(), "Bitcoin only");
+    let suffix = BtcKey::random().xonly().to_string();
+    let rpc = BitcoinRpc::new(url(coin), "ferry", "ferry")
+        .with_wallet(format!("ferry-btc-it-relay-{}", &suffix[..8]))
+        .with_coin(coin);
+    rpc.ensure_wallet().await.expect("node up?");
+    let net = Network::Regtest;
+    let miner = rpc.new_address(net).await.unwrap();
+    rpc.generate_to_address(101, &miner).await.unwrap();
+    let floors = rpc.fee_floors().await.unwrap();
+    assert_eq!(
+        floors.min_relay, 30_000,
+        "start the node with -minrelaytxfee=0.0003"
+    );
+
+    // A one-input, one-output Taproot payment to ourselves at about 18 sat/vB: what a presigned
+    // 2000-sat spend pays. The wallet will not make one that low, so it is built by hand.
+    let coins: Vec<Value> = rpc
+        .wallet_call("listunspent", json!([1, 9_999_999, [], false]))
+        .await
+        .unwrap();
+    let coin_in = coins
+        .iter()
+        .find(|c| c["spendable"] == json!(true))
+        .unwrap();
+    let own = rpc.new_address(net).await.unwrap();
+    let value = Amount::from_btc(coin_in["amount"].as_f64().unwrap()).unwrap();
+    let raw: String = rpc
+        .wallet_call(
+            "createrawtransaction",
+            json!([
+                [{"txid": coin_in["txid"], "vout": coin_in["vout"], "sequence": 0xffff_fffdu32}],
+                [{ own.to_string(): (value - Amount::from_sat(2_000)).to_string_in(ferry_btc::bitcoin::Denomination::Bitcoin) }]
+            ]),
+        )
+        .await
+        .unwrap();
+    let signed: Value = rpc
+        .wallet_call("signrawtransactionwithwallet", json!([raw]))
+        .await
+        .unwrap();
+    assert_eq!(signed["complete"], json!(true));
+    let parent: ferry_btc::bitcoin::Transaction =
+        ferry_btc::bitcoin::consensus::encode::deserialize_hex(signed["hex"].as_str().unwrap())
+            .unwrap();
+
+    let alone = rpc
+        .test_accept(std::slice::from_ref(&parent), None)
+        .await
+        .unwrap();
+    println!("parent alone: {alone:?}");
+    assert_eq!(
+        alone[0].reject_reason.as_deref(),
+        Some("min relay fee not met")
+    );
+
+    // A child that would lift the pair far above any floor.
+    let dest = rpc.new_address(net).await.unwrap().script_pubkey();
+    let limits = ChildLimits {
+        max_fee: Amount::from_sat(1_000_000),
+        max_fee_rate: 10_000_000,
+    };
+    let child = build_child(
+        &rpc,
+        &parent,
+        0,
+        &dest,
+        Amount::from_sat(20_000),
+        coin,
+        &limits,
+    )
+    .await
+    .unwrap();
+    let pkg = rpc
+        .submit_package(
+            &[parent.clone(), child.tx.clone()],
+            Some(limits.max_fee_rate),
+        )
+        .await
+        .unwrap();
+    println!("package: {pkg:?}");
+    assert!(!pkg.success);
+    assert!(
+        pkg.errors
+            .iter()
+            .any(|(txid, e)| *txid == parent.compute_txid() && e.contains("min relay fee not met")),
+        "{pkg:?}"
+    );
+    assert_eq!(
+        rpc.mempool_entry(&parent.compute_txid()).await.unwrap(),
+        None
+    );
+    println!("a package does not lift a parent over the static relay fee: {pkg:?}");
+}

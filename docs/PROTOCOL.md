@@ -104,7 +104,12 @@ transcript check at negotiation, and a Z taker proposes with one only to a maker
 - B broadcasts `tx_refund` only after `tx_cancel` has k confirmations. A refund in the mempool
   behind an unconfirmed cancel would show `b` while a redeem could still replace the cancel
   (same rule as xmr-btc-swap).
-- Presigned transactions carry fixed fees; mainnet needs an anchor output / CPFP plan.
+- Presigned transactions carry fixed fees that nothing can raise. A ferryd started with `--bump on`
+  (off by default) lets the party that needs a spend confirmed spend its own output of it in a
+  child that pays more (CPFP): Z's redeem pays Z's wallet address, B's refund B's, Z's punish Z's.
+  That is a local act: no presigned transaction, signature, message or `PROTOCOL_VERSION` changes,
+  and an old peer cannot tell. The call-off is never bumped. Bitcoin and Litecoin stay off
+  mainnet until the bump is reviewed ([THREAT-MODEL.md](THREAT-MODEL.md)).
 - B waits for N Zcash confirmations on the lock note before step 5. Zcash has probabilistic
   finality until Crosslink, so N is a parameter.
 

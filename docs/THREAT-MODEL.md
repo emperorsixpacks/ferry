@@ -227,15 +227,47 @@ This is a known critique of this design, so here it is exactly:
 ### Fixed fees on prepared Bitcoin transactions, so Bitcoin and Litecoin stay on test networks
 
 - The call-off, refund and penalty transactions are signed in advance, each with one fixed fee
-  (`crates/ferry-btc/src/tx.rs`). Nothing can raise that fee later: there is no anchor output and
-  no child-pays-for-parent [CPFP]. If fees spike, they could confirm slowly, and a claim or refund
-  still unconfirmed at its deadline could reveal a party's half of the key while the other side can
-  still take its own coins back.
+  (`crates/ferry-btc/src/tx.rs`). Nothing can raise that fee in the transaction itself: there is no
+  anchor output, and no presigned transaction, signature or message changed. If fees spike, they
+  could confirm slowly, and a claim or refund still unconfirmed at its deadline could reveal a
+  party's half of the key while the other side can still take its own coins back.
 - **What Ferry does.** Bitcoin and Litecoin run on test networks only: the node's mainnet mode
-  offers only Base (USDC and WETH).
-- **What is still open.** Mainnet needs a fee-bump design: an anchor output on the call-off
-  transaction, which Bitcoin Core 28 made standard
-  ([release notes](https://bitcoincore.org/en/releases/28.0/)), and CPFP for the rest. Not built.
+  offers only Base (USDC and WETH). **They stay off mainnet until the review below is done.** A fee
+  bump is built but **off by default** (`--bump on`, env `FERRY_BUMP`). The party that needs a spend
+  confirmed already owns an output of it (the claim pays Z's wallet address, the refund B's, the
+  penalty Z's), so its ferryd spends that output in an ordinary child that pays a higher fee out of
+  its own payout (child-pays-for-parent, CPFP), and replaces that child with a better one as the
+  deadline nears. It needs no anchor and no coins besides the payout, and nobody else can attach
+  anything to those transactions, because nobody else can spend the output. The child's fee is
+  capped: 10% of the payout while more than two blocks are left, the payout less dust after that,
+  plus a ceiling on its fee rate that the node enforces too (`maxfeerate`). The call-off is not
+  bumped, on purpose: it only delays the swap, and a call-off that could be bumped would let B
+  outbid Z's claim in the race at the first deadline. `--bump off`, or a file named `bump-off` in
+  the data directory, stops all bumping at once.
+- **What was checked.** On regtest Bitcoin Core 28.1
+  ([evidence](evidence/btc-fee-bump-regtest-2026-10-22.txt)): a claim, a refund and a penalty that a
+  rising mempool floor kept out were put back with a child as a package and confirmed; a child was
+  replaced twice as the deadline neared, with a restart in between; the call-off could not displace
+  a bumped claim at the first deadline, also after the pair was evicted and put back; a reorg
+  returned the pair to the mempool together. On Litecoin Core 0.21.5.6 only the building blocks
+  ran: it has no package submission and does not replace transactions unless started with
+  `-mempoolreplacement=1`, so there a swap is bumped once at most.
+- **What is still open.**
+  - Nobody outside the project has reviewed the bump: its funds-moving code, and the argument that
+    the fixed-fee call-off cannot beat a bumped claim.
+  - A presigned fee below the node's static minimum relay fee cannot be lifted by a child (checked:
+    "min relay fee not met"); only one that fell below the mempool's rising floor can. The fee
+    chosen when the swap starts still has to be at a sensible rate.
+  - Small swaps. At 30,000 sat (about the 0.02 ZEC cap) a child may pay about 2,800 sat while more
+    than two blocks are left, which lifts a 2,000-sat claim to about 22 sat/vB, and nearly the
+    whole payout after that, about 130 sat/vB. A bumped claim at 50 sat/vB costs about a third of
+    that swap.
+  - A claim that pays a third-party address (`payout_to`) is not bumped: it has no output of Z's
+    own. Forwarding the payout from a child is not built.
+  - The watchtower does not bump (it holds no keys and cannot spend B's output), so a B that is
+    offline relies on its refund's presigned fee.
+  - Whether Bitcoin nodes and miners relay and mine packages the way Core 28 does is not measured
+    on mainnet. The first bump on a real network should be a small canary swap.
 
 ### Other limits
 
