@@ -3,6 +3,7 @@ import { Warning } from "@phosphor-icons/react";
 import { Link, usePath } from "@/router";
 import { coin, zec } from "@/format";
 import { btcText } from "@/swap/shared";
+import { counterBalance } from "@/api";
 import { useLocal, type Status } from "../lib/daemon";
 import { Wordmark } from "./LogoMark";
 
@@ -105,7 +106,7 @@ function WalletChip({ name, status }: { name: string; status: Status | null }) {
         <span className="truncate">{name}</span>
       </span>
       {amount(status ? zec(status.balances.zec_shielded_zat) : "–", "ZEC")}
-      {amount(status ? btcText(status.balances.btc_sat) : "–", coin().ticker)}
+      {amount(status ? btcText(counterBalance(status)) : "–", coin().ticker)}
     </span>
   );
 }

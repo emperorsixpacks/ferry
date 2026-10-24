@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ArrowDown, ArrowRight, ShieldCheck } from "@phosphor-icons/react";
-import { EVM_CHAINS, pairChain, pairCoin, pairId, startSwap, type CoinId, type Maker, type PairId, type Status, type SwapView } from "@/api";
+import { EVM_CHAINS, counterBalance, pairChain, pairCoin, pairId, startSwap, type CoinId, type Maker, type PairId, type Status, type SwapView } from "@/api";
 import { CHAIN_NAMES, amountIn, coin, coinInfo, zec } from "@/format";
 import { Link, navigate } from "@/router";
 import { btcText } from "@/swap/shared";
@@ -195,7 +195,7 @@ function SwapCard({ status, makers, maker, busySwap }: { status: Status | null; 
     else if (zat > offer.max) problem = `The largest swap is ${zec(offer.max)} ZEC.`;
     else if (offer.liquidity != null && zat > offer.liquidity) problem = `${maker?.name ?? "The maker"} can fill up to ${zec(offer.liquidity)} ZEC right now.`;
     else if (role === "Z" && status && zat > status.balances.zec_shielded_zat) problem = `You have ${zec(status.balances.zec_shielded_zat)} shielded ZEC.`;
-    else if (role === "B" && status && gross > status.balances.btc_sat) problem = `You have ${btcText(status.balances.btc_sat)} ${coin().ticker}.`;
+    else if (role === "B" && status && gross > counterBalance(status)) problem = `You have ${btcText(counterBalance(status))} ${coin().ticker}.`;
   }
   const blocked = busySwap ? "Finish the swap in progress first." : null;
 
@@ -214,7 +214,7 @@ function SwapCard({ status, makers, maker, busySwap }: { status: Status | null; 
   };
 
   const zecBalance = status ? `${zec(status.balances.zec_shielded_zat)} ZEC` : "–";
-  const coinBalance = status ? `${amountIn(status.balances.btc_sat, coin())} ${coin().ticker}` : "–";
+  const coinBalance = status ? `${amountIn(counterBalance(status), coin())} ${coin().ticker}` : "–";
 
   return (
     <form

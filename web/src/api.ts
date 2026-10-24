@@ -6,7 +6,9 @@ export type Outcome = "swapped" | "refunded" | "punished" | null;
 export interface Status {
   role: Role;
   name: string;
-  balances: { zec_shielded_zat: number; btc_sat: number };
+  // btc_sat saturates at u64::MAX for an 18-decimal token; token_units (EVM) is the exact
+  // balance as a decimal string. Read it with counterBalance().
+  balances: { zec_shielded_zat: number; btc_sat: number; token_units?: string };
   chains: {
     // the coin swapped against ZEC ("btc" | "ltc"); older daemons leave it out (btc)
     // coin "usdc": an EVM daemon (--counter evm); `time` is the latest block's unix time
@@ -78,6 +80,9 @@ export interface SwapView {
 }
 
 export const DAEMONS: Record<Role, string> = { Z: "/daemon/z", B: "/daemon/b" };
+// The counter-coin balance in base units: the exact token_units when the daemon sends it (a JS
+// number above 2^53 rounds, which is fine for showing it).
+export const counterBalance = (s: Status) => (s.balances.token_units != null ? Number(s.balances.token_units) : s.balances.btc_sat);
 // What ZEC swaps against: a UTXO coin, or an ERC-20 on an EVM chain. One ferryd runs one pair;
 // the UI server may front a daemon per pair (server/pairs.mjs), at /daemon/<pair>.
 export type CoinId = "btc" | "ltc" | "usdc" | "weth";

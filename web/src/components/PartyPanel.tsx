@@ -1,4 +1,4 @@
-import type { Role, Status, SwapView, TimelineEntry } from "../api";
+import { counterBalance, type Role, type Status, type SwapView, type TimelineEntry } from "../api";
 import { btc, coin, offset, short, zec } from "../format";
 
 const ROLE = () => ({
@@ -53,7 +53,7 @@ export function PartyPanel({
         </div>
         <div>
           <dt>{coin().ticker}</dt>
-          <dd className="mono" key={`b${status?.balances.btc_sat}`}>{status ? btc(status.balances.btc_sat) : "–"}</dd>
+          <dd className="mono" key={`b${status?.balances.btc_sat}`}>{status ? btc(counterBalance(status)) : "–"}</dd>
         </div>
       </dl>
 
