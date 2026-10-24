@@ -21,6 +21,8 @@
 //   ready     the server said which daemons it has and the page probed them; until then nothing
 //             is ruled out (available: null)
 //   sell/buy  the pairs it sells ZEC for (a Z daemon of yours) and buys ZEC with (a B daemon)
+//   nets      {pair: "main" | "test" | "local"}: the kind of network each pair's daemons run on
+//             (swapNet of their status), for the time a swap takes; a pair missing has no time
 //   routes    the router's legs {from, to} (pairs a private swap starts from / ends in), or null
 //   near      undefined while loading, null without NEAR Intents, else {
 //               tokens: {assetId: {symbol, blockchain, ferry}},
@@ -57,9 +59,46 @@ export const familyOf = (t, ctx = null) => symbolFamily(t === ZEC ? "zec" : isNe
 // ------------------------------------------------------------------------------------------------
 // time
 
-// a Ferry swap, roughly, on main networks (minutes): Bitcoin's confirmations take longest
-const FERRY_MIN = { btc: 30, ltc: 15, evm: 10 };
-export const ferryMinutes = (pair) => FERRY_MIN[assetOf(pair) === "btc" ? "btc" : assetOf(pair) === "ltc" ? "ltc" : "evm"];
+// The kind of network a daemon reports (chains.btc.network or chains.zec.network, as ferryd names
+// them): "main" carries real value, "local" runs on this machine (regtest, anvil), anything else
+// is a public test network (signet, testnet, base-sepolia...). null: not known.
+const MAINNETS = new Set(["bitcoin", "main", "mainnet", "litecoin", "ethereum", "base", "arbitrum", "optimism"]);
+export const netKind = (network) => (!network ? null : MAINNETS.has(network) ? "main" : network === "regtest" || network === "anvil" ? "local" : "test");
+// A swap's network: the slower of its two chains' (a local chain against the real Zcash testnet
+// waits for real Zcash blocks)
+const SLOWER = ["local", "test", "main"];
+export function swapNet(counterNetwork, zecNetwork) {
+  const i = Math.max(SLOWER.indexOf(netKind(counterNetwork)), SLOWER.indexOf(netKind(zecNetwork)));
+  return i < 0 ? null : SLOWER[i];
+}
+
+// One Ferry swap, start to done on both sides, in minutes [usually from, usually to], by coin and
+// network. Confirmations are most of it: the counter-chain lock's, then 10 Zcash blocks on a main
+// network (75 s each, so about 12.5 min, often 8-20) or 3 on a test one, then on Bitcoin and
+// Litecoin the redeem's own. Measured and projected (docs/EVM.md, docs/MAINNET-DEMO.md):
+//   Base mainnet   about 1 min of lock confirmations + the 10 Zcash blocks: 15-20 min (projected;
+//                  a fork rehearsal with 3 s mock Zcash blocks took under 2 min)
+//   Ethereum       64 blocks (about 13 min) for the lock, then the same: 25-35 min (projected)
+//   Bitcoin        2 confirmations (about 20 min), the 10 Zcash blocks, the redeem's block: 45-60
+//   Litecoin       8 confirmations (about 20 min) and the rest: 30-45 (no mainnet yet)
+//   Base Sepolia   measured 2026-10-20: the seller done in 1 min 53 s, the buyer in 6 min 44 s, with
+//                  3 Zcash blocks in 71 s (3.75 min on average): 2-10 min
+//   signet         1 confirmation (about 10 min), 3 Zcash blocks, the redeem's block: 20-40 min
+//   Litecoin test  2 confirmations (about 5 min) and the rest: 10-20 min
+//   local          regtest or anvil, blocks every few seconds: 1-5 min
+// Zcash's NU7 upgrade (25 s blocks; mainnet planned for 2026-11-05) would cut the Zcash part about
+// threefold. Not counted here until it is live.
+const FERRY_MIN = {
+  btc: { main: [45, 60], test: [20, 40], local: [1, 5] },
+  ltc: { main: [30, 45], test: [10, 20], local: [1, 5] },
+  evm: { main: [15, 20], test: [2, 10], local: [1, 5] },
+  "evm-ethereum": { main: [25, 35], test: [2, 10], local: [1, 5] },
+};
+const ferryKind = (pair) => (assetOf(pair) === "btc" ? "btc" : assetOf(pair) === "ltc" ? "ltc" : String(pair).endsWith("-ethereum") ? "evm-ethereum" : "evm");
+// [from, to] minutes for one Ferry swap of `pair` on a `net` network ("main" when not given)
+export const ferryMinutes = (pair, net = "main") => FERRY_MIN[ferryKind(pair)][FERRY_MIN.btc[net] ? net : "main"];
+// the time of one Ferry swap of `pair` here, if this server knows its network
+const ferryHere = (pair, ctx) => (ctx?.nets?.[pair] ? ferryMinutes(pair, ctx.nets[pair]) : null);
 // NEAR Intents' part, roughly
 export const NEAR_MIN = 5;
 // a private swap, by its privacy pause: two swaps, the ZEC settling between them, and the pause
@@ -170,13 +209,11 @@ export function resolvePath(sell, buy, ctx, opts = {}) {
   // ---------------------------------------------------------------- one Ferry swap
   if (sell === ZEC && isPair(buy)) {
     const ok = !!ctx?.sell?.includes(buy);
-    const m = ferryMinutes(buy);
-    return done({ kind: "sell", dir: "sell", pair: buy, available: ok, runs: ok, reason: ok ? null : `Selling ZEC for ${c} isn't available on this server.`, steps: [FERRY], minutes: [m, m] });
+    return done({ kind: "sell", dir: "sell", pair: buy, available: ok, runs: ok, reason: ok ? null : `Selling ZEC for ${c} isn't available on this server.`, steps: [FERRY], minutes: ferryHere(buy, ctx) ?? [0, 0] });
   }
   if (isPair(sell) && buy === ZEC) {
     const ok = !!ctx?.buy?.includes(sell);
-    const m = ferryMinutes(sell);
-    return done({ kind: "buy", dir: "buy", pair: sell, available: ok, runs: ok, reason: ok ? null : `Buying ZEC with ${a} isn't available on this server.`, steps: [FERRY], minutes: [m, m] });
+    return done({ kind: "buy", dir: "buy", pair: sell, available: ok, runs: ok, reason: ok ? null : `Buying ZEC with ${a} isn't available on this server.`, steps: [FERRY], minutes: ferryHere(sell, ctx) ?? [0, 0] });
   }
 
   // ---------------------------------------------------------------- ZEC and NEAR Intents
@@ -190,10 +227,12 @@ export function resolvePath(sell, buy, ctx, opts = {}) {
     if (p) return done({ kind, steps, asset: assetIdOf(t), dir: selling ? "sell" : "buy", ...nearWait(p) });
     const via = (near.vias?.[selling ? "sell" : "buy"] ?? (selling ? ctx.sell : ctx.buy) ?? []).filter(isPair);
     steps[1] = coinStep(via[0]);
-    const m = (via[0] ? ferryMinutes(via[0]) : 30) + NEAR_MIN;
-    if (!via.length) return done({ kind, steps, asset: assetIdOf(t), dir: selling ? "sell" : "buy", minutes: [m, m], reason: `${selling ? "Selling" : "Buying"} ZEC through NEAR Intents isn't available on this server.` });
+    // NEAR Intents runs on main networks: a Ferry part whose network isn't known yet counts as one
+    const [flo, fhi] = via[0] ? (ferryHere(via[0], ctx) ?? ferryMinutes(via[0])) : ferryMinutes("btc");
+    const m = [flo + NEAR_MIN, fhi + NEAR_MIN];
+    if (!via.length) return done({ kind, steps, asset: assetIdOf(t), dir: selling ? "sell" : "buy", minutes: m, reason: `${selling ? "Selling" : "Buying"} ZEC through NEAR Intents isn't available on this server.` });
     const runs = !!near.runs?.[selling ? "sell" : "buy"];
-    return done({ kind, dir: selling ? "sell" : "buy", asset: assetIdOf(t), via, steps, minutes: [m, m], available: true, runs, reason: quoteOnly(runs) });
+    return done({ kind, dir: selling ? "sell" : "buy", asset: assetIdOf(t), via, steps, minutes: m, available: true, runs, reason: quoteOnly(runs) });
   }
 
   // ---------------------------------------------------------------- coin to coin: through shielded ZEC

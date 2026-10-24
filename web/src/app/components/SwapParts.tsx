@@ -108,16 +108,9 @@ export function FlipButton({ onFlip, title }: { onFlip: () => void; title: strin
   );
 }
 
-// "about 2 min", "about a minute": a swap's typical time from its seconds
-export function minutesText(seconds: number): string {
-  if (seconds < 90) return "about a minute";
-  const m = Math.round(seconds / 60);
-  return m < 90 ? `about ${m} min` : `about ${Math.round(m / 30) / 2} hours`;
-}
-
 // The path under the amounts: who runs each part and the coin handed between them, then "private"
 // for a route through shielded ZEC, and the time. "Ferry → shielded ZEC → Ferry · private · about
-// 35–75 min", "Ferry → BTC → NEAR Intents · about 35 min". `via` fills the coins a quote picked.
+// 35–75 min", "Ferry → BTC → NEAR Intents · about 50–65 min". `via` fills the coins a quote picked.
 export function PathLine({ path, via = [], time, className }: { path: Path; via?: (string | null | undefined)[]; time?: string; className?: string }) {
   const near = path.kind.includes("near");
   // the coins handed over (not the ZEC between two Ferry swaps), in order: the quote's, else the guess

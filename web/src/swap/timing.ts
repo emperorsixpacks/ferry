@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { aboutText, ferryMinutes, swapNet } from "../../server/paths.mjs";
 import type { Status, SwapView } from "../api";
 import { coin } from "../format";
 
@@ -65,13 +66,18 @@ function terms(status: Status | null, swap?: SwapView): Terms {
   };
 }
 
-// How long a swap usually takes, from the offer's terms and the block times: the BTC lock's
-// confirmations, then the ZEC lock's, plus a margin for the blocks that carry the lock and the
-// redeem, the counterparty's random sweep delay (up to ~20 s) and the wallets' own handling.
-export function typicalSeconds(status: Status | null, bt: BlockTimes): number {
-  const t = terms(status, undefined);
-  const margin = bt.btc + bt.zec + 20 + 60;
-  return t.lockConfs * bt.btc + t.zecConfs * bt.zec + margin;
+// How long one swap of `pair` usually takes on this daemon's networks, [from, to] minutes: the
+// table in server/paths.mjs (measured on Base Sepolia, projected for the main networks), the same
+// the swap card shows.
+export function typicalMinutes(status: Status | null, pair: string | null | undefined): [number, number] | null {
+  if (!status || !pair) return null;
+  return ferryMinutes(pair, swapNet(status.chains.btc.network, status.chains.zec.network) ?? "main");
+}
+
+// "about 15–20 min", or null when it isn't known yet
+export function typicalText(status: Status | null, pair: string | null | undefined): string | null {
+  const m = typicalMinutes(status, pair);
+  return m ? aboutText(m) : null;
 }
 
 export function confirmationsLabel(status: Status | null): string {
@@ -103,11 +109,3 @@ export function unwoundBy(status: Status | null, swap: SwapView, bt: BlockTimes)
 export const clock = (d: Date) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 export const clockSeconds = (iso: string) =>
   new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
-
-export function roughDuration(seconds: number): string {
-  if (seconds < 90) return "about a minute";
-  const m = Math.round(seconds / 60);
-  if (m < 60) return `about ${m} minutes`;
-  const h = Math.round(m / 6) / 10;
-  return `about ${h} hours`;
-}

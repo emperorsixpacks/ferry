@@ -249,7 +249,7 @@ This is a known critique of this design, so here it is exactly:
 
 Ferry can also swap shielded ZEC for USDC on Base ([details](EVM.md)); it has run locally and on
 Base Sepolia with real Zcash testnet notes ([log](evidence/evm-base-sepolia-live-2026-10-20.txt)). The same protections apply. It differs from the Bitcoin version in
-four ways:
+these ways:
 
 - **Every step on Base is visible as a swap**, not only the abort paths. The lock and the claim
   or refund are public calls to the Ferry contract, with the USDC amount and the deadlines. The
@@ -258,7 +258,13 @@ four ways:
 - **The halves of the key are revealed publicly** rather than only to the other side. This is
   safe: one half opens nothing, and nobody else can find the shared ZEC note.
 - **You also trust USDC's issuer**, which can freeze transfers, and Base's sequencer to include
-  transactions on time. Ferry leaves a margin for that before each deadline.
+  transactions on time. Ferry leaves a margin for that before each deadline: 2 hours on Base
+  mainnet, as long as Base's longest stop so far.
+- **The deadlines on Base mainnet**, from the start: Z's last claim at 2 h 15 min, B's refund from
+  4 h 15 min, and B has 24 hours for it (until 28 h 15 min); after that, at 30 h 15 min, Z may
+  take B's USDC. So if you are buying ZEC and the swap is called off, your node (or your own
+  watchtower) must run at some point in that day
+  ([details](EVM.md#timing-rules-the-daemon-enforces-these-not-the-chain)).
 - **A watchtower works differently.** There is nothing to sign in advance: the tower calls the
   swap contract's refund or penalty itself and pays the fee from its own account. The contract
   pays only the swap's own two parties, whoever calls. The ZEC side's package holds no secret. The

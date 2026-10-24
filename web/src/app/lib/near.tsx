@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { NearError, getCombos, getNearHop, getNearInfo, getNearJobs, getNearQuote, type ComboJob, type Direction, type NearHop, type NearInfo, type NearJob, type NearQuote, type NearToken, type PairId } from "@/api";
+import { aboutText } from "../../../server/paths.mjs";
 import type { Tone } from "./progress";
 
 // NEAR Intents on the swap card: its assets (GET /api/near/tokens), composed quotes (Ferry's leg ×
@@ -173,6 +174,16 @@ export function aboutTime(s: number): string {
   if (s < 5400) return `about ${Math.round(s / 300) * 5 || Math.round(s / 60)} min`;
   return `about ${Math.round(s / 3600)} hours`;
 }
+
+// "about 15–20 min", "about 3–11 min": a range of seconds, to 5 minutes once past 10
+export function aboutSpan([lo, hi]: [number, number]): string {
+  const step = hi >= 600 ? 5 : 1;
+  const a = Math.max(1, Math.round(lo / 60 / step) * step);
+  return aboutText([a, Math.max(a, Math.round(hi / 60 / step) * step)]);
+}
+
+// A composed quote's time: its range when the server gives one, else its middle
+export const quoteTime = (q: { time_s: number; time_range_s?: [number, number] }): string => (q.time_range_s ? aboutSpan(q.time_range_s) : aboutTime(q.time_s));
 
 // ------------------------------------------------------------------------------------------------
 // the NEAR asset on the card: ?near=<assetId> in the URL, else what this browser remembers

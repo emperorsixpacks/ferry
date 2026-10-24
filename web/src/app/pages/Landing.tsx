@@ -165,7 +165,7 @@ function How() {
           How it works
         </h2>
         <p data-reveal style={delay(80)} className={`${lede} max-w-[32rem]`}>
-          Three steps and a few minutes. Ferry runs the swap for you; you can close the page while it finishes.
+          Three steps, then a wait while both chains confirm: about 15 to 20 minutes with USDC on Base. Ferry runs the swap for you; you can close the page while it finishes.
         </p>
         <div className="mt-12">
           <Steps />

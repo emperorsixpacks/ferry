@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Direction, PairId } from "@/api";
-import { ZEC, defaultPick, isNear, isPair, isToken, nearToken, pickOn, resolvePath, type Path, type PathCtx, type Side, type Token } from "../../../server/paths.mjs";
+import { ZEC, defaultPick, isNear, isPair, isToken, nearToken, pickOn, resolvePath, swapNet, type NetKind, type Path, type PathCtx, type Side, type Token } from "../../../server/paths.mjs";
 import { useLocal } from "./daemon";
 import { useNear } from "./near";
 import { useRoutes } from "./routes";
@@ -43,10 +43,18 @@ export function usePathCtx(): PathCtx {
   const near = useNear();
   return useMemo(() => {
     const info = near.info;
+    // each pair's network, from its daemons' statuses: the time a swap takes there
+    const nets: Partial<Record<string, NetKind>> = {};
+    for (const p of d.pairs) {
+      const s = p.sell.status ?? p.buy.status;
+      const net = s ? swapNet(s.chains.btc.network, s.chains.zec.network) : null;
+      if (net) nets[p.id] = net;
+    }
     return {
       ready: d.known,
       sell: d.pairs.filter((p) => p.sell.daemon).map((p) => p.id),
       buy: d.pairs.filter((p) => p.buy.daemon).map((p) => p.id),
+      nets,
       routes: routes.legs,
       near:
         info === undefined

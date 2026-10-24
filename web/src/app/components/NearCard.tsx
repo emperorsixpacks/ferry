@@ -5,7 +5,7 @@ import { zec } from "@/format";
 import { navigate } from "@/router";
 import { useLocal } from "../lib/daemon";
 import { useMakers } from "../lib/makers";
-import { aboutTime, chainName, nearAmount, nearText, numText, shade, useNear, useNearQuote, whole } from "../lib/near";
+import { chainName, nearAmount, nearText, numText, quoteTime, shade, useNear, useNearQuote, whole } from "../lib/near";
 import { pairName } from "../lib/pairs";
 import { nearToken, type CardProps, type Side } from "../lib/paths";
 import { nearKey, receiveFor, shortAddress, storeReceive, storedReceive, useReceive } from "../lib/receive";
@@ -187,7 +187,7 @@ export function NearCard({ asset, pick, path, ctx, onPick, onFlip, blocked }: Ca
                     <Fact label="You send" value={`About ${nearText(quote.near.amount_in, token)}`} />
                   )
                 ) : null}
-                <Fact label="Typical time" value={quote ? capital(aboutTime(quote.time_s)) : "–"} />
+                <Fact label="Typical time" value={quote ? capital(quoteTime(quote)) : "–"} />
                 <Fact label="If it fails" value={selling ? `If the Ferry swap stops, your ZEC comes back. If NEAR Intents can't fill it, it refunds the ${via?.ticker ?? "coin"} to your Ferry node.` : `If NEAR Intents can't fill it, it refunds your ${sym}. If the Ferry swap stops, the ${via?.ticker ?? "coin"} stays in your Ferry node.`} />
                 <Fact label="Privacy" value={`Your ZEC stays shielded, and Ferry never sends ZEC to NEAR Intents. The ${via?.ticker ?? "coin"} and the ${sym} move on public chains.`} />
               </dl>
@@ -216,7 +216,7 @@ export function NearCard({ asset, pick, path, ctx, onPick, onFlip, blocked }: Ca
           ) : q.loading ? (
             <p>Finding the best route…</p>
           ) : null}
-          <PathLine path={path} via={quote ? [quote.via] : []} time={quote ? aboutTime(quote.time_s) : undefined} />
+          <PathLine path={path} via={quote ? [quote.via] : []} time={quote ? quoteTime(quote) : undefined} />
         </div>
 
         {runs ? null : (
@@ -347,7 +347,7 @@ function NearConfirm({ open, onClose, token, dir, zat, first, sweepTo }: { open:
             </>
           )}
           <Line label="Through" value={`${via.noun}, then ${selling ? "NEAR Intents" : "Ferry"}`} />
-          <Line label="Takes" value={aboutTime(q.time_s)} />
+          <Line label="Takes" value={quoteTime(q)} />
         </dl>
 
         <ul className="mt-5 space-y-4 text-[15px]">

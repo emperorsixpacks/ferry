@@ -245,6 +245,10 @@ test("a quote: the best coin Ferry swaps here, then NEAR Intents' dry quote for 
   assert.equal(r.body.ferry.units, "401000000");
   assert.equal(r.body.near.amount_out, String(4_010_000_000n));
   assert.equal(r.body.near.approximate, true);
+  // the time: Ferry's usual range on Base mainnet (15-20 min), plus NEAR Intents' own estimate
+  assert.deepEqual(r.body.ferry.time_range_s, [900, 1200]);
+  assert.deepEqual(r.body.time_range_s, [900 + r.body.near.time_s, 1200 + r.body.near.time_s]);
+  assert.equal(r.body.time_s, 1050 + r.body.near.time_s);
   const asked = one.calls.find((c) => c.path === "/v0/quote").body;
   assert.equal(asked.dry, true);
   assert.equal(asked.swapType, "FLEX_INPUT");
@@ -258,6 +262,7 @@ test("a quote: the best coin Ferry swaps here, then NEAR Intents' dry quote for 
   assert.equal(b.status, 200, JSON.stringify(b.body));
   assert.equal(b.body.via, "btc");
   assert.equal(b.body.ferry.units, String(buyNeed(410_000n, "btc")));
+  assert.deepEqual(b.body.ferry.time_range_s, [2700, 3600], "Bitcoin mainnet: 45-60 min");
   const exact = one.calls.filter((c) => c.path === "/v0/quote").at(-1).body;
   assert.equal(exact.swapType, "EXACT_OUTPUT");
   assert.equal(exact.amount, String(roundSig(buyNeed(410_000n, "btc"), true)));
