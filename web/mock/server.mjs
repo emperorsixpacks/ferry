@@ -2,7 +2,8 @@
 //
 // Implements docs/API.md for two parties in one process: Z on :7101 and B on :7102.
 // Both daemons share one simulated world (a regtest-like Bitcoin chain, a Zcash chain with the
-// Ironwood pool, and the swaps), and each party only reports its own view of it.
+// Ironwood pool, and the swaps), and each party only reports its own view of it. Either party can
+// start a swap: POST /api/swaps on Z sells shielded ZEC to a B maker, on B buys it from a Z maker.
 //
 // The parties are small state machines that act on chain conditions, like the real daemon:
 // confirmations, the T1/T2 relative timelocks and the peer's messages. POST /fault makes one
@@ -11,8 +12,9 @@
 // Env: MOCK_SPEED (default 1, higher is faster), MOCK_Z_PORT, MOCK_B_PORT, MOCK_WALLET_LAG_MS,
 // MOCK_BTC_NETWORK / MOCK_ZEC_NETWORK (labels only; the mock still mines fast).
 //
-// B also serves the peer offers of a few mock makers (mock/makers.mjs) for the maker list, and
-// their firm quotes (POST /peer/quote, signed like ferryd's; MOCK_QUOTE_SECS, default 45).
+// B serves the peer offers of a few mock B makers and Z those of a few Z makers (mock/makers.mjs)
+// for the maker list, and their firm quotes (POST /peer/quote, signed like ferryd's;
+// MOCK_QUOTE_SECS, default 45).
 
 import http from "node:http";
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
@@ -40,6 +42,8 @@ const ZEC_CONFS = 3; // B waits for this many confirmations of the lock note
 const CANCEL_CONFS = 1;
 const RATE = 410000; // sat per ZEC
 const FEE_SAT = 2000; // per presigned BTC transaction, like ferryd's --fee-sat
+const ZEC_FEE_RESERVE = 50_000; // what a real Z wallet keeps for the lock's fee (ferry-zec)
+const LOCK_FEE_RESERVE = 10_000; // what ferryd's B keeps for its lock's own fee
 
 // ---------------------------------------------------------------------------------------------
 // world
@@ -97,9 +101,11 @@ function mine(chain) {
 // ---------------------------------------------------------------------------------------------
 // swaps
 
-const rateOf = (makerUrl) => mockMakerByUrl(makerUrl)?.rate ?? RATE;
+const makerOf = (makerUrl) => mockMakerByUrl(makerUrl, Z_PORT);
+const rateOf = (makerUrl) => makerOf(makerUrl)?.rate ?? RATE;
 
-// `rate`: a firm quote's, else the maker's offer
+// `taker` proposes ("Z" sells ZEC, "B" buys it); the other party is the maker. `rate`: a firm
+// quote's, else the maker's offer
 function newSwap(taker, makerUrl, zec_zat, rate = rateOf(makerUrl)) {
   const btc_sat = Math.round((zec_zat / 1e8) * rate);
   const pts = { Z: { p: hex(32), s: point() }, B: { p: hex(32), s: point() } };
@@ -127,10 +133,9 @@ function newSwap(taker, makerUrl, zec_zat, rate = rateOf(makerUrl)) {
     };
   }
   swaps.push(s);
-  const z = s.views.Z;
-  const b = s.views.B;
-  log(s, z, "peer", "propose_sent", "Sent Propose to B: amounts, T1/T2, Pallas and secp256k1 points, DLEQ proof");
-  log(s, b, "peer", "propose_received", "Received Z's Propose: " + zecAmount(zec_zat) + " for " + btcAmount(btc_sat));
+  const [t, m] = taker === "B" ? [s.views.B, s.views.Z] : [s.views.Z, s.views.B];
+  log(s, t, "peer", "propose_sent", `Sent Propose to ${m.role}: amounts, T1/T2, Pallas and secp256k1 points, DLEQ proof`);
+  log(s, m, "peer", "propose_received", `Received ${t.role}'s Propose: ` + zecAmount(zec_zat) + " for " + btcAmount(btc_sat));
   return s;
 }
 
@@ -175,22 +180,31 @@ function stepB(s) {
   if (!ready(v)) return;
 
   switch (v.state) {
-    case "Negotiated":
-      if (!f.accepted) {
-        f.accepted = true;
+    case "Negotiated": {
+      // as maker B checks Z's proof and answers with Accept; as taker it checks Z's Accept
+      const maker = s.taker !== "B";
+      if (maker && !f.verified) {
+        f.verified = true;
         log(s, v, "local", "dleq_verified", "Verified Z's DLEQ proof: Z_p and Z_s share one discrete log");
         return;
       }
-      if (!f.accSent) {
+      if (maker && !f.accSent) {
         f.accSent = true;
         log(s, v, "peer", "accept_sent", "Sent Accept with B's points and DLEQ proof. Derived the joint Ironwood address");
         return;
       }
-      if (z.flags.dleq) {
+      if (!maker && !f.verified) {
+        if (!z.flags.accSent) return;
+        f.verified = true;
+        log(s, v, "local", "dleq_verified", "Verified Z's DLEQ proof: Z_p and Z_s share one discrete log. Derived the joint Ironwood address");
+        return;
+      }
+      if (z.flags.verified) {
         v.state = "LockBuilt";
         log(s, v, "peer", "lock_template_sent", "Built tx_lock from B's wallet (not broadcast) and sent the template");
       }
       return;
+    }
     case "LockBuilt":
       if (z.flags.cancelSigsSent) {
         v.state = "CancelSigned";
@@ -305,13 +319,25 @@ function stepZ(s) {
   if (!ready(v)) return;
 
   switch (v.state) {
-    case "Negotiated":
-      if (!f.dleq && b.flags.accSent) {
-        f.dleq = true;
+    case "Negotiated": {
+      // as maker Z checks B's proof and answers with Accept; as taker it checks B's Accept
+      const maker = s.taker === "B";
+      if (maker && !f.verified) {
+        f.verified = true;
+        log(s, v, "local", "dleq_verified", "Verified B's DLEQ proof: B_p and B_s share one discrete log");
+        return;
+      }
+      if (maker && !f.accSent) {
+        f.accSent = true;
+        log(s, v, "peer", "accept_sent", "Sent Accept with Z's points and DLEQ proof. Derived the joint Ironwood address");
+        return;
+      }
+      if (!maker && !f.verified && b.flags.accSent) {
+        f.verified = true;
         log(s, v, "local", "dleq_verified", "Verified B's DLEQ proof: B_p and B_s share one discrete log. Derived the joint Ironwood address");
         return;
       }
-      if (f.dleq && b.state !== "Negotiated" && !f.cancelSigsSent) {
+      if (f.verified && b.state !== "Negotiated" && !f.cancelSigsSent) {
         f.cancelSigsSent = true;
         log(s, v, "peer", "cancel_sigs_sent", "Checked B's tx_lock template. Signed tx_cancel and sent an adaptor signature on tx_refund under B_s");
         return;
@@ -321,6 +347,7 @@ function stepZ(s) {
         log(s, v, "peer", "cancel_sig_received", "Received B's tx_cancel signature. Both abort paths are now presigned");
       }
       return;
+    }
     case "CancelSigned":
       if (s.tx.btc_lock && confs("btc", s.tx.btc_lock) >= BTC_CONFS) {
         v.state = "BtcLockSeen";
@@ -446,6 +473,7 @@ function swapView(s, role) {
   return {
     id: s.id,
     role,
+    taker: s.taker === role,
     counterparty: `http://127.0.0.1:${parties[peer].port}`,
     state: v.state,
     outcome: v.outcome,
@@ -456,7 +484,7 @@ function swapView(s, role) {
       my_share_point_secp: pts[role].s,
       peer_share_point_pallas: pts[peer].p,
       peer_share_point_secp: pts[peer].s,
-      dleq_verified: role === "Z" ? !!v.flags.dleq : !!v.flags.accepted,
+      dleq_verified: !!v.flags.verified,
       joint_ak: s.keys.joint_ak,
       sigma: s.keys.sigma,
     },
@@ -489,10 +517,14 @@ function peerOffer(m) {
   const t = Math.floor(now() / 1000);
   const up = Math.floor((now() - STARTED) / 1000);
   const updated = m.source === "fixed" ? undefined : m.paused ? Math.floor(STARTED / 1000) - m.ageS : t - ((m.ageS + up) % 60);
-  // Bram is the mock's real B party: its liquidity follows its BTC balance
-  const liquidity = m.slug === null ? Math.max(0, Math.floor(((parties.B.balances.btc_sat - FEE_SAT) * 1e8) / m.rate)) : m.liquidity;
+  // Bram and Zoe are the mock's real parties: their liquidity follows their balances
+  const own =
+    m.role === "Z"
+      ? Math.max(0, parties.Z.balances.zec_shielded_zat - ZEC_FEE_RESERVE)
+      : Math.max(0, Math.floor(((parties.B.balances.btc_sat - FEE_SAT) * 1e8) / m.rate));
+  const liquidity = m.slug === null ? own : m.liquidity;
   return {
-    role: "B",
+    role: m.role,
     network: chains.btc.network,
     making: !m.paused,
     paused: !!m.paused,
@@ -512,17 +544,19 @@ function peerOffer(m) {
 
 const QUOTE_SECS = Number(process.env.MOCK_QUOTE_SECS ?? 45);
 const keys = new Map();
-const quotes = new Map(); // quote_id -> { q, slug, expires, used }
+const quotes = new Map(); // quote_id -> { q, maker, expires, used }
+// a mock maker's own key: Bram and Zoe both have the slug null
+const keyOf = (m) => `${m.role}:${m.slug}`;
 
 function quoteKey(m) {
-  if (!keys.has(m.slug)) {
+  if (!keys.has(keyOf(m))) {
     const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "secp256k1" });
     const der = publicKey.export({ format: "der", type: "spki" });
     const pt = der.subarray(der.length - 65); // 04 || x || y
     const compressed = Buffer.concat([Buffer.from([pt[64] & 1 ? 3 : 2]), pt.subarray(1, 33)]);
-    keys.set(m.slug, { privateKey, public: compressed.toString("hex") });
+    keys.set(keyOf(m), { privateKey, public: compressed.toString("hex") });
   }
-  return keys.get(m.slug);
+  return keys.get(keyOf(m));
 }
 
 const busy = () => swaps.some((s) => !(s.views.Z.outcome && s.views.B.outcome));
@@ -532,7 +566,9 @@ function peerQuote(m, body) {
   const b = bucketFor(Number(body?.bucket_zat));
   if (!b || b.bucket !== body.bucket_zat) return [400, { error: "firm quotes are asked for by bucket, not by amount" }];
   if (body.pair !== "ZEC/BTC") return [400, { error: "this maker swaps ZEC/BTC" }];
-  if (body.taker_role !== "Z") return [400, { error: "this maker quotes takers with role Z" }];
+  // a B maker quotes Z takers (selling ZEC), a Z maker B takers (buying it)
+  const taker = m.role === "Z" ? "B" : "Z";
+  if (body.taker_role !== taker) return [400, { error: `this maker quotes takers with role ${taker}` }];
   if (m.paused) return [403, { error: "not making offers" }];
   if (busy()) return [409, { error: "busy with another swap; ask again when it is done" }];
   const offer = peerOffer(m);
@@ -546,8 +582,8 @@ function peerQuote(m, body) {
     quote_id: hex(16),
     pair: "ZEC/BTC",
     market: `btc:${chains.btc.network}`,
-    maker_role: "B",
-    taker_role: "Z",
+    maker_role: m.role,
+    taker_role: taker,
     rate_sat_per_zec: m.rate,
     min_zat: min,
     max_zat: max,
@@ -555,14 +591,14 @@ function peerQuote(m, body) {
     expires_at: t + QUOTE_SECS,
   };
   const sig = sign("sha256", Buffer.from(signingText(q)), { key: quoteKey(m).privateKey, dsaEncoding: "ieee-p1363" });
-  quotes.set(q.quote_id, { q, slug: m.slug, expires: now() + QUOTE_SECS * 1000, used: false });
+  quotes.set(q.quote_id, { q, maker: keyOf(m), expires: now() + QUOTE_SECS * 1000, used: false });
   return [200, { ...q, maker_key: quoteKey(m).public, sig: sig.toString("hex") }];
 }
 
 // A swap start that names a quote: its rate, or why the maker refuses it (as ferryd words it).
 function honour(quote, maker, zat) {
   const e = quotes.get(quote?.quote_id);
-  if (!e || e.slug !== maker.slug) return { error: "The maker refused: unknown firm quote (it expired a while ago, or the maker restarted); get a new one" };
+  if (!e || e.maker !== keyOf(maker)) return { error: "The maker refused: unknown firm quote (it expired a while ago, or the maker restarted); get a new one" };
   if (e.used) return { error: "The maker refused: the firm quote was already used for another swap" };
   if (now() >= e.expires) return { error: "The maker refused: the firm quote expired; get a new one" };
   if (zat < e.q.min_zat || zat > e.q.max_zat) return { error: "the amount is outside the firm quote's range" };
@@ -645,11 +681,11 @@ function handler(role) {
 
     if (req.method === "GET" && path === "/api/status") return send(res, 200, statusView(role));
 
-    // the mock makers' public offers (ferryd's GET /peer/offer), on B only
-    const maker = role === "B" && req.method === "GET" ? mockMakerAt(path) : undefined;
+    // the mock makers' public offers (ferryd's GET /peer/offer): B makers on B, Z makers on Z
+    const maker = req.method === "GET" ? mockMakerAt(path, role) : undefined;
     if (maker === null) return send(res, 404, { error: "not found" });
     if (maker) return maker.offline ? send(res, 503, { error: "offline" }) : send(res, 200, peerOffer(maker));
-    const quoting = role === "B" && req.method === "POST" ? mockMakerAt(path, "quote") : undefined;
+    const quoting = req.method === "POST" ? mockMakerAt(path, role, "quote") : undefined;
     if (quoting === null) return send(res, 404, { error: "not found" });
     if (quoting) {
       if (quoting.offline) return send(res, 503, { error: "offline" });
@@ -677,17 +713,26 @@ function handler(role) {
       const body = await readBody(req);
       const zat = Number(body?.zec_zat);
       if (!body || !Number.isInteger(zat)) return send(res, 400, { error: "zec_zat must be an integer" });
-      const maker = mockMakerByUrl(body.maker) ?? MOCK_MAKERS[0];
+      // Z takes from a B maker (sells ZEC), B from a Z maker (buys it); ferryd's checks and words
+      const maker = makerOf(body.maker) ?? MOCK_MAKERS.find((m) => m.role !== role);
       if (maker.offline) return send(res, 502, { error: "maker unreachable: connection refused" });
+      if (maker.role === role) return send(res, 400, { error: `the counterparty also has role ${role}` });
       if (maker.paused) return send(res, 400, { error: "the counterparty is not making offers" });
       if (zat < maker.min || zat > maker.max) return send(res, 400, { error: `Amount must be between ${zecAmount(maker.min)} and ${zecAmount(maker.max)}` });
       if (swaps.some((s) => !(s.views.Z.outcome && s.views.B.outcome))) return send(res, 409, { error: "A swap is already in progress" });
-      if (parties.Z.balances.zec_shielded_zat < zat) return send(res, 400, { error: "Z does not have enough shielded ZEC" });
       // a firm quote holds the swap to its rate
       const firm = body.quote ? honour(body.quote, maker, zat) : null;
       if (firm?.error) return send(res, 400, { error: firm.error });
       const rate = firm?.rate ?? maker.rate;
-      if (parties.B.balances.btc_sat < Math.round((zat / 1e8) * rate)) return send(res, 400, { error: "B does not have enough BTC" });
+      const sat = Math.round((zat / 1e8) * rate);
+      const theirs = (msg) => (role === "Z" ? msg : `The maker refused: ${msg}`);
+      const mine = (msg) => (role === "B" ? msg : `The maker refused: ${msg}`);
+      const zHave = parties.Z.balances.zec_shielded_zat;
+      if (zHave < zat + ZEC_FEE_RESERVE)
+        return send(res, 400, { error: theirs(`Z does not have enough shielded ZEC: ${zHave} zat spendable in Ironwood, ${zat + ZEC_FEE_RESERVE} zat needed (the amount plus fees)`) });
+      const bHave = parties.B.balances.btc_sat;
+      if (bHave < sat + LOCK_FEE_RESERVE)
+        return send(res, 400, { error: mine(`B does not have enough BTC: ${btcAmount(sat + LOCK_FEE_RESERVE)} needed (the amount plus about ${btcAmount(LOCK_FEE_RESERVE)} for the lock's fee), ${btcAmount(bHave)} in the wallet`) });
       firm?.take();
       const s = newSwap(role, body.maker ?? null, zat, rate);
       return send(res, 201, { id: s.id });
