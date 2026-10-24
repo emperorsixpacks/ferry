@@ -1,9 +1,9 @@
-# Ferry on EVM: shielded ZEC ↔ USDC
+# Ferry on EVM: shielded ZEC ↔ USDC or WETH
 
 The Zcash side of Ferry stays the same: Z locks ZEC in the Ironwood pool to the joint key
-`ask = σ(z + b)`. The counter-asset is an ERC-20 (USDC) held by the `FerryLock` contract
-(`contracts/src/FerryLock.sol`) instead of a Taproot output. The public testnet is Base Sepolia,
-and local runs use anvil.
+`ask = σ(z + b)`. The counter-asset is an ERC-20 (USDC, or WETH: see [WETH](#weth)) held by the
+`FerryLock` contract (`contracts/src/FerryLock.sol`) instead of a Taproot output. The public
+testnet is Base Sepolia, and local runs use anvil.
 
 | | holds | wants |
 |---|---|---|
@@ -11,7 +11,8 @@ and local runs use anvil.
 | **B** | USDC | shielded ZEC |
 
 To run it: `ferryd --counter evm` with the `--evm-*` flags (below). `infra/evm-demo.sh test`
-runs a happy swap, a refund and a punish against anvil with the mock ZEC leg.
+runs a happy swap, a refund and a punish against anvil with the mock ZEC leg (`TOKEN=weth` for
+WETH).
 
 ## Contract
 
@@ -182,10 +183,54 @@ leak a share, but funds stay stuck until the token is unpaused. This trust in th
 inherent to swapping USDC and is disclosed rather than solved. Z must also confirm that `token`
 is the real USDC: a malicious token could block Z's claim alone.
 
+## WETH
+
+Ferry also swaps shielded ZEC for WETH (wrapped ether) with the same contract and the same flow.
+Only the token changes.
+
+- **Wrap ETH first.** FerryLock holds ERC-20 tokens, not plain ETH. B wraps its ETH into WETH
+  before swapping (WETH's `deposit()`, sending the ETH with the call). Z receives WETH and can
+  unwrap it with `withdraw(amount)`. Ferry does neither for you.
+- **Flags:** `--evm-token <WETH address> --evm-token-symbol WETH --evm-token-decimals 18`, with
+  rates in wei per ZEC: `--maker-offer 12000000000000000` is 0.012 WETH per ZEC. A maker that
+  follows the market uses `--maker-price-pair ZEC/ETH`.
+- **One swap carries at most about 18.44 WETH.** Amounts are 64-bit counts of the token's
+  smallest unit (wei), and 2^64 − 1 wei is 18.446744073709551615 WETH. A bigger swap is refused
+  with a clear error, by the taker and by a maker whose own maximum would exceed it, and is never
+  rounded or wrapped. Keeping 64 bits keeps the peer messages identical for USDC peers, and the
+  cap is far above any test-network swap (for USDC it is about 18 trillion USDC). FerryLock
+  itself takes any uint256 amount; its tests lock 100 WETH and amounts close to 2^256.
+- **The token is checked at startup.** Z and B both read the token's own `symbol()` and
+  `decimals()` and refuse to start unless they equal `--evm-token-symbol` and
+  `--evm-token-decimals`. A token labelled with the wrong decimals would otherwise be quoted
+  10^12 times off. With a price feed, the pair's quote must have the token's decimals too
+  (ZEC/ETH for WETH; ZEC/USDC or ZEC/USD for USDC).
+- **Both sides must name the same token.** The token's address, symbol and decimals are part of
+  the agreed terms. A taker refuses a maker whose offer names another token, and a maker refuses
+  a proposal that does, so a USDC party is never matched with a WETH one.
+- **Balances.** `balances.btc_sat` stops at 2^64 − 1 (100 WETH is 10^20 wei).
+  `balances.token_units` has the exact balance as a decimal string.
+- **Trust.** WETH has no issuer that can pause or freeze it. Z must still confirm that the token
+  is the chain's real WETH. These addresses were checked on 2026-10-20 with read-only `eth_call`s
+  to each chain's public RPC (`symbol()` is `WETH`, `decimals()` is 18):
+
+  | chain | chain id | WETH |
+  |---|---|---|
+  | Base | 8453 | `0x4200000000000000000000000000000000000006` |
+  | Base Sepolia | 84532 | `0x4200000000000000000000000000000000000006` |
+  | OP Mainnet | 10 | `0x4200000000000000000000000000000000000006` |
+  | OP Sepolia | 11155420 | `0x4200000000000000000000000000000000000006` |
+  | Ethereum Sepolia | 11155111 | `0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14` |
+  | Arbitrum Sepolia | 421614 | `0x980B62Da83eFf3D4576C647993b0c1D7faf17c73` |
+
+  So far WETH swaps have run only on anvil, against `MockWETH`.
+
 ## Code
 
 - **`contracts/`** (Foundry). `FerryLock.sol`; `MockUSDC.sol` (6 decimals, open mint, tests
-  only); `test/FerryLock.t.sol` (34 tests, 5 of them fuzz); `script/Deploy.s.sol`
+  only); `MockWETH.sol` (WETH9's interface, 18 decimals, plus an open mint, tests only);
+  `test/FerryLock.t.sol` (34 tests, 5 of them fuzz); `test/FerryLockWeth.t.sol` (7 tests with
+  an 18-decimal token, 1 fuzz up to 10^30); `script/Deploy.s.sol`
   (`DEPLOY_MOCK_USDC=true` also deploys MockUSDC; Base Sepolia's Circle test USDC is
   `0x036CbD53842c5426634e7929541eC2318f3dCF7e`); and `export-artifacts.sh`, which refreshes
   `crates/ferry-evm/artifacts`. forge-std v1.11.0 is vendored in `contracts/lib`.
@@ -193,12 +238,13 @@ is the real USDC: a malicious token could block Z's claim alone.
   - Always available, and used by ferry-core: `point_address`, `scalar_address`,
     `verify_share`, `swap_id`, `ready_digest` and `ready_signer` (FerryLock's signature rules).
   - With the default `client` feature: `EvmClient` (`lock`, `claim`, `refund`, `punish`,
-    `swap`, `check_lock`, `check_deployment`, `events`, `latest_block`), `SwapWatcher`,
-    `SwapEvent::revealed_share`, `revealed_in_calldata`, `sign_ready`.
-  - Tests: unit tests, `tests/anvil.rs` (spawns anvil on 127.0.0.1:18545: deployment check, a
-    relayed happy claim with an EIP-712 signature checked against the contract's digest, a
-    refund and a punish, all with DLEQ-proven shares), and `tests/artifacts.rs` (the committed
-    ABI and bytecode match a fresh `forge build`).
+    `swap`, `check_lock`, `check_deployment`, `token_info`, `events`, `latest_block`),
+    `SwapWatcher`, `SwapEvent::revealed_share`, `revealed_in_calldata`, `sign_ready`.
+  - Tests: unit tests, `tests/anvil.rs` (spawns anvil on a port the OS picks: deployment check,
+    a relayed happy claim with an EIP-712 signature checked against the contract's digest, a
+    refund and a punish, all with DLEQ-proven shares; and `token_info` plus a 50 WETH lock and
+    claim, above 2^64 wei), and `tests/artifacts.rs` (the committed ABI and bytecode match a
+    fresh `forge build`).
 - **`ferry_core::evm`.** `EvmParams` with block-time windows, and `EvmPolicy` per chain (anvil
   needs `--dev-policy`). `EvmKeys`/`EvmSetup`, `EvmSession` (joint key, the shares from revealed
   scalars, swap id, ready digest, the exact lock terms), versioned `EvmEnvelope`/`EvmMessage`,
@@ -216,18 +262,21 @@ is the real USDC: a malicious token could block Z's claim alone.
   - **Flags:**
     - `--evm-rpc`, `--evm-contract`, `--evm-token`, `--evm-key-file` (hex key: Z's payout
       account, which also sends the claim; B's account, which locks, refunds and signs Ready).
-    - `--evm-token-symbol`, `--evm-token-decimals`.
+    - `--evm-token-symbol`, `--evm-token-decimals` (0 to 18): checked against the token's own
+      `symbol()` and `decimals()` at startup.
     - `--evm-t1-secs` (proposal to t1), `--evm-refund-secs` (t2 − t1), `--evm-delta-secs`.
     - `--evm-lock-confs`, `--evm-max-tip`, `--evm-log-chunk`.
   - `--maker-offer RATE:MIN:MAX` gives the rate in token base units per ZEC. The price feed
-    works with `--maker-price-pair ZEC/USDC`.
-  - The views keep the Bitcoin shape: counter amounts sit in `btc_sat` as token base units, and
-    `chains.btc` carries `coin`, `ticker` and `decimals`. A `counter` block adds the contract,
+    works with `--maker-price-pair ZEC/USDC` (or `ZEC/ETH` for WETH).
+  - The views keep the Bitcoin shape: counter amounts sit in `btc_sat` as token base units
+    (`balances.token_units` is the exact balance as a string), and `chains.btc` carries `coin`
+    (the lowercased symbol), `ticker` and `decimals`. A `counter` block adds the contract,
     token, swap id and commitments. Timeline kinds reuse the Bitcoin names where the step is the
     same (`btc_lock_broadcast`, `redeem_adaptor_received` for Ready, `btc_redeem_broadcast` for
     the claim, `cancel_seen` when t1 passes), so the UI's steps work for both.
 - **`infra/evm-demo.sh`.** anvil on 18545, ferryd on 7901/7902 (peers on 7911/7912), and
-  `happy`, `refund`, `punish`, `test`.
+  `happy`, `refund`, `punish`, `test`. `TOKEN=weth` deploys MockWETH, has B wrap 100 ETH and
+  quotes 0.012 WETH per ZEC; `test` also checks that ferryd refuses a mislabeled token.
 - **Web.** The coin table has a `usdc` entry (6 decimals, `kind: "evm"`, the chain named from
   the network). Deadlines are drawn in block time, the crossing has no cancel output, and the
   maker list labels EVM makers `ZEC/<token>`. `pnpm shoot:evm` takes the screenshots against a

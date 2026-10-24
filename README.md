@@ -7,9 +7,10 @@ one Ironwood note to another and never touches a transparent address. The BTC si
 Taproot output. Nobody holds both sides, and either party can walk away with its own coins.
 
 The same construction also swaps shielded ZEC for **Litecoin** (same Taproot scripts, see
-[docs/LITECOIN.md](docs/LITECOIN.md)) and for **USDC on an EVM chain** through a small `FerryLock`
-contract ([docs/EVM.md](docs/EVM.md)). A keyless **watchtower** can act at the deadlines for a party
-that goes offline, and the app lists several **makers** with live market rates.
+[docs/LITECOIN.md](docs/LITECOIN.md)) and for **USDC or WETH on an EVM chain** through a small
+`FerryLock` contract ([docs/EVM.md](docs/EVM.md); WETH is wrapped ETH, at most about 18.4 WETH per
+swap). A keyless **watchtower** can act at the deadlines for a party that goes offline, and the app
+lists several **makers** with live market rates.
 
 Built for the [Zecathon](https://thezecathon.com) **Cross-chain** track: *swaps, bridges and intents
 that reach other chains without unshielding on the way through.*
