@@ -998,7 +998,7 @@ async fn route_leg_buys_zec_into_another_wallet() {
     let w = World::start_as(1, Role::Z, &[]).await;
     let (user, maker) = (w.taker().url.clone(), w.maker().peer_url());
     let status = w.get(&user, "/api/status").await;
-    assert_eq!(status["features"], json!(["route"]), "{status}");
+    assert_eq!(status["features"], json!(["route", "payout"]), "{status}");
     let addresses = w.get(&user, "/api/addresses").await;
     assert_eq!(addresses["zec"]["address"], mock_wallet("bram"));
 

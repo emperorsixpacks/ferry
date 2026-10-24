@@ -144,6 +144,11 @@ pub struct SwapRecord {
     /// checked by the Zcash backend, never sent to the peer.
     #[serde(default)]
     pub sweep_to: Option<String>,
+    /// Z taker only: the payout address its tx_redeem pays instead of our own wallet, as the
+    /// chain writes it. Set at creation; the same address is in the session (and so in the
+    /// template B signed).
+    #[serde(default)]
+    pub payout_to: Option<String>,
 }
 
 impl SwapRecord {
@@ -189,6 +194,7 @@ impl SwapRecord {
             watchtower: None,
             route: None,
             sweep_to: None,
+            payout_to: None,
         }
     }
 
@@ -564,11 +570,16 @@ pub(crate) mod tests {
         let obj = old.as_object_mut().unwrap();
         obj.remove("route");
         obj.remove("sweep_to");
+        obj.remove("payout_to");
         let loaded: SwapRecord = serde_json::from_value(old).unwrap();
-        assert_eq!((loaded.route, loaded.sweep_to), (None, None));
+        assert_eq!(
+            (loaded.route, loaded.sweep_to, loaded.payout_to),
+            (None, None, None)
+        );
 
         rec.route = Some("r0011223344556677/1".into());
         rec.sweep_to = Some("uregtest1mockwallet757365722d7a".into());
+        rec.payout_to = Some("bcrt1qn7uqc8hytxc7mhtsdszr9f5yc6hgmqqlc0wsks".into());
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path()).unwrap();
         store.save(&rec).unwrap();
@@ -577,8 +588,13 @@ pub(crate) mod tests {
         let view = serde_json::to_value(crate::view::swap_view(&back)).unwrap();
         assert_eq!(view["route"], "r0011223344556677/1");
         assert_eq!(view["sweep_to"], "uregtest1mockwallet757365722d7a");
+        assert_eq!(
+            view["payout_to"],
+            "bcrt1qn7uqc8hytxc7mhtsdszr9f5yc6hgmqqlc0wsks"
+        );
         let direct = serde_json::to_value(crate::view::swap_view(&sample_record())).unwrap();
         assert!(direct["route"].is_null() && direct["sweep_to"].is_null());
+        assert!(direct["payout_to"].is_null());
 
         store.remove(&rec.id).unwrap();
         assert!(store.load_all().unwrap().is_empty());

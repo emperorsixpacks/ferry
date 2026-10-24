@@ -342,6 +342,7 @@ impl Cli {
             liquidity: None,
             paused: false,
             quote_key: None,
+            features: vec![crate::route::PAYOUT_FEATURE.into()],
         }
     }
 
@@ -455,6 +456,12 @@ pub struct Offer {
     /// The key this maker signs firm quotes with (crate::quote; compressed secp256k1, hex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote_key: Option<String>,
+    /// Peer-protocol extensions this daemon understands. `payout`: a Z taker's Propose may name
+    /// a payout address for tx_redeem (`Setup::redeem_address`). A maker that predates it
+    /// would drop the field and fail the transcript check, so a Z taker with a `payout_to`
+    /// proposes only to a maker that lists it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

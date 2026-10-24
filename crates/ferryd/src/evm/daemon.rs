@@ -503,6 +503,15 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 .await
                 .map_err(|e| ApiError(400, format!("sweep_to: {e}")))?;
         }
+        // payout_to (role Z): the `claimer` in the lock terms instead of our own account, checked
+        // before the maker hears from us.
+        let payout = match &route.payout_to {
+            None => None,
+            Some(to) => Some(
+                self.check_payout(to)
+                    .map_err(|e| ApiError(400, format!("payout_to: {e}")))?,
+            ),
+        };
         let offer: EvmOffer = self
             .http
             .get(format!("{maker}/peer/offer"))
@@ -595,7 +604,10 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         self.check_funds(&params).await?;
         let mut sid = [0u8; 32];
         OsRng.fill_bytes(&mut sid);
-        let me = self.client.address().0 .0;
+        // Z's account in the setup is the claimer: FerryLock's claim (and punish) pay it, and
+        // nobody can change it once B has locked. With payout_to it is that address; our own
+        // account still sends the claim and pays its gas.
+        let me = payout.unwrap_or(self.client.address().0 .0);
         let (proposal, propose) = EvmProposal::new(&mut OsRng, sid, self.role, params, me)
             .map_err(|e| ApiError(400, e.to_string()))?;
         let resp = self
@@ -631,6 +643,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         // Before the first save: a router that lost our answer finds the swap by its label.
         rec.route = route.route;
         rec.sweep_to = route.sweep_to;
+        rec.payout_to = payout.as_ref().map(addr_str);
         rec.peer_seen = 1;
         let p = rec.role().peer().as_str();
         rec.log(
@@ -655,6 +668,14 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         );
         if let Some(note) = crate::route::leg_note(rec.route.as_deref(), rec.sweep_to.as_deref()) {
             rec.log("local", "route_leg", note, None);
+        }
+        if let Some(to) = rec.payout_to.clone() {
+            rec.log(
+                "local",
+                "payout_to",
+                crate::route::payout_note(&to, "claim", true),
+                None,
+            );
         }
         rec.pending
             .extend(actions.into_iter().map(EvmPending::from));
@@ -688,6 +709,22 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             },
             "zec": { "address": self.leg.receive_address() },
         }))
+    }
+
+    /// A `payout_to` for our chain: a well-formed, non-zero address (`parse_payout`) that is not
+    /// FerryLock itself or the token contract, where tokens would be stuck for good.
+    fn check_payout(&self, to: &str) -> Result<[u8; 20], String> {
+        let a = super::config::parse_payout(to)?;
+        if a == self.offer.contract {
+            return Err("that is the FerryLock contract, which would keep the tokens".into());
+        }
+        if a == self.offer.token {
+            return Err(format!(
+                "that is the {} contract itself, which would keep the tokens",
+                self.offer.token_symbol
+            ));
+        }
+        Ok(a)
     }
 
     async fn check_funds(&self, params: &EvmParams) -> Result<(), ApiError> {
@@ -1571,12 +1608,17 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 "The lock is confirmed. Waiting for Z's ZEC",
                 tx(rec, "lock"),
             ),
-            (Role::Z, "Claimed") => rec.log(
-                "local",
-                "swap_complete",
-                format!("Swap complete. {} is at Z's address", self.token(p.token_amount)),
-                None,
-            ),
+            (Role::Z, "Claimed") => {
+                let label = match &rec.payout_to {
+                    None => format!("Swap complete. {} is at Z's address", self.token(p.token_amount)),
+                    Some(to) => format!(
+                        "Swap complete. {} went to {}, the payout address given for this swap",
+                        self.token(p.token_amount),
+                        crate::route::short_address(to)
+                    ),
+                };
+                rec.log("local", "swap_complete", label, None)
+            }
             (Role::Z, "Expired") => rec.log(
                 "local",
                 "cancel_seen",
@@ -1607,15 +1649,24 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 format!("{} is back in Z's own Ironwood notes", zec_str(p.zec_amount)),
                 None,
             ),
-            (Role::Z, "Punished") => rec.log(
-                "local",
-                "punished",
-                format!(
-                    "Z holds the {}. Z's ZEC stays in the joint note, which is B's penalty for not refunding",
-                    p.token_symbol
-                ),
-                None,
-            ),
+            (Role::Z, "Punished") => {
+                let who = match &rec.payout_to {
+                    None => format!("Z holds the {}", p.token_symbol),
+                    Some(to) => format!(
+                        "The {} went to {}, the payout address (FerryLock's punish pays the claimer)",
+                        p.token_symbol,
+                        crate::route::short_address(to)
+                    ),
+                };
+                rec.log(
+                    "local",
+                    "punished",
+                    format!(
+                        "{who}. Z's ZEC stays in the joint note, which is B's penalty for not refunding"
+                    ),
+                    None,
+                )
+            }
             (Role::B, "ZecSeen" | "ReadySigning") => {
                 if !rec.has("zec_note_seen") {
                     rec.log(
