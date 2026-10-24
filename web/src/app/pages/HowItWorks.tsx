@@ -43,14 +43,14 @@ export function HowItWorks() {
     <Layout>
       <div className="space-y-8">
         <div className="space-y-4">
-          <p className="font-mono text-xs tracking-widest text-brand-600">DOCUMENTATION</p>
+          <p className="font-mono text-xs tracking-widest text-slate-600">DOCUMENTATION</p>
           <h1 className="text-3xl font-bold tracking-tight text-slate-900">How Ferry works</h1>
           <p className="max-w-3xl text-slate-600">
             Ferry lets you swap shielded ZEC for bitcoin with a stranger. You never trust them, nobody holds your coins in between, and your ZEC never leaves
             the shielded pool. Here is how, in five short steps.
           </p>
           <div className="flex flex-wrap items-center gap-3 pt-1">
-            <StatusBadge variant="outline" className="border-brand-200 bg-brand-50/40 text-brand-700">
+            <StatusBadge variant="outline" className="border-slate-200 bg-slate-50 text-slate-700">
               <Lock size={10} weight="fill" />
               Shielded
             </StatusBadge>
@@ -69,9 +69,9 @@ export function HowItWorks() {
                   <a
                     key={s.id}
                     href={`#${s.id}`}
-                    className={`-ml-px flex items-center gap-3 border-l-2 py-2 pl-3 text-sm transition-colors ${on ? "border-brand-500 font-semibold text-brand-600" : "border-transparent text-slate-600 hover:text-slate-900"}`}
+                    className={`-ml-px flex items-center gap-3 border-l-2 py-2 pl-3 text-sm transition-colors ${on ? "border-slate-900 font-semibold text-slate-600" : "border-transparent text-slate-600 hover:text-slate-900"}`}
                   >
-                    <span className={`font-mono text-[10px] tracking-widest ${on ? "text-brand-500" : "text-slate-400"}`}>{String(i + 1).padStart(2, "0")}</span>
+                    <span className={`font-mono text-[10px] tracking-widest ${on ? "text-slate-900" : "text-slate-400"}`}>{String(i + 1).padStart(2, "0")}</span>
                     <span>{s.label}</span>
                   </a>
                 );
@@ -80,7 +80,7 @@ export function HowItWorks() {
           </aside>
 
           <div className="min-w-0 space-y-12">
-            <Section id="problem" n="01" eyebrow="The problem" icon={<Scales size={18} weight="duotone" className="text-brand-500" />} title="Swapping today means giving something up">
+            <Section id="problem" n="01" eyebrow="The problem" icon={<Scales size={18} weight="duotone" className="text-slate-900" />} title="Swapping today means giving something up">
               <p>
                 To trade ZEC for bitcoin you either hand your coins to someone in the middle, an exchange or a bridge, and hope they hand back the other side,
                 or your ZEC has to leave the shielded pool, where its amount and addresses become public.
@@ -88,7 +88,7 @@ export function HowItWorks() {
               <Problem />
             </Section>
 
-            <Section id="halves" n="02" eyebrow="One key, cut in two" icon={<Key size={18} weight="duotone" className="text-brand-500" />} title="Your ZEC goes somewhere only two halves can open">
+            <Section id="halves" n="02" eyebrow="One key, cut in two" icon={<Key size={18} weight="duotone" className="text-slate-900" />} title="Your ZEC goes somewhere only two halves can open">
               <p>
                 Your ZEC moves to a fresh shielded address made just for this swap. Spending from it takes a key that exists only in two halves: you hold one,
                 the other side holds the other. Neither half opens it alone.
@@ -96,7 +96,7 @@ export function HowItWorks() {
               <Halves />
             </Section>
 
-            <Section id="fair" n="03" eyebrow="Bitcoin makes it fair" icon={<Bank size={18} weight="duotone" className="text-brand-500" />} title="Taking the bitcoin hands over your half">
+            <Section id="fair" n="03" eyebrow="Bitcoin makes it fair" icon={<Bank size={18} weight="duotone" className="text-slate-900" />} title="Taking the bitcoin hands over your half">
               <p>
                 The other side locks their bitcoin first, in a way only you can claim. But claiming it means showing your half of the key in public, and that is
                 exactly what lets them open the ZEC. Nobody can take without giving.
@@ -104,7 +104,7 @@ export function HowItWorks() {
               <Fair />
             </Section>
 
-            <Section id="deadline" n="04" eyebrow="If anyone disappears" icon={<Clock size={18} weight="duotone" className="text-brand-500" />} title="A deadline sends everyone's coins home">
+            <Section id="deadline" n="04" eyebrow="If anyone disappears" icon={<Clock size={18} weight="duotone" className="text-slate-900" />} title="A deadline sends everyone's coins home">
               <p>
                 Before anything is locked, both sides sign the way back. If the swap isn't finished by a deadline, it is called off and each side's coins return
                 automatically. Going quiet after that only hurts the one who went quiet.
@@ -112,7 +112,7 @@ export function HowItWorks() {
               <Deadline />
             </Section>
 
-            <Section id="seen" n="05" eyebrow="What the world sees" icon={<Eye size={18} weight="duotone" className="text-brand-500" />} title="Two chains, nothing that ties them together">
+            <Section id="seen" n="05" eyebrow="What the world sees" icon={<Eye size={18} weight="duotone" className="text-slate-900" />} title="Two chains, nothing that ties them together">
               <p>
                 On Zcash, the swap is ciphertext: no amounts, no addresses. On Bitcoin, it looks like an ordinary payment from one wallet to another. Nothing on one
                 chain points to the other.
@@ -123,15 +123,15 @@ export function HowItWorks() {
             <Card>
               <CardContent className="space-y-4 py-8 text-center">
                 <p className="text-lg font-semibold text-slate-900">That's the whole idea.</p>
-                <Link to="/app" className="inline-flex items-center gap-2 rounded bg-brand-500 px-8 py-3 font-semibold text-white transition-colors hover:bg-brand-600">
+                <Link to="/app" className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-8 py-3 font-semibold text-white transition-colors hover:bg-slate-800">
                   Try a swap
                   <ArrowRight size={14} weight="bold" />
                 </Link>
                 <p className="flex flex-wrap justify-center gap-x-6 gap-y-2">
-                  <Link to="/safety" className="font-mono text-[11px] tracking-widest text-slate-500 uppercase underline-offset-4 hover:text-brand-600 hover:underline">
+                  <Link to="/safety" className="font-mono text-[11px] tracking-widest text-slate-500 uppercase underline-offset-4 hover:text-slate-900 hover:underline">
                     What could go wrong
                   </Link>
-                  <Link to="/inspect" className="font-mono text-[11px] tracking-widest text-slate-500 uppercase underline-offset-4 hover:text-brand-600 hover:underline">
+                  <Link to="/inspect" className="font-mono text-[11px] tracking-widest text-slate-500 uppercase underline-offset-4 hover:text-slate-900 hover:underline">
                     For developers: watch the protocol live
                   </Link>
                 </p>
@@ -149,7 +149,7 @@ export function Section({ id, n, eyebrow, icon, title, children }: { id: string;
     <section id={id} className="scroll-mt-24 space-y-4">
       <div className="flex items-center gap-2">
         {icon}
-        <p className="font-mono text-[10px] tracking-widest text-brand-600 uppercase">
+        <p className="font-mono text-[10px] tracking-widest text-slate-600 uppercase">
           {n} — {eyebrow}
         </p>
       </div>
@@ -161,7 +161,7 @@ export function Section({ id, n, eyebrow, icon, title, children }: { id: string;
 
 export function Box({ label, children, hot }: { label: string; children: ReactNode; hot?: boolean }) {
   return (
-    <div className={`rounded border p-4 ${hot ? "border-brand-300 bg-brand-50/40" : "border-slate-200 bg-white"}`}>
+    <div className={`rounded border p-4 ${hot ? "border-slate-300 bg-slate-50" : "border-slate-200 bg-white"}`}>
       <Label className="mb-2">{label}</Label>
       {children}
     </div>
@@ -191,7 +191,7 @@ function Problem() {
           {shown ? (
             <ScrambleText key="plain" text="1.00 ZEC  zs1…→ t1Vx…" duration={700} />
           ) : (
-            <span className="text-brand-600">
+            <span className="text-slate-600">
               <ScrambleText key="enc" text="ENCRYPTED NOTE" mode="live" speed={160} />
             </span>
           )}
@@ -213,10 +213,10 @@ function Halves() {
       type="button"
       aria-pressed={on}
       onClick={() => set((v) => !v)}
-      className={`flex items-center justify-between gap-3 rounded border p-3 text-left text-sm transition-colors ${on ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-600 hover:border-brand-300"}`}
+      className={`flex items-center justify-between gap-3 rounded border p-3 text-left text-sm transition-colors ${on ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-600 hover:border-slate-400"}`}
     >
       <span className="inline-flex items-center gap-2 font-medium">
-        <Key size={16} weight={on ? "fill" : "regular"} className={on ? "text-brand-500" : ""} />
+        <Key size={16} weight={on ? "fill" : "regular"} className={on ? "text-slate-900" : ""} />
         {label}
       </span>
       <span className="font-mono text-[10px] tracking-widest uppercase">{on ? "Used" : "Tap to use"}</span>
@@ -226,7 +226,7 @@ function Halves() {
     <div className="grid gap-4 md:grid-cols-[1fr_260px]">
       <Box label="Shielded address, made for this swap" hot={open}>
         <p className="py-3 font-mono text-3xl font-medium text-slate-900">
-          {open ? <ScrambleText key="o" text="1.00 ZEC" duration={600} /> : <span className="text-brand-600"><ScrambleText key="s" text="▓▓▓▓ ZEC" mode="live" speed={150} /></span>}
+          {open ? <ScrambleText key="o" text="1.00 ZEC" duration={600} /> : <span className="text-slate-600"><ScrambleText key="s" text="▓▓▓▓ ZEC" mode="live" speed={150} /></span>}
         </p>
         <p className="text-slate-600">{open ? "Both halves: it opens." : mine || theirs ? "One half isn't enough." : "Locked. Needs both halves."}</p>
       </Box>
@@ -260,8 +260,8 @@ function Fair() {
   return (
     <div className="space-y-2">
       {FAIR.map(([t, d], k) => (
-        <div key={k} className={`flex gap-4 rounded border p-4 transition-colors duration-500 ${k === i ? "border-brand-300 bg-brand-50/40" : "border-slate-200 bg-white"}`}>
-          <div className={`shrink-0 pt-0.5 font-mono text-xs tracking-widest ${k <= i ? "text-brand-600" : "text-slate-400"}`}>{String(k + 1).padStart(2, "0")}</div>
+        <div key={k} className={`flex gap-4 rounded border p-4 transition-colors duration-500 ${k === i ? "border-slate-300 bg-slate-50" : "border-slate-200 bg-white"}`}>
+          <div className={`shrink-0 pt-0.5 font-mono text-xs tracking-widest ${k <= i ? "text-slate-600" : "text-slate-400"}`}>{String(k + 1).padStart(2, "0")}</div>
           <div className="space-y-1">
             <p className={`font-semibold ${k <= i ? "text-slate-900" : "text-slate-400"}`}>{t}</p>
             <p className={k <= i ? "text-slate-600" : "text-slate-400"}>{d}</p>
@@ -298,21 +298,21 @@ function Deadline() {
     <Box label="The other side goes silent">
       <div className="relative mt-2 h-2 bg-slate-200">
         <div className="absolute inset-y-0 left-0 bg-slate-900" style={{ width: `${Math.min(t, DEAD) * 100}%` }} />
-        {past ? <div className="absolute inset-y-0 bg-brand-500" style={{ left: `${DEAD * 100}%`, width: `${(t - DEAD) * 100}%` }} /> : null}
-        <div className="absolute -top-1.5 h-5 w-px bg-brand-500" style={{ left: `${DEAD * 100}%` }} />
+        {past ? <div className="absolute inset-y-0 bg-slate-900" style={{ left: `${DEAD * 100}%`, width: `${(t - DEAD) * 100}%` }} /> : null}
+        <div className="absolute -top-1.5 h-5 w-px bg-slate-900" style={{ left: `${DEAD * 100}%` }} />
       </div>
       <div className="relative mt-2 h-4 font-mono text-[10px] tracking-widest text-slate-500 uppercase">
         <span className="absolute left-0">Swap starts</span>
-        <span className="absolute -translate-x-1/2 text-brand-600" style={{ left: `${DEAD * 100}%` }}>
+        <span className="absolute -translate-x-1/2 text-slate-600" style={{ left: `${DEAD * 100}%` }}>
           Deadline
         </span>
       </div>
       <div className="mt-5 grid grid-cols-2 gap-3">
-        <div className={`rounded border p-3 ${past ? "border-brand-300 bg-brand-50/40" : "border-slate-200"}`}>
+        <div className={`rounded border p-3 ${past ? "border-slate-300 bg-slate-50" : "border-slate-200"}`}>
           <Label>Your ZEC</Label>
           <p className="mt-1 font-medium text-slate-900">{past ? "Back in your wallet" : "Locked for the swap"}</p>
         </div>
-        <div className={`rounded border p-3 ${past ? "border-brand-300 bg-brand-50/40" : "border-slate-200"}`}>
+        <div className={`rounded border p-3 ${past ? "border-slate-300 bg-slate-50" : "border-slate-200"}`}>
           <Label>Their bitcoin</Label>
           <p className="mt-1 font-medium text-slate-900">{past ? "Back in their wallet" : "Locked for the swap"}</p>
         </div>
@@ -335,7 +335,7 @@ function Seen() {
     <div className="space-y-4">
       <div className="grid gap-4 md:grid-cols-2">
         <Box label="What Zcash shows">
-          <div className="space-y-1 py-1 font-mono text-xs break-all text-brand-600">
+          <div className="space-y-1 py-1 font-mono text-xs break-all text-slate-600">
             {[0, 1, 2, 3].map((k) => (
               <p key={k}>
                 <ScrambleText text="0000000000000000000000000000" mode="live" speed={120 + k * 20} />

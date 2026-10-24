@@ -29,7 +29,7 @@ export function CipherGrid({ cols = COLS }: { cols?: number }) {
   return (
     <div className="grid gap-[3px]" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }} aria-hidden>
       {grid.slice(0, cols * ROWS).map((s, i) => (
-        <div key={i} className={`aspect-square transition-colors duration-500 ${s === "hot" ? "bg-brand-500" : s === "sealed" ? "bg-slate-900" : "bg-slate-200"}`} />
+        <div key={i} className={`aspect-square transition-colors duration-500 ${s === "hot" ? "bg-slate-500" : s === "sealed" ? "bg-slate-900" : "bg-slate-200"}`} />
       ))}
     </div>
   );

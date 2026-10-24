@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { DAEMONS, LOCAL_ROLE, PAIR_IDS, getPairs, getStatus, pairDaemon, pairId, type CoinId, type PairId, type Status } from "@/api";
-import { chainOfNetwork } from "@/format";
+import { DAEMONS, LOCAL_ROLE, PAIR_IDS, getPairs, getStatus, pairChain, pairCoin, pairDaemon, pairId, type CoinId, type PairId, type Status } from "@/api";
+import { CHAIN_NAMES, chainOfNetwork } from "@/format";
 
 // The pairs this UI can swap: the main daemon's (whatever coin it runs) and one per extra daemon
 // the UI server fronts (GET /api/pairs). Each is probed now and then for its offer, so the pair
@@ -69,6 +69,27 @@ export function usePairs(): Pairs {
     return { id, daemon: null, status: null };
   });
   return { ready: extra !== null, extra: extra ?? [], list };
+}
+
+// How a pair is named to people. title: the picker row ("Bitcoin · BTC", "USDC on Base",
+// "ETH on Base (WETH)"); ticker: what amounts are in; label/sub: the coin button's two lines;
+// noun: in a sentence ("Swap ZEC for Bitcoin").
+export interface PairName {
+  title: string;
+  ticker: string;
+  label: string;
+  sub: string;
+  noun: string;
+}
+
+export function pairName(id: PairId): PairName {
+  const c = pairCoin(id);
+  const chain = pairChain(id);
+  const on = chain ? CHAIN_NAMES[chain] : "Base";
+  if (c === "btc") return { title: "Bitcoin · BTC", ticker: "BTC", label: "BTC", sub: "Bitcoin", noun: "Bitcoin" };
+  if (c === "ltc") return { title: "Litecoin · LTC", ticker: "LTC", label: "LTC", sub: "Litecoin", noun: "Litecoin" };
+  if (c === "usdc") return { title: `USDC on ${on}`, ticker: "USDC", label: "USDC", sub: `on ${on}`, noun: `USDC on ${on}` };
+  return { title: `ETH on ${on} (WETH)`, ticker: "WETH", label: "WETH", sub: `ETH on ${on}`, noun: `ETH on ${on}` };
 }
 
 // The pair the viewer last picked: ?pair= in the URL, else what this browser remembers.

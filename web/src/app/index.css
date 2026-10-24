@@ -5,64 +5,59 @@
 @import "@fontsource/jetbrains-mono/700.css";
 
 /* ======================================================================
-   Ferry design system, ported from SealPad (Saturn Credit-derived):
-   white canvas, obsidian ink, #FF5100 orange, 0.69px micro-radii,
-   Inter + JetBrains Mono, tiny tracked-out mono labels.
+   Ferry design system: light and neutral. White canvas, near-black ink,
+   soft grey panels with hairline borders, rounded panels and pill
+   controls. One quiet accent (a muted indigo) for focus rings and links
+   only; soft green and red tints, sparingly, for done and failed.
+   Inter for text with tabular figures for amounts; JetBrains Mono only
+   for addresses and transaction ids.
    ====================================================================== */
 @theme inline {
   --font-sans: "Inter Variable", "Inter", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
   --font-heading: "Inter Variable", "Inter", system-ui, sans-serif;
 
-  --color-brand-50: #fff7ed;
-  --color-brand-100: #ffedd5;
-  --color-brand-200: #ffd7a8;
-  --color-brand-300: #ffb74d;
-  --color-brand-400: #ffa726;
-  --color-brand-500: #ff5100;
-  --color-brand-600: #e84800;
-  --color-brand-700: #c73d00;
-  --color-brand-800: #a02e00;
-  --color-brand-900: #7a2300;
+  /* the one accent: focus rings and links */
+  --color-accent-50: #f4f5fa;
+  --color-accent-100: #e8eaf5;
+  --color-accent-200: #d0d4ea;
+  --color-accent-300: #aab1d6;
+  --color-accent-400: #8089bf;
+  --color-accent-500: #5f69a8;
+  --color-accent-600: #4b5394;
+  --color-accent-700: #3d447a;
+  --color-accent-800: #313661;
 
-  --color-slate-50: #fcfcfc;
-  --color-slate-100: #f5f5f5;
-  --color-slate-200: #e5e7eb;
-  --color-slate-300: #d1d1d1;
-  --color-slate-400: #9ca3af;
-  --color-slate-500: #686868;
-  --color-slate-600: #4f4f4f;
-  --color-slate-700: #2a2a2a;
-  --color-slate-800: #1f1f1f;
-  --color-slate-900: #181818;
+  --color-slate-50: #f7f7f8;
+  --color-slate-100: #f1f1f3;
+  --color-slate-200: #e4e4e7;
+  --color-slate-300: #d4d4d8;
+  --color-slate-400: #a1a1aa;
+  --color-slate-500: #6b6b74;
+  --color-slate-600: #52525b;
+  --color-slate-700: #3f3f46;
+  --color-slate-800: #27272a;
+  --color-slate-900: #18181b;
 
   --color-canvas: #ffffff;
-  --color-cloud: #fcfcfc;
-  --color-surface-soft: #f7f9fb;
-  --color-obsidian: #181818;
+  --color-cloud: #f7f7f8;
+  --color-surface-soft: #f7f7f8;
+  --color-obsidian: #18181b;
 
   --color-background: #ffffff;
-  --color-foreground: #181818;
+  --color-foreground: #18181b;
   --color-card: #ffffff;
-  --color-card-foreground: #181818;
-  --color-primary: #ff5100;
+  --color-card-foreground: #18181b;
+  --color-primary: #18181b;
   --color-primary-foreground: #ffffff;
-  --color-secondary: #f5f5f5;
-  --color-secondary-foreground: #181818;
-  --color-muted: #f7f9fb;
-  --color-muted-foreground: #686868;
+  --color-secondary: #f1f1f3;
+  --color-secondary-foreground: #18181b;
+  --color-muted: #f7f7f8;
+  --color-muted-foreground: #6b6b74;
   --color-destructive: #dc2626;
-  --color-border: #e5e7eb;
-  --color-input: #e5e7eb;
-  --color-ring: #ff5100;
-
-  --radius-sm: 0.69px;
-  --radius-md: 0.69px;
-  --radius-lg: 0.69px;
-  --radius-xl: 0.69px;
-  --radius-2xl: 0.69px;
-  --radius-3xl: 0.69px;
-  --radius: 0.69px;
+  --color-border: #e4e4e7;
+  --color-input: #e4e4e7;
+  --color-ring: #5f69a8;
 }
 
 @layer base {
@@ -81,6 +76,43 @@
     font-feature-settings:
       "ss01" 1,
       "cv11" 1;
+  }
+  /* a visible focus ring on everything that takes focus, in the one accent */
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-accent-500);
+    outline-offset: 2px;
+  }
+}
+
+/* the token picker and swap settings: a bottom sheet on phones, a panel above sm */
+@media (prefers-reduced-motion: no-preference) {
+  .sheet-in {
+    animation: sheet-up 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .sheet-fade {
+    animation: sheet-fade 200ms ease-out;
+  }
+  @media (min-width: 40rem) {
+    .sheet-in {
+      animation-name: sheet-pop;
+    }
+  }
+}
+@keyframes sheet-up {
+  from {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+}
+@keyframes sheet-pop {
+  from {
+    transform: translateY(8px) scale(0.98);
+    opacity: 0;
+  }
+}
+@keyframes sheet-fade {
+  from {
+    opacity: 0;
   }
 }
 

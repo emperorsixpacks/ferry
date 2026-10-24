@@ -1,270 +1,338 @@
 import type { ReactNode } from "react";
-import { ArrowCounterClockwise, Check, CheckCircle, CircleNotch, Clock, Lock, ShieldCheck, ShieldSlash, Warning } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, ArrowLeft, ArrowRight, Check, CircleNotch, Lock, ShieldCheck, ShieldSlash, Warning } from "@phosphor-icons/react";
 import type { Status, SwapView } from "@/api";
+import { CHAIN_NAMES, coin } from "@/format";
 import { Link } from "@/router";
 import { btcText } from "@/swap/shared";
 import { phaseOf, stepsOf, transactions } from "@/swap/steps";
-import { clock, clockSeconds, unwoundBy } from "@/swap/timing";
+import { clock, clockSeconds, roughDuration, typicalSeconds, unwoundBy } from "@/swap/timing";
 import { CopyText } from "../components/CopyText";
-import { Detail, Label, Layout } from "../components/Layout";
+import { Layout } from "../components/Layout";
+import { PairLogo, TokenLogo } from "../components/Logos";
 import { ScrambleText } from "../components/ScrambleText";
-import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
-import { StatusBadge } from "../components/ui/badge";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
+import { ToneBadge } from "../components/ui/badge";
+import { Fold } from "../components/ui/fold";
+import { cn } from "../lib/utils";
 import { useLocal } from "../lib/daemon";
-import { STATUS, amounts, direction } from "../lib/swaps";
+import { STATUS_WORD, lockedMine, plainSteps, swapAmounts, wordsFor, type PlainStep, type Tone } from "../lib/progress";
 import { useWalletCaughtUp } from "../lib/walletSync";
-import { coin } from "@/format";
 
-// /app/swap/:id, laid out like SealPad's SaleDetail: header, banner, progress, details,
-// transactions, and what each chain sees.
+// /app/swap/:id: one calm card. A status word, a headline, three or four plain steps with the
+// current one explained, and what to expect. Everything technical (ids, transactions, deadlines,
+// the watchtower, what each chain sees) is folded away under "Technical details".
 export function SwapDetail({ id }: { id: string }) {
   const d = useLocal();
   const swap = d.swaps[id];
-  return <Layout>{swap ? <Body swap={swap} status={d.status} /> : <p className="text-slate-500">{d.connected ? "Loading swap…" : "Waiting for your daemon…"}</p>}</Layout>;
+  return (
+    <Layout>
+      <div className="mx-auto w-full max-w-[480px]">
+        <Link to="/app/activity" className="mb-4 inline-flex items-center gap-1.5 rounded text-sm text-slate-500 transition-colors hover:text-slate-900">
+          <ArrowLeft size={14} weight="bold" aria-hidden />
+          Activity
+        </Link>
+        {swap ? (
+          <Body swap={swap} status={d.status} />
+        ) : (
+          <div className="rounded-3xl border border-slate-200 bg-white px-6 py-14 text-center">
+            <CircleNotch size={28} weight="bold" className="mx-auto animate-spin text-slate-400 motion-reduce:animate-none" aria-hidden />
+            <p className="mt-4 text-slate-600">{d.connected ? "Loading your swap…" : "Waiting for your Ferry node…"}</p>
+          </div>
+        )}
+      </div>
+    </Layout>
+  );
 }
 
 function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
-  const { bt } = useLocal();
+  const { bt, pair } = useLocal();
   const phase = phaseOf(swap);
-  const st = STATUS[phase];
-  const a = amounts(swap, status);
-  const mine = swap.role === "Z" ? "ZEC" : coin().ticker;
-  const by = unwoundBy(status, swap, bt);
+  const w = wordsFor();
+  const a = swapAmounts(swap, status, w);
+  const z = swap.role === "Z";
+  const mine = z ? a.zec : a.coin;
   const live = phase === "progress" || phase === "unwinding";
   const refused = swap.timeline.some((e) => e.kind === "zec_lock_refused");
-  const d = swap.deadlines;
+  const lapsed = swap.timeline.some((e) => e.kind === "zec_lock_lapsed");
+  const by = unwoundBy(status, swap, bt);
+  const caughtUp = useWalletCaughtUp(swap, status);
+  const word = STATUS_WORD[phase];
+
+  let head: { tone: Tone; title: string; sub: ReactNode };
+  if (!caughtUp) head = { tone: "live", title: "Updating wallet…", sub: "The swap is finished. Your wallet is picking up the result." };
+  else if (phase === "progress") head = { tone: "live", title: "Swapping…", sub: status ? `Usually ${roughDuration(typicalSeconds(status, bt))}.` : null };
+  else if (phase === "unwinding")
+    head = {
+      tone: "warn",
+      title: "Cancelling…",
+      sub: refused ? `Nothing left your wallet. It closes by about ${by ? clock(by) : "–"}.` : `Nothing is lost. Your ${mine} comes back by about ${by ? clock(by) : "–"}.`,
+    };
+  else if (phase === "done") head = { tone: "good", title: `You received ${z ? a.coin : a.zec}`, sub: z ? `${a.zec} left your shielded wallet.` : `It's in your shielded wallet. You paid ${a.coin}.` };
+  else if (phase === "settled")
+    head = { tone: "good", title: `You received ${a.coin}`, sub: `Your partner stopped responding, so after the deadline their ${w.ticker} was released to you. You were paid in full for your ZEC.` };
+  else if (phase === "refunded")
+    head = {
+      tone: "neutral",
+      title: lockedMine(swap) ? `Your ${mine} is back` : "Nothing left your wallet",
+      sub: refused
+        ? "Your wallet couldn't send the ZEC from shielded funds alone, so the swap was called off before any ZEC moved."
+        : lapsed
+          ? "Your ZEC payment never reached the network and expired, so no ZEC moved. The swap was called off."
+          : "The swap didn't finish in time, so it was undone. Nothing changed hands.",
+    };
+  else head = { tone: "bad", title: "The swap didn't complete", sub: `Your Ferry node was offline past the deadline, so the ${a.coin} went to your partner.` };
+
+  const steps = plainSteps(swap, w);
+  const started = swap.timeline[0]?.at;
+  const eta = started && status ? new Date(Date.parse(started) + typicalSeconds(status, bt) * 1000) : null;
+  const armed = swap.watchtower?.status === "armed";
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p className="mb-1 font-mono text-xs tracking-widest text-brand-600 uppercase">Shielded swap</p>
-          <h1 className="text-3xl font-bold tracking-tight text-slate-900">Swap</h1>
-          <CopyText value={swap.id} truncate={false} className="mt-1" />
+    <>
+      <div className="rounded-3xl border border-slate-200 bg-white px-5 py-7 shadow-[0_1px_2px_rgba(24,24,27,0.04)] sm:px-8 sm:py-8">
+        <div className="flex flex-col items-center text-center">
+          <StatusIcon tone={head.tone} />
+          <ToneBadge tone={caughtUp ? word.tone : "live"} className="mt-5">
+            {caughtUp ? word.label : "Finishing"}
+          </ToneBadge>
+          <h1 className="mt-3 text-2xl font-semibold tracking-tight text-balance text-slate-900 tabular-nums sm:text-[28px]">{head.title}</h1>
+          {head.sub ? <p className="mt-2 max-w-sm text-[15px] text-balance text-slate-600">{head.sub}</p> : null}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <TowerBadge swap={swap} />
-          <StatusBadge variant={st.tone}>{st.label}</StatusBadge>
-        </div>
+
+        {live ? (
+          <div className="mt-6 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-900 tabular-nums">
+            <span className="inline-flex items-center gap-2">
+              {z ? <TokenLogo id="zec" size={20} /> : <PairLogo pair={pair} size={20} />}
+              {z ? a.zec : a.coin}
+            </span>
+            <ArrowRight size={14} weight="bold" className="text-slate-400" aria-label="for" />
+            <span className="inline-flex items-center gap-2">
+              {z ? <PairLogo pair={pair} size={20} /> : <TokenLogo id="zec" size={20} />}
+              {z ? a.coin : a.zec}
+            </span>
+          </div>
+        ) : null}
+
+        <Tracker steps={steps} />
+
+        {live ? (
+          <div className="mt-6 space-y-2 border-t border-slate-100 pt-5 text-sm text-slate-600">
+            {phase === "progress" && eta ? (
+              <p>{eta.getTime() > Date.now() ? `Usually done by about ${clock(eta)}.` : "Taking a little longer than usual. Nothing is lost."}</p>
+            ) : null}
+            {phase === "progress" ? <p>If anything goes wrong, your {mine} comes back automatically by about {by ? clock(by) : "–"}.</p> : null}
+            <p className="text-slate-900">
+              You can close this page — your Ferry node finishes the swap.{" "}
+              <span className="text-slate-600">{armed ? "A watchtower also keeps the deadlines if your node goes offline." : "Keep your node running until it's done."}</span>
+            </p>
+          </div>
+        ) : (
+          <div className="mt-7 flex flex-col items-center gap-3">
+            <Link to="/app" className="flex h-12 w-full items-center justify-center rounded-2xl bg-slate-900 text-[15px] font-semibold text-white transition-colors hover:bg-slate-800">
+              {phase === "done" || phase === "settled" ? "Swap again" : "Start a new swap"}
+            </Link>
+            <Link to="/app/activity" className="rounded text-sm text-slate-600 transition-colors hover:text-slate-900">
+              View all activity
+            </Link>
+          </div>
+        )}
       </div>
 
-      {live ? (
-        <Banner tone={phase === "unwinding" ? "warn" : "info"} icon={<Clock size={22} weight="duotone" className="mt-0.5 shrink-0 text-brand-500" />}>
-          <p className="text-sm font-semibold text-slate-900">
-            {refused
-              ? `Nothing left your wallet. The swap is being called off and should be closed by about ${by ? clock(by) : "–"}.`
-              : phase === "unwinding"
-                ? `Nothing is lost. Your ${mine} should be back by about ${by ? clock(by) : "–"}.`
-                : `If anything goes wrong, your ${mine} comes back to you automatically by about ${by ? clock(by) : "–"}.`}
-          </p>
-          <p className="mt-1 font-mono text-xs text-slate-600">
-            {refused
-              ? `Your wallet couldn't send the ZEC from shielded notes only, so no ZEC moved. The other side takes its ${coin().kind === "evm" ? coin().asset : coin().asset.toLowerCase()} back after the deadline.`
-              : coin().kind === "evm"
-                ? phase === "unwinding"
-                  ? `The swap didn't finish in time, so it was called off. From here the FerryLock contract on ${coin().name} only pays back.`
-                  : swap.watchtower?.status === "armed"
-                    ? `The FerryLock contract on ${coin().name} enforces both ways back and their deadlines. A watchtower will call them on time even if this daemon goes offline.`
-                    : `The FerryLock contract on ${coin().name} enforces both ways back and their deadlines. Keep this daemon running until the swap is done.`
-                : phase === "unwinding"
-                  ? "The swap didn't finish in time, so it was called off. The ways back were signed before anything was locked."
-                  : swap.watchtower?.status === "armed"
-                    ? "Both ways back were signed before anything was locked. A watchtower holds them too, so the deadlines are met even if this daemon goes offline."
-                    : "Both ways back were signed before anything was locked. Keep this daemon running until the swap is done."}
-          </p>
-        </Banner>
-      ) : (
-        <Outcome swap={swap} status={status} />
-      )}
+      <Fold
+        title={<span className="text-sm font-medium text-slate-700">Technical details</span>}
+        className="mt-4 rounded-3xl border border-slate-200 bg-white"
+        buttonClassName="rounded-3xl px-5 py-4 hover:bg-slate-50"
+        bodyClassName="border-t border-slate-100 px-5 pt-5 pb-6"
+      >
+        <Technical swap={swap} status={status} />
+      </Fold>
+    </>
+  );
+}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Progress</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          {stepsOf(swap).map((s, i) => (
-            <div
-              key={i}
-              className={`flex items-start gap-4 rounded border p-3 text-sm ${s.status === "active" ? "border-brand-300 bg-brand-50/40" : "border-slate-200"}`}
-            >
-              <span className={`shrink-0 pt-0.5 font-mono text-xs tracking-widest ${s.status === "pending" ? "text-slate-400" : "text-brand-600"}`}>{String(i + 1).padStart(2, "0")}</span>
-              <div className="min-w-0 flex-1">
-                <p className={`font-semibold ${s.status === "pending" ? "text-slate-400" : "text-slate-900"}`}>{s.title}</p>
-                {s.status === "active" && s.note ? <p className="mt-0.5 text-slate-600">{s.note}</p> : null}
-              </div>
-              <span className="shrink-0 pt-0.5">
-                {s.status === "done" ? (
-                  <span className="inline-flex items-center gap-1.5 font-mono text-xs text-slate-500">
-                    {s.at ? clockSeconds(s.at) : ""}
-                    <Check size={14} weight="bold" className="text-brand-500" />
-                  </span>
-                ) : s.status === "active" ? (
-                  <span className="inline-flex items-center gap-1.5 font-mono text-[10px] tracking-widest text-brand-700 uppercase">
-                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-500" />
-                    In progress
-                  </span>
-                ) : null}
-              </span>
+function StatusIcon({ tone }: { tone: Tone }) {
+  const box = "flex h-14 w-14 items-center justify-center rounded-full";
+  if (tone === "live")
+    return (
+      <span className={cn(box, "bg-slate-100 text-slate-900")}>
+        <CircleNotch size={26} weight="bold" className="animate-spin motion-reduce:animate-none" aria-hidden />
+      </span>
+    );
+  if (tone === "good")
+    return (
+      <span className={cn(box, "bg-emerald-50 text-emerald-600")}>
+        <Check size={26} weight="bold" aria-hidden />
+      </span>
+    );
+  if (tone === "bad")
+    return (
+      <span className={cn(box, "bg-rose-50 text-rose-600")}>
+        <Warning size={26} weight="bold" aria-hidden />
+      </span>
+    );
+  return (
+    <span className={cn(box, tone === "warn" ? "bg-slate-100 text-slate-900" : "bg-slate-100 text-slate-600")}>
+      <ArrowCounterClockwise size={26} weight="bold" aria-hidden />
+    </span>
+  );
+}
+
+// The plain steps, top to bottom: done ones ticked, the current one explained.
+function Tracker({ steps }: { steps: PlainStep[] }) {
+  return (
+    <ol className="mt-7 space-y-0" aria-label="Progress">
+      {steps.map((s, i) => (
+        <li key={i} className="relative flex gap-4 pb-5 last:pb-0" aria-current={s.status === "active" ? "step" : undefined}>
+          {i < steps.length - 1 ? <span className={cn("absolute top-7 bottom-1 left-[11px] w-0.5 rounded-full", s.status === "done" ? "bg-slate-900" : "bg-slate-200")} aria-hidden /> : null}
+          <span
+            className={cn(
+              "relative z-10 mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full",
+              s.status === "done" ? "bg-slate-900 text-white" : s.status === "active" ? "border-2 border-slate-900 bg-white" : "border-2 border-slate-200 bg-white",
+            )}
+            aria-hidden
+          >
+            {s.status === "done" ? <Check size={12} weight="bold" /> : s.status === "active" ? <span className="h-2 w-2 animate-pulse rounded-full bg-slate-900 motion-reduce:animate-none" /> : null}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-baseline justify-between gap-3">
+              <p className={cn("text-[15px]", s.status === "pending" ? "text-slate-500" : "font-medium text-slate-900")}>
+                {s.title}
+                <span className="sr-only">{s.status === "done" ? " (done)" : s.status === "active" ? " (now)" : ""}</span>
+              </p>
+              {s.status === "done" && s.at ? <span className="shrink-0 text-xs text-slate-500 tabular-nums">{clockSeconds(s.at)}</span> : null}
             </div>
-          ))}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Details</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4 text-sm">
-          <div className="grid grid-cols-2 gap-x-4 gap-y-3">
-            <Detail label="Type" value={direction(swap.role)} />
-            <Detail label="Started" value={swap.timeline[0] ? new Date(swap.timeline[0].at).toLocaleString() : "–"} />
-            <Detail label={swap.role === "Z" ? "You send" : "You pay"} value={<span className="font-mono">{swap.role === "Z" ? a.zec : a.btc}</span>} />
-            <Detail label="You receive" value={<span className="font-mono">{swap.role === "Z" ? a.btc : a.zec}</span>} />
-            <Detail
-              label="Network fee"
-              value={<span className="font-mono">{coin().kind === "evm" ? "Gas only, paid in ETH" : status?.offer.fee_sat != null ? `${status.offer.fee_sat.toLocaleString("en-US")} ${coin().unit}` : "–"}</span>}
-            />
-            <Detail label="Rate" value={<span className="font-mono">{status ? `1 ZEC = ${btcText(status.offer.rate_sat_per_zec)} ${coin().ticker}` : "–"}</span>} />
-            <Detail label={`${coin().asset} locked at`} value={<span className="font-mono">{d.btc_lock_height != null ? `block ${d.btc_lock_height}` : "not yet"}</span>} />
-            <Detail
-              label="Called off at the latest"
-              value={
-                <span className="font-mono">
-                  {d.t1_unix != null
-                    ? new Date(d.t1_unix * 1000).toLocaleString()
-                    : d.btc_lock_height != null
-                      ? `block ${d.btc_lock_height + d.t1_blocks}`
-                      : `${d.t1_blocks} blocks after the lock`}
-                </span>
-              }
-            />
+            {s.status === "active" && s.note ? <p className="mt-1 text-sm text-slate-600">{s.note}</p> : null}
           </div>
-        </CardContent>
-      </Card>
+        </li>
+      ))}
+    </ol>
+  );
+}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Transactions</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {transactions(swap).length ? (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Chain</TableHead>
-                  <TableHead>What</TableHead>
-                  <TableHead>Transaction</TableHead>
-                  <TableHead className="text-right">Block</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {transactions(swap).map((t) => (
-                  <TableRow key={t.txid}>
-                    <TableCell>
-                      <StatusBadge variant={t.chain === "zec" ? "default" : "secondary"} className={t.chain === "zec" ? "bg-slate-900" : ""}>
-                        {t.chain === "zec" ? "Zcash" : coin().name}
-                      </StatusBadge>
-                    </TableCell>
-                    <TableCell className="font-medium">{t.label}</TableCell>
-                    <TableCell>
-                      <CopyText value={t.txid} head={8} tail={6} />
-                    </TableCell>
-                    <TableCell className="text-right font-mono text-xs">{t.height != null ? t.height : <span className="text-brand-700">pending</span>}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          ) : (
-            <p className="font-mono text-xs text-slate-500">Nothing on either chain yet.</p>
-          )}
-        </CardContent>
-      </Card>
+// Everything a curious or technical reader may want, in the order they'd look for it.
+function Technical({ swap, status }: { swap: SwapView; status: Status | null }) {
+  const d = swap.deadlines;
+  const evm = coin().kind === "evm";
+  const chain = evm ? (coin().chain ? CHAIN_NAMES[coin().chain!] : coin().name) : coin().name;
+  const phase = phaseOf(swap);
+  const armed = swap.watchtower?.status === "armed";
+  const a = swapAmounts(swap, status);
+  const rate = swap.amounts.zec_zat > 0 ? Math.round((swap.amounts.btc_sat * 1e8) / swap.amounts.zec_zat) : 0;
+  const refused = swap.timeline.some((e) => e.kind === "zec_lock_refused");
+  const protection = refused
+    ? `Your wallet couldn't send the ZEC from shielded notes only, so no ZEC moved. The other side takes its ${coin().asset} back after the deadline.`
+    : evm
+      ? phase === "unwinding"
+        ? `The swap didn't finish in time, so it was called off. From here the FerryLock contract on ${coin().name} only pays back.`
+        : armed
+          ? `The FerryLock contract on ${coin().name} enforces both ways back and their deadlines. A watchtower will call them on time even if your Ferry node goes offline.`
+          : `The FerryLock contract on ${coin().name} enforces both ways back and their deadlines. Keep your Ferry node running until the swap is done.`
+      : phase === "unwinding"
+        ? "The swap didn't finish in time, so it was called off. The ways back were signed before anything was locked."
+        : armed
+          ? "Both ways back were signed before anything was locked. A watchtower holds them too, so the deadlines are met even if your Ferry node goes offline."
+          : "Both ways back were signed before anything was locked. Keep your Ferry node running until the swap is done.";
+  const txs = transactions(swap);
+
+  return (
+    <div className="space-y-7 text-sm">
+      <Group title="Swap">
+        <Row label="Swap ID" value={<CopyText value={swap.id} head={10} tail={8} />} />
+        <Row label="Direction" value={swap.role === "Z" ? `ZEC → ${coin().ticker}` : `${coin().ticker} → ZEC`} />
+        <Row label="Started" value={swap.timeline[0] ? new Date(swap.timeline[0].at).toLocaleString() : "–"} />
+        <Row label={swap.role === "Z" ? "You send" : "You pay"} value={swap.role === "Z" ? a.zec : a.coin} />
+        <Row label="You receive" value={swap.role === "Z" ? a.coin : a.zec} />
+        <Row label="Rate" value={rate ? `1 ZEC = ${btcText(rate)} ${coin().ticker}` : "–"} />
+        <Row label="Network fee" value={evm ? "Gas only, paid in ETH" : status?.offer.fee_sat != null ? `${status.offer.fee_sat.toLocaleString("en-US")} ${coin().unit}` : "–"} />
+        <Row label="Counterparty" value={<span className="font-mono text-xs break-all">{swap.counterparty}</span>} />
+        <Row label="Networks" value={`${chain} ${status?.chains.btc.network ?? ""} · Zcash ${status?.chains.zec.network ?? ""}`} />
+      </Group>
+
+      <Group title="Deadlines and protection">
+        <p className="text-slate-600">{protection}</p>
+        <Row label={`${coin().asset} locked at`} value={d.btc_lock_height != null ? `block ${d.btc_lock_height}` : "not yet"} />
+        <Row
+          label="Called off at the latest"
+          value={d.t1_unix != null ? new Date(d.t1_unix * 1000).toLocaleString() : d.btc_lock_height != null ? `block ${d.btc_lock_height + d.t1_blocks}` : `${d.t1_blocks} blocks after the lock (t1)`}
+        />
+        <Row
+          label="Final deadline"
+          value={d.t2_unix != null ? new Date(d.t2_unix * 1000).toLocaleString() : d.btc_lock_height != null ? `block ${d.btc_lock_height + d.t1_blocks + d.t2_blocks}` : `${d.t2_blocks} blocks after the call-off (t2)`}
+        />
+        <TowerRow swap={swap} />
+      </Group>
+
+      <Group title="Every step">
+        <ol className="space-y-1.5">
+          {stepsOf(swap).map((s, i) => (
+            <li key={i} className="flex items-baseline justify-between gap-3">
+              <span className={s.status === "pending" ? "text-slate-500" : "text-slate-900"}>
+                {i + 1}. {s.title}
+              </span>
+              <span className="shrink-0 text-xs text-slate-500 tabular-nums">{s.status === "done" ? (s.at ? clockSeconds(s.at) : "done") : s.status === "active" ? "now" : ""}</span>
+            </li>
+          ))}
+        </ol>
+      </Group>
+
+      <Group title="Transactions">
+        {txs.length ? (
+          <ul className="divide-y divide-slate-100">
+            {txs.map((t) => (
+              <li key={t.txid} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2">
+                <span className="text-slate-900">
+                  {t.label} <span className="text-slate-500">· {t.chain === "zec" ? "Zcash" : coin().name}</span>
+                </span>
+                <span className="flex items-center gap-3">
+                  <CopyText value={t.txid} head={8} tail={6} />
+                  <span className="text-xs text-slate-500 tabular-nums">{t.height != null ? `block ${t.height}` : "pending"}</span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-slate-500">Nothing on either chain yet.</p>
+        )}
+      </Group>
 
       <ChainsSee swap={swap} />
+
+      <Link to="/inspect" className="inline-flex items-center gap-1.5 rounded font-medium text-accent-700 underline-offset-4 hover:underline">
+        Open the developer view
+        <ArrowRight size={13} weight="bold" aria-hidden />
+      </Link>
     </div>
   );
 }
 
-// Whether a watchtower meets our deadlines if this daemon goes offline (ferryd --watchtower)
-function TowerBadge({ swap }: { swap: SwapView }) {
+function Group({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="space-y-2.5">
+      <h3 className="text-xs font-medium tracking-wider text-slate-500 uppercase">{title}</h3>
+      {children}
+    </section>
+  );
+}
+
+function Row({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="flex items-baseline justify-between gap-4">
+      <span className="shrink-0 text-slate-500">{label}</span>
+      <span className="min-w-0 text-right text-slate-900 tabular-nums">{value}</span>
+    </div>
+  );
+}
+
+// Whether a watchtower meets the deadlines if this Ferry node goes offline (ferryd --watchtower)
+function TowerRow({ swap }: { swap: SwapView }) {
   const t = swap.watchtower;
-  if (!t || t.status === "pending") return null;
-  return t.status === "armed" ? (
-    <StatusBadge variant="outline" className="border-brand-200 bg-brand-50/40 text-brand-700" title={t.note}>
-      <ShieldCheck size={11} weight="fill" />
-      Watchtower armed
-    </StatusBadge>
-  ) : (
-    <StatusBadge variant="outline" className="border-slate-300 text-slate-500" title={t.note}>
-      <ShieldSlash size={11} weight="fill" />
-      No watchtower
-    </StatusBadge>
-  );
-}
-
-function Banner({ tone, icon, children }: { tone: "info" | "warn"; icon: ReactNode; children: ReactNode }) {
+  if (!t) return <Row label="Watchtower" value="None" />;
+  const icon = t.status === "armed" ? <ShieldCheck size={14} weight="fill" className="text-emerald-600" aria-hidden /> : t.status === "refused" ? <ShieldSlash size={14} weight="fill" className="text-slate-500" aria-hidden /> : null;
+  const label = t.status === "armed" ? "Watchtower armed" : t.status === "refused" ? "No watchtower" : "Arming the watchtower";
   return (
-    <div className={`flex items-start gap-3 border px-5 py-4 ${tone === "warn" ? "border-slate-300 bg-slate-100" : "border-brand-200 bg-brand-50"}`}>
-      {icon}
-      <div className="min-w-0">{children}</div>
+    <div className="space-y-1">
+      <Row label="Watchtower" value={<span className="inline-flex items-center gap-1.5">{icon}{label}</span>} />
+      {t.note ? <p className="text-xs text-slate-500">{t.note}</p> : null}
     </div>
-  );
-}
-
-// The finished swap, like SealPad's centred result cards
-function Outcome({ swap, status }: { swap: SwapView; status: Status | null }) {
-  const phase = phaseOf(swap);
-  const a = amounts(swap, status);
-  const z = swap.role === "Z";
-  const lapsed = swap.timeline.some((e) => e.kind === "zec_lock_lapsed");
-  const lockedMine = !lapsed && swap.timeline.some((e) => e.kind === (z ? "zec_lock_broadcast" : "btc_lock_broadcast"));
-  const copy = {
-    done: { icon: <CheckCircle size={28} weight="duotone" className="mx-auto text-brand-500" />, title: z ? `You received ${a.btc}` : `You received ${a.zec}`, note: z ? `${a.zec} left your shielded wallet.` : `It's in your shielded wallet. You paid ${a.btc}.` },
-    settled: {
-      icon: <CheckCircle size={28} weight="duotone" className="mx-auto text-brand-500" />,
-      title: `You received ${a.btc}`,
-      note: `The other side stopped responding, so after the deadline the ${coin().asset} was released to you. Your ${a.zec} stays locked: you were paid for it.`,
-    },
-    refunded: {
-      icon: <ArrowCounterClockwise size={28} weight="duotone" className="mx-auto text-slate-500" />,
-      title: lockedMine ? `Your ${z ? a.zec : a.btc} is back in your wallet` : "Nothing left your wallet",
-      note: swap.timeline.some((e) => e.kind === "zec_lock_refused")
-        ? "Your wallet couldn't send the ZEC from shielded notes only, so the swap was called off before any ZEC moved."
-        : lapsed
-          ? "Your ZEC payment never reached the chain and has expired, so no ZEC moved. The swap was called off."
-          : "The swap didn't complete, so it was undone. Nothing changed hands.",
-    },
-    lost: {
-      icon: <Warning size={28} weight="duotone" className="mx-auto text-rose-600" />,
-      title: "The swap didn't complete in time",
-      note: `Your daemon was offline past the deadline, so the ${a.btc} went to the other side.`,
-    },
-  }[phase as "done" | "settled" | "refunded" | "lost"];
-  const caughtUp = useWalletCaughtUp(swap, status);
-  if (!caughtUp) {
-    // the chain has settled but the wallet hasn't shown it yet: don't contradict the header
-    return (
-      <Card>
-        <CardContent className="space-y-4 py-6 text-center">
-          <CircleNotch size={28} weight="bold" className="mx-auto animate-spin text-brand-500" />
-          <p className="text-lg font-semibold text-slate-900">Updating wallet…</p>
-          <p className="mx-auto max-w-md text-xs text-slate-500">The swap is finished on chain. Your wallet is picking up the result.</p>
-        </CardContent>
-      </Card>
-    );
-  }
-  return (
-    <Card>
-      <CardContent className="space-y-4 py-6 text-center">
-        {copy.icon}
-        <p className="text-lg font-semibold text-slate-900">{copy.title}</p>
-        <p className="mx-auto max-w-md text-xs text-slate-500">{copy.note}</p>
-        <Link to="/app" className="inline-block rounded bg-brand-500 px-8 py-3 font-semibold text-white transition-colors hover:bg-brand-600">
-          {phase === "done" || phase === "settled" ? "Swap again" : "Start a new swap"}
-        </Link>
-      </CardContent>
-    </Card>
   );
 }
 
@@ -274,63 +342,65 @@ function ChainsSee({ swap }: { swap: SwapView }) {
     const i = l.indexOf(": ");
     return i > 0 && i < 24 ? [l.slice(0, i), l.slice(i + 2)] : [null, l];
   };
+  const evm = coin().kind === "evm";
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>What each chain sees</CardTitle>
-      </CardHeader>
-      <CardContent className="grid gap-4 md:grid-cols-2">
-        <div className="space-y-2">
+    <Group title="What each chain sees">
+      <div className="grid gap-3">
+        <div className="rounded-2xl border border-slate-200 p-4">
           <div className="flex items-center justify-between">
-            <Label>Zcash</Label>
-            <StatusBadge variant="outline" className="border-brand-200 bg-brand-50/40 text-brand-700">
-              <Lock size={10} weight="fill" />
-              <ScrambleText text="ENCRYPTED" mode="live" speed={180} />
-            </StatusBadge>
+            <span className="font-medium text-slate-900">Zcash</span>
+            <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700">
+              <Lock size={10} weight="fill" aria-hidden />
+              Encrypted
+            </span>
           </div>
           {swap.observer.zec.length ? (
             swap.observer.zec.map((l, i) => {
               const [n, rest] = split(l);
               return (
-                <div key={i} className="rounded border border-slate-200 p-3 text-sm">
-                  {n ? <p className="font-mono text-xs text-slate-900">{n}</p> : null}
-                  <p className="mt-1 text-slate-600">{rest}</p>
-                  <p className="mt-2 font-mono text-xs break-all text-brand-600">
+                <div key={i} className="mt-3">
+                  {n ? <p className="text-xs font-medium text-slate-900">{n}</p> : null}
+                  <p className="mt-0.5 text-slate-600">{rest}</p>
+                  <p className="mt-1 font-mono text-xs break-all text-slate-400" aria-hidden>
                     <ScrambleText text="value 00000000 sender 0000000000 receiver 000000000" mode="live" speed={140} />
                   </p>
                 </div>
               );
             })
           ) : (
-            <p className="font-mono text-xs text-slate-500">Nothing yet.</p>
+            <p className="mt-2 text-slate-500">Nothing yet.</p>
           )}
         </div>
-        <div className="space-y-2">
+        <div className="rounded-2xl border border-slate-200 p-4">
           <div className="flex items-center justify-between">
-            <Label>{coin().name}</Label>
-            <StatusBadge variant="secondary">Public</StatusBadge>
+            <span className="font-medium text-slate-900">{coin().name}</span>
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700">Public</span>
           </div>
           {swap.observer.btc.length ? (
             swap.observer.btc.map((l, i) => {
               const [n, rest] = split(l);
               return (
-                <div key={i} className={`rounded border p-3 text-sm ${/key-path/.test(l) ? "border-brand-300 bg-brand-50/40" : "border-slate-200"}`}>
-                  {n ? <p className="font-mono text-xs text-slate-900">{n}</p> : null}
-                  <p className="mt-1 text-slate-600">{rest}</p>
+                <div key={i} className="mt-3">
+                  {n ? <p className="text-xs font-medium text-slate-900">{n}</p> : null}
+                  <p className="mt-0.5 text-slate-600">{rest}</p>
                 </div>
               );
             })
           ) : (
-            <p className="font-mono text-xs text-slate-500">Nothing yet.</p>
+            <p className="mt-2 text-slate-500">Nothing yet.</p>
           )}
         </div>
-        <div className="rounded border border-slate-200 bg-slate-50 p-4 text-sm md:col-span-2">
-          <Label>Can the two be linked?</Label>
-          <p className="mt-2 text-slate-700">No. The ZEC amount is encrypted, the shielded address was made for this swap and never published, and {coin().kind === "evm"
-            ? `the ${coin().name} side shows one key share only once a claim or refund publishes it, which opens nothing on its own and points to no note.`
-            : `the ${coin().name} side carries none of your Zcash keys.`}</p>
+        <div className="rounded-2xl bg-slate-50 p-4">
+          <p className="font-medium text-slate-900">Can the two be linked?</p>
+          <p className="mt-1 text-slate-600">
+            No. The ZEC amount is encrypted, the shielded address was made for this swap and never published, and{" "}
+            {evm
+              ? `the ${coin().name} side shows one key share only once a claim or refund publishes it, which opens nothing on its own and points to no note.`
+              : `the ${coin().name} side carries none of your Zcash keys.`}
+          </p>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </Group>
   );
 }
+

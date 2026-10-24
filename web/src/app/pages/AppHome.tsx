@@ -1,357 +1,391 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { ArrowDown, ArrowRight, ShieldCheck } from "@phosphor-icons/react";
-import { EVM_CHAINS, counterBalance, pairChain, pairCoin, pairId, startSwap, type CoinId, type Maker, type PairId, type Status, type SwapView } from "@/api";
-import { CHAIN_NAMES, amountIn, coin, coinInfo, zec } from "@/format";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { ArrowDown, ArrowRight, CaretDown, GearSix, ShieldCheck } from "@phosphor-icons/react";
+import { counterBalance, pairChain, startSwap, type Role, type Status, type SwapView } from "@/api";
+import { CHAIN_NAMES, amountIn, coin, zec } from "@/format";
 import { Link, navigate } from "@/router";
 import { btcText } from "@/swap/shared";
-import { phaseOf } from "@/swap/steps";
 import { roughDuration, typicalSeconds } from "@/swap/timing";
-import { Detail, Label, Layout } from "../components/Layout";
-import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
-import { StatusBadge } from "../components/ui/badge";
-import { Button } from "../components/ui/button";
-import { CoinMark } from "../components/CoinMark";
-import { MakerList } from "../components/MakerList";
+import { Layout } from "../components/Layout";
+import { PairLogo, TokenLogo } from "../components/Logos";
+import { PartnerList } from "../components/MakerList";
+import { TokenPicker, tokenSubtitle } from "../components/TokenPicker";
+import { Sheet } from "../components/ui/sheet";
 import { cn } from "../lib/utils";
 import { useLocal } from "../lib/daemon";
-import { quoteOf, selectable, useMakers, type Makers, type Quote } from "../lib/makers";
-import { STATUS, amounts, direction, summary } from "../lib/swaps";
+import { capacity, counterFor, liveQuote, quoteOf, useMakers, type Makers, type Quote } from "../lib/makers";
+import { pairName } from "../lib/pairs";
+import { plainSummary } from "../lib/progress";
 
-// /app: pick the coin, then a swap card (what you send, what you receive) beside the makers you
-// can swap with, and this party's swaps below.
+// /app: one swap card. Sell (shielded ZEC) on top, Buy (the coin picked from "Select a token")
+// below, the rate from the best partner, and one Swap button. The partner and the details are
+// behind the settings pill above the card.
+
+// what the ZEC lock's network fee needs on top of the amount (ferry-zec's SEND_FEE_RESERVE)
+const ZEC_FEE_RESERVE = 50_000;
+
 export function AppHome() {
   const d = useLocal();
   const live = d.list.find((s) => !s.outcome);
-  const makers = useMakers();
-  const [pick, setPick] = useState<string | null>(null);
-  // the picked maker while it takes swaps, else the first one that does
-  const usable = makers.list?.filter((m) => selectable(m, d.role)) ?? [];
-  const maker = usable.find((m) => m.name === pick) ?? usable[0] ?? null;
-
   return (
     <Layout>
-      <div className="space-y-12">
-        <div className="flex flex-col items-center text-center">
-          <p className="font-mono text-xs tracking-widest text-brand-600 uppercase">Shielded atomic swaps</p>
-          <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-900 md:text-4xl">{d.role === "Z" ? "Swap shielded ZEC" : "Buy shielded ZEC"}</h1>
-          <p className="mt-2 text-slate-600">No bridge. No custodian. Your ZEC never leaves the shielded pool.</p>
-          <PairToggle />
-        </div>
-
-        {live ? (
-          <Link
-            to={`/app/swap/${live.id}`}
-            className="flex items-center justify-between gap-4 border border-brand-200 bg-brand-50/50 px-5 py-3 text-sm text-slate-900 transition-colors hover:border-brand-300"
-          >
-            <span>
-              <span className="font-semibold">A swap is in progress.</span> <span className="text-slate-600">{summary(live, d.status)}</span>
-            </span>
-            <span className="inline-flex shrink-0 items-center gap-1.5 font-medium text-brand-600">
-              Open it <ArrowRight size={14} weight="bold" />
-            </span>
-          </Link>
-        ) : null}
-
-        <div className="grid grid-cols-1 items-stretch gap-6 lg:grid-cols-2">
-          <SwapCard status={d.status} makers={makers} maker={maker} busySwap={live} />
-          <MakerList makers={makers.list} role={d.role} selected={maker?.name ?? null} onSelect={setPick} fetchedAt={makers.fetchedAt} now={makers.now} error={makers.error} />
-        </div>
-
-        <div className="space-y-4">
-          <div className="flex items-baseline justify-between">
-            <h2 className="text-xl font-semibold tracking-tight text-slate-900">My swaps</h2>
-            <Label>
-              ZEC ⇄ {coin().ticker} · {d.list.length} total
-            </Label>
-          </div>
-          {d.list.length === 0 ? (
-            <Card>
-              <CardContent className="py-16 text-center text-slate-500">
-                <ShieldCheck size={28} weight="duotone" className="mx-auto mb-3 text-brand-500" />
-                <p>No {coin().ticker} swaps yet. Your first one shows up here.</p>
-              </CardContent>
-            </Card>
-          ) : (
-            <div className="grid gap-4">
-              {d.list.map((s) => (
-                <SwapRow key={s.id} swap={s} status={d.status} />
-              ))}
-            </div>
-          )}
-        </div>
+      <div className="mx-auto w-full max-w-[480px]">
+        {live ? <LiveBanner swap={live} status={d.status} /> : null}
+        <SwapCard status={d.status} busySwap={live} />
       </div>
     </Layout>
   );
 }
 
-// What the ZEC is swapped for: the coin, and for a token (USDC, WETH) the chain it's on. A pair
-// without a daemon on this server can't be picked.
-const COINS: CoinId[] = ["btc", "ltc", "usdc", "weth"];
-
-function PairToggle() {
-  const { pairs, pair, choosePair } = useLocal();
-  const has = (id: PairId) => !!pairs.find((p) => p.id === id)?.daemon;
-  const active = pairCoin(pair);
-  const evm = active === "usdc" || active === "weth";
-  // a token keeps the chain on screen when it can, else its first chain with a daemon
-  const pickCoin = (c: CoinId) => {
-    if (c === "btc" || c === "ltc") return choosePair(c);
-    const same = pairId(c, pairChain(pair));
-    choosePair(has(same) ? same : (EVM_CHAINS.map((ch) => pairId(c, ch)).find(has) ?? same));
-  };
+function LiveBanner({ swap, status }: { swap: SwapView; status: Status | null }) {
   return (
-    <div className="mt-8 flex w-full flex-col items-center gap-3">
-      <Segments label="What you swap ZEC for">
-        {COINS.map((c) => {
-          const info = coinInfo(c);
-          const can = c === "btc" || c === "ltc" ? has(c) : EVM_CHAINS.some((ch) => has(pairId(c, ch)));
-          return (
-            <Segment key={c} active={c === active} can={can} title={can ? info.asset : `This server has no ${info.ticker} daemon`} onClick={() => pickCoin(c)}>
-              <CoinMark id={c} size={18} className={can || c === active ? undefined : "opacity-40"} />
-              <span className="font-mono text-xs tracking-[0.14em] uppercase">{info.ticker}</span>
-            </Segment>
-          );
-        })}
-      </Segments>
-      {evm ? (
-        <div className="flex items-center gap-3">
-          <Label>On</Label>
-          <Segments label={`Chain for ${coinInfo(active).ticker}`} small>
-            {EVM_CHAINS.map((ch) => {
-              const id = pairId(active, ch);
-              return (
-                <Segment key={ch} small active={id === pair} can={has(id)} title={has(id) ? CHAIN_NAMES[ch] : `This server has no ${coinInfo(active).ticker} daemon on ${CHAIN_NAMES[ch]}`} onClick={() => choosePair(id)}>
-                  <span className="text-xs">{CHAIN_NAMES[ch]}</span>
-                </Segment>
-              );
-            })}
-          </Segments>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function Segments({ label, small, children }: { label: string; small?: boolean; children: ReactNode }) {
-  return (
-    <div role="radiogroup" aria-label={label} className={cn("inline-flex max-w-full overflow-x-auto border border-slate-200 bg-white", small ? "p-0.5" : "p-1")}>
-      {children}
-    </div>
-  );
-}
-
-function Segment({ active, can, small, title, onClick, children }: { active: boolean; can: boolean; small?: boolean; title: string; onClick: () => void; children: ReactNode }) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={active}
-      disabled={!can}
-      title={title}
-      onClick={onClick}
-      className={cn(
-        "flex shrink-0 items-center gap-2 transition-colors focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-brand-500/30 sm:gap-2.5",
-        small ? "px-3 py-1.5" : "px-3 py-2 sm:px-5",
-        active ? "bg-slate-900 text-white" : can ? "text-slate-700 hover:bg-slate-50" : "cursor-not-allowed text-slate-300",
-      )}
+    <Link
+      to={`/app/swap/${swap.id}`}
+      className="mb-5 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm transition-colors hover:border-slate-300 hover:bg-white"
     >
-      {children}
-    </button>
+      <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-slate-400 opacity-60 motion-reduce:animate-none" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-slate-900" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="font-medium text-slate-900">You have a swap in progress</span>
+        <span className="block truncate text-slate-500">{plainSummary(swap, status)}</span>
+      </span>
+      <span className="inline-flex shrink-0 items-center gap-1 font-medium text-slate-900">
+        View <ArrowRight size={14} weight="bold" aria-hidden />
+      </span>
+    </Link>
   );
 }
 
-function SwapCard({ status, makers, maker, busySwap }: { status: Status | null; makers: Makers; maker: Maker | null; busySwap?: SwapView }) {
+function SwapCard({ status, busySwap }: { status: Status | null; busySwap?: SwapView }) {
   const { role, bt, daemon, pair } = useLocal();
-  // with a maker directory the quote is the chosen maker's offer; an older server without one
-  // leaves the daemon's own offer
-  const offer: Quote | null = makers.list
-    ? maker && quoteOf(maker)
-    : makers.list === null && status
-      ? { rate: status.offer.rate_sat_per_zec, min: status.offer.min_zat, max: status.offer.max_zat, fee: status.offer.fee_sat ?? null, liquidity: null }
-      : null;
+  const makers = useMakers();
+  const [pick, setPick] = useState<string | null>(null);
   const [amount, setAmount] = useState("1.00");
   const [touched, setTouched] = useState(false);
-  // a host can cap swaps below the default amount (the public demo does): start at the cap
-  useEffect(() => {
-    const max = offer?.max;
-    if (!touched && max != null && max < 1e8) setAmount(zec(max));
-  }, [offer?.max, touched]);
   const [busy, setBusy] = useState(false);
   const [fail, setFail] = useState<string | null>(null);
-  useEffect(() => setFail(null), [pair]);
+  const [picker, setPicker] = useState(false);
+  const [settings, setSettings] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    setFail(null);
+    setPick(null);
+  }, [pair]);
+
   const zat = Math.round(Number(amount) * 1e8);
   const valid = amount.trim() !== "" && Number.isFinite(zat) && zat > 0;
-  const gross = offer && valid ? Math.round((zat / 1e8) * offer.rate) : 0;
-  // Z receives the locked amount less the fee of the transaction that pays it out
-  const btcSide = btcText(role === "Z" ? Math.max(0, gross - (offer?.fee ?? 0)) : gross);
-  const evm = coin().kind === "evm";
+  const { maker, quote, usable, skipped } = liveQuote(makers, status, role, valid ? zat : 0, pick);
 
-  let problem: string | null = null;
-  if (amount.trim() === "") problem = "Enter how much ZEC.";
-  else if (!valid) problem = "Enter an amount, like 1.00.";
-  else if (makers.list && !maker) problem = `No maker is taking ${coin().ticker} swaps right now.`;
-  else if (offer) {
-    if (zat < offer.min) problem = `The smallest swap is ${zec(offer.min)} ZEC.`;
-    else if (zat > offer.max) problem = `The largest swap is ${zec(offer.max)} ZEC.`;
-    else if (offer.liquidity != null && zat > offer.liquidity) problem = `${maker?.name ?? "The maker"} can fill up to ${zec(offer.liquidity)} ZEC right now.`;
-    else if (role === "Z" && status && zat > status.balances.zec_shielded_zat) problem = `You have ${zec(status.balances.zec_shielded_zat)} shielded ZEC.`;
-    else if (role === "B" && status && gross > counterBalance(status)) problem = `You have ${btcText(counterBalance(status))} ${coin().ticker}.`;
-  }
+  // a host can cap swaps below the default amount (the public demo does): start at the cap
+  const cap = makers.list === null ? quote?.max : usable.length ? Math.max(...usable.map((m) => (quoteOf(m) ? capacity(quoteOf(m)!) : 0))) : undefined;
+  useEffect(() => {
+    if (!touched && cap != null && cap > 0 && cap < 1e8) setAmount(zec(cap));
+  }, [cap, touched]);
+
+  const out = quote && valid ? counterFor(quote, zat, role) : 0;
+  const ticker = coin().ticker;
+  const name = pairName(pair);
+  const zecBal = status?.balances.zec_shielded_zat ?? null;
+  const coinBal = status ? counterBalance(status) : null;
+
+  const problem = problemOf({ amount, valid, zat, role, makers, quote, maker, usable, status, gross: quote && valid ? Math.round((zat / 1e8) * quote.rate) : 0 });
   const blocked = busySwap ? "Finish the swap in progress first." : null;
 
+  // the most this party can swap: its balance (less the lock's fee for ZEC), within what a partner takes
+  const most = (() => {
+    const partnerMax = cap ?? Infinity;
+    if (role === "Z") return zecBal == null ? null : Math.max(0, Math.min(zecBal - ZEC_FEE_RESERVE, partnerMax));
+    return coinBal == null || !quote ? null : Math.max(0, Math.min(Math.floor((coinBal * 1e8) / quote.rate), partnerMax));
+  })();
+  const setMax = () => {
+    if (most == null) return;
+    setTouched(true);
+    // 4.9995, or 5.00 for a round amount
+    const [whole, frac = ""] = (most / 1e8).toFixed(8).replace(/0+$/, "").split(".");
+    setAmount(`${whole}.${frac.padEnd(2, "0")}`);
+    input.current?.focus();
+  };
+
   const submit = async () => {
-    if (problem || blocked || busy || !offer) return;
+    if (problem || blocked || busy || !quote) return;
     setBusy(true);
     setFail(null);
     try {
       const { id } = await startSwap(zat, daemon, maker?.name);
       navigate(`/app/swap/${id}`);
     } catch (e) {
-      setFail((e as Error).message);
+      setFail(plainError((e as Error).message));
     } finally {
       setBusy(false);
     }
   };
 
-  const zecBalance = status ? `${zec(status.balances.zec_shielded_zat)} ZEC` : "–";
-  const coinBalance = status ? `${amountIn(counterBalance(status), coin())} ${coin().ticker}` : "–";
+  const message = problem ?? blocked ?? fail;
+  const evm = coin().kind === "evm";
+  // this Ferry node only ever sells (or, holding the other coin, only buys) shielded ZEC
+  const zecTip = role === "Z" ? "Ferry sells your shielded ZEC" : "Ferry buys shielded ZEC for you";
+  const zecPanel = (
+    <Panel
+      label={role === "Z" ? "Sell" : "Buy"}
+      onClick={() => input.current?.focus()}
+      pill={
+        <span className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-slate-200 bg-white pr-3.5 pl-1.5 shadow-[0_1px_2px_rgba(24,24,27,0.06)]" title={zecTip}>
+          <TokenLogo id="zec" size={28} />
+          <span className="text-[15px] font-semibold text-slate-900">ZEC</span>
+        </span>
+      }
+      foot={
+        <>
+          <span className="tabular-nums">{zecBal == null ? "Balance –" : `Balance ${zec(zecBal)} ZEC`}</span>
+          {role === "Z" ? (
+            <button type="button" onClick={setMax} disabled={most == null} className="rounded-full px-2 py-0.5 text-xs font-semibold text-slate-900 transition-colors hover:bg-slate-200/70 disabled:text-slate-400">
+              Max
+            </button>
+          ) : null}
+        </>
+      }
+    >
+      <input
+        ref={input}
+        inputMode="decimal"
+        autoComplete="off"
+        aria-label={role === "Z" ? "ZEC to sell" : "ZEC to buy"}
+        placeholder="0"
+        value={amount}
+        onChange={(e) => {
+          setTouched(true);
+          setAmount(e.target.value.replace(",", "."));
+        }}
+        aria-invalid={!!problem && valid}
+        aria-describedby="swap-message"
+        className={cn(
+          "h-12 w-full min-w-0 bg-transparent leading-none font-medium tracking-tight text-slate-900 tabular-nums placeholder:text-slate-300 focus:outline-none focus-visible:outline-none",
+          amountSize(amount),
+        )}
+      />
+    </Panel>
+  );
+  const coinPanel = (
+    <Panel
+      label={role === "Z" ? "Buy" : "Pay with"}
+      pill={
+        <button
+          type="button"
+          onClick={() => setPicker(true)}
+          aria-haspopup="dialog"
+          aria-label={`${role === "Z" ? "You get" : "You pay with"} ${name.noun}. Choose another coin`}
+          className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-slate-200 bg-white pr-3 pl-1.5 shadow-[0_1px_2px_rgba(24,24,27,0.06)] transition-colors hover:border-slate-300 hover:bg-slate-50"
+        >
+          <PairLogo pair={pair} size={28} />
+          <span className="text-[15px] font-semibold text-slate-900">{name.label}</span>
+          <CaretDown size={14} weight="bold" className="text-slate-500" aria-hidden />
+        </button>
+      }
+      foot={
+        <>
+          <span className="truncate">{tokenSubtitle(pair)}</span>
+          <span className="shrink-0 tabular-nums">{coinBal == null ? null : `Balance ${btcText(coinBal)} ${ticker}`}</span>
+        </>
+      }
+    >
+      <output
+        aria-live="polite"
+        aria-label={role === "Z" ? `You get ${ticker}` : `You pay ${ticker}`}
+        className={cn("flex h-12 items-center truncate leading-none font-medium tracking-tight tabular-nums", amountSize(out ? btcText(out) : "0"), out ? "text-slate-900" : "text-slate-300")}
+      >
+        {out ? btcText(out) : "0"}
+      </output>
+    </Panel>
+  );
 
   return (
-    <form
-      className="flex min-w-0 flex-col border border-slate-200 bg-white p-3"
-      onSubmit={(e) => {
-        e.preventDefault();
-        submit();
-      }}
-    >
-      <Panel
-        label={role === "Z" ? "You send" : "You receive"}
-        side={`Balance ${zecBalance}`}
-        chip={<Chip id="zec" ticker="ZEC" />}
-        note={role === "Z" ? "From your shielded balance. Nothing about it shows on chain." : "Into your shielded wallet. Nothing about it shows on chain."}
-        editable
-      >
-        <input
-          inputMode="decimal"
-          autoComplete="off"
-          aria-label={role === "Z" ? "ZEC to send" : "ZEC to receive"}
-          value={amount}
-          onChange={(e) => {
-            setTouched(true);
-            setAmount(e.target.value);
-          }}
-          aria-invalid={!!problem}
-          className="w-full min-w-0 bg-transparent font-mono text-4xl font-medium tracking-tight text-slate-900 outline-none"
-        />
-      </Panel>
-
-      <div className="relative z-10 -my-3.5 flex justify-center" aria-hidden>
-        <span className="flex h-9 w-9 items-center justify-center border border-slate-200 bg-white text-slate-500">
-          <ArrowDown size={16} weight="bold" />
-        </span>
+    <>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold tracking-tight text-slate-900">{role === "Z" ? "Swap" : "Buy ZEC"}</h1>
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setSettings(true)}
+            aria-haspopup="dialog"
+            aria-label={`Settings: partner ${maker?.name ?? "none"}${pick ? "" : " (best rate)"}`}
+            className="inline-flex h-9 items-center gap-2 rounded-full border border-slate-200 bg-white pr-2.5 pl-3.5 text-sm text-slate-700 shadow-[0_1px_2px_rgba(24,24,27,0.04)] transition-colors hover:border-slate-300 hover:text-slate-900"
+          >
+            {pick ? null : <span className="text-slate-500">Auto</span>}
+            <span className="max-w-[9rem] truncate font-medium text-slate-900">{maker?.name ?? (makers.list === null ? "Partner" : "No partner")}</span>
+            <GearSix size={16} weight="bold" className="text-slate-500" aria-hidden />
+          </button>
+          <Sheet anchored open={settings} onClose={() => setSettings(false)} title="Swap settings">
+            <Section title="Swap partner" note="Each partner sets its own rate. None of them can take your coins.">
+              <PartnerList makers={makers.list} role={role} zat={valid ? zat : 0} pick={pick} current={maker?.name ?? null} onPick={setPick} fetchedAt={makers.fetchedAt} now={makers.now} error={makers.error} />
+            </Section>
+            <Section title="Details" last>
+              <dl className="space-y-3 px-5 text-sm">
+                <Fact label="Network fee" value={evm ? `A little ETH for gas on ${CHAIN_NAMES[pairChain(pair) ?? "base"]}` : quote?.fee != null ? `${amountIn(quote.fee, coin())} ${ticker}${role === "Z" ? ", taken from what you get" : ""}` : "–"} />
+                <Fact label="Typical time" value={status ? capital(roughDuration(typicalSeconds(status, bt))) : "–"} />
+                <Fact label="If it fails" value={`Your ${role === "Z" ? "ZEC" : ticker} comes back automatically after the deadline.`} />
+                <Fact label="Privacy" value="Your ZEC stays shielded, and nothing on either chain links the two sides." />
+              </dl>
+            </Section>
+          </Sheet>
+        </div>
       </div>
 
-      <Panel
-        label={role === "Z" ? "You receive" : "You pay"}
-        side={`Balance ${coinBalance}`}
-        chip={<Chip id={pairCoin(pair)} ticker={coin().ticker} />}
-        note={evm ? `On ${coin().name}, in the open, like any token transfer.` : `On ${coin().name}, in the open, like any ${coin().name} payment.`}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
       >
-        <span className={cn("block truncate font-mono text-4xl font-medium tracking-tight", valid && offer ? "text-slate-900" : "text-slate-300")}>{valid && offer ? btcSide : "0"}</span>
-      </Panel>
+        <div className="flex flex-col">
+          {zecPanel}
+          <div className="relative z-10 -my-[18px] flex justify-center" aria-hidden title={zecTip}>
+            <span className="flex h-10 w-10 items-center justify-center rounded-2xl border-4 border-white bg-slate-100 text-slate-700">
+              <ArrowDown size={16} weight="bold" />
+            </span>
+          </div>
+          {coinPanel}
+        </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-2 pt-4 pb-3 font-mono text-xs text-slate-600">
-        <span>{offer ? `1 ZEC = ${btcText(offer.rate)} ${coin().ticker}` : "No rate yet"}</span>
-        <span className="text-slate-500">{maker ? `via ${maker.name}` : null}</span>
-      </div>
+        <div className="mt-3 min-h-5 px-1 text-[13px] text-slate-500">
+          {quote ? (
+            <p>
+              <span className="text-slate-700 tabular-nums">
+                1 ZEC = {btcText(quote.rate)} {ticker}
+              </span>
+              {maker ? ` · from ${maker.name}` : null}
+            </p>
+          ) : makers.list === undefined ? (
+            <p>Finding the best rate…</p>
+          ) : null}
+          {skipped && quote && maker ? (
+            <p className="mt-0.5">
+              {skipped.name} can fill up to {zec(capacity(quoteOf(skipped)!))} ZEC right now, so {maker.name} takes this one.
+            </p>
+          ) : null}
+        </div>
 
-      <Button type="submit" size="none" className="h-13 w-full text-base" disabled={!status || !offer || !!problem || !!blocked || busy}>
-        {busy ? "Starting…" : `Swap for ${coin().ticker}`}
-      </Button>
-
-      {problem || fail || blocked ? (
-        <p className="mt-3 border border-rose-100 bg-rose-50 px-3 py-2 text-sm text-rose-700" role="alert">
-          {problem ?? fail ?? blocked}
+        <button
+          type="submit"
+          disabled={!status || !quote || !!problem || !!blocked || busy}
+          className="mt-3 flex h-14 w-full items-center justify-center rounded-2xl bg-slate-900 text-base font-semibold text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+        >
+          {busy ? "Starting…" : "Swap"}
+        </button>
+        <p id="swap-message" role={message ? "alert" : undefined} className={cn("mt-3 text-center text-sm", !message ? "sr-only" : message === blocked ? "text-slate-600" : "text-rose-600")}>
+          {message ?? ""}
         </p>
-      ) : null}
+      </form>
 
-      <dl className="mt-3 grid grid-cols-3 gap-3 border-t border-slate-100 px-2 pt-4 pb-1">
-        <Fact label="Network fee" value={evm ? "Gas, in ETH" : offer?.fee != null ? `${offer.fee.toLocaleString("en-US")} ${coin().unit}` : "–"} />
-        <Fact label="Takes" value={status ? capital(roughDuration(typicalSeconds(status, bt))) : "–"} />
-        <Fact label="If it fails" value="Coins come back" />
-      </dl>
-    </form>
+      <p className="mt-6 flex items-start justify-center gap-2 text-center text-[13px] text-slate-500">
+        <ShieldCheck size={16} weight="regular" className="mt-px shrink-0" aria-hidden />
+        <span>Your ZEC stays shielded. If the swap stops, your coins come back.</span>
+      </p>
+
+      <TokenPicker open={picker} onClose={() => setPicker(false)} makers={makers} role={role} />
+    </>
   );
 }
 
-// One side of the swap: what it is, how much, the coin, and a line on where it goes.
-function Panel({ label, side, chip, note, editable, children }: { label: string; side: string; chip: ReactNode; note: string; editable?: boolean; children: ReactNode }) {
+// One plain sentence for what stops the swap, or null.
+function problemOf({
+  amount,
+  valid,
+  zat,
+  role,
+  makers,
+  quote,
+  maker,
+  usable,
+  status,
+  gross,
+}: {
+  amount: string;
+  valid: boolean;
+  zat: number;
+  role: Role;
+  makers: Makers;
+  quote: Quote | null;
+  maker: { name: string } | null;
+  usable: unknown[];
+  status: Status | null;
+  gross: number;
+}): string | null {
+  if (amount.trim() === "") return "Enter how much ZEC.";
+  if (!valid) return "Enter an amount, like 1.00.";
+  if (makers.list && !usable.length) return `No partner is taking ${coin().ticker} swaps right now. Try again in a minute.`;
+  if (role === "Z" && status) {
+    const bal = status.balances.zec_shielded_zat;
+    if (zat > bal) return `That's more than your ${zec(bal)} ZEC.`;
+    if (zat > bal - ZEC_FEE_RESERVE) return "Leave 0.0005 ZEC for the network fee, or use Max.";
+  }
+  if (role === "B" && status && gross > counterBalance(status)) return `That costs more than your ${btcText(counterBalance(status))} ${coin().ticker}.`;
+  if (quote) {
+    if (zat < quote.min) return `The smallest swap${maker ? ` with ${maker.name}` : ""} is ${zec(quote.min)} ZEC.`;
+    if (zat > capacity(quote)) return `The largest swap right now is ${zec(capacity(quote))} ZEC.`;
+  }
+  return null;
+}
+
+// The daemon's and proxy's errors, for people: the details stay in the developer view.
+function plainError(raw: string): string {
+  if (/already in progress/i.test(raw)) return "Finish the swap in progress first.";
+  if (/api token/i.test(raw)) return "Your Ferry node refused this page. Check how the app was started.";
+  if (/reach the daemon|unreachable|connection refused|timed? ?out/i.test(raw)) return "Couldn't reach your partner or your Ferry node. Try again in a moment.";
+  if (/not making offers|paused/i.test(raw)) return "That partner just stopped taking swaps. Try again, or pick another one in settings.";
+  if (/unknown maker/i.test(raw)) return "That partner isn't listed here any more. Pick another one in settings.";
+  if (/does not have enough shielded/i.test(raw)) return "You don't have enough shielded ZEC for this amount.";
+  if (/does not have enough|not enough liquidity|liquidity/i.test(raw)) return "Your partner can't cover this amount right now. Try a smaller one.";
+  return raw.replace(/\bdaemon\b/gi, "Ferry node").replace(/\bmaker\b/gi, "partner");
+}
+
+function Panel({ label, pill, foot, onClick, children }: { label: string; pill: ReactNode; foot: ReactNode; onClick?: () => void; children: ReactNode }) {
   return (
-    <label
+    <div
+      onClick={(e) => {
+        if (onClick && !(e.target as HTMLElement).closest("button")) onClick();
+      }}
       className={cn(
-        "block border bg-slate-50 px-5 pt-4 pb-4",
-        editable ? "border-slate-200 focus-within:border-brand-500 focus-within:bg-white focus-within:ring-3 focus-within:ring-brand-500/20" : "border-slate-200",
+        "rounded-3xl border border-slate-200/70 bg-slate-50 px-5 pt-4 pb-4 transition-colors",
+        onClick && "has-[input:focus]:border-slate-300 has-[input:focus]:bg-white",
       )}
     >
-      <span className="flex items-baseline justify-between gap-4">
-        <Label>{label}</Label>
-        <span className="font-mono text-[11px] text-slate-500">{side}</span>
-      </span>
-      <span className="mt-3 flex items-center gap-4">
-        <span className="min-w-0 flex-1">{children}</span>
-        {chip}
-      </span>
-      <span className="mt-3 block text-xs text-slate-500">{note}</span>
-    </label>
+      <p className="text-xs font-medium tracking-wider text-slate-500 uppercase">{label}</p>
+      <div className="mt-3 flex items-center gap-3">
+        <div className="min-w-0 flex-1">{children}</div>
+        {pill}
+      </div>
+      <div className="mt-3 flex min-h-6 items-center justify-between gap-3 text-[13px] text-slate-500">{foot}</div>
+    </div>
   );
 }
 
-function Chip({ id, ticker }: { id: CoinId | "zec"; ticker: string }) {
+function Section({ title, note, last, children }: { title: string; note?: string; last?: boolean; children: ReactNode }) {
   return (
-    <span className="inline-flex h-10 shrink-0 items-center gap-2 border border-slate-200 bg-white pr-3.5 pl-2.5">
-      <CoinMark id={id} size={22} />
-      <span className="font-mono text-sm font-medium tracking-wider text-slate-900">{ticker}</span>
-    </span>
+    <section className={cn("pt-1", last ? "pb-5" : "border-b border-slate-100 pb-3")}>
+      <h3 className="px-5 text-xs font-medium tracking-wider text-slate-500 uppercase">{title}</h3>
+      {note ? <p className="mt-1 px-5 text-[13px] text-slate-500">{note}</p> : null}
+      <div className="mt-2">{children}</div>
+    </section>
   );
 }
 
 const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-function Fact({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-0">
-      <dt className="font-mono text-[10px] tracking-widest text-slate-500 uppercase">{label}</dt>
-      <dd className="mt-1 text-sm text-slate-900">{value}</dd>
-    </div>
-  );
+// Big amounts step down as they get longer, so 0.0041035 fits beside the coin pill on a phone.
+function amountSize(text: string): string {
+  const n = text.length;
+  if (n <= 6) return "text-[36px] sm:text-[40px]";
+  if (n <= 9) return "text-[30px] sm:text-[38px]";
+  if (n <= 12) return "text-[25px] sm:text-[32px]";
+  return "text-[21px] sm:text-[27px]";
 }
 
-function SwapRow({ swap, status }: { swap: SwapView; status: Status | null }) {
-  const phase = phaseOf(swap);
-  const st = STATUS[phase];
-  const a = amounts(swap, status);
-  const started = swap.timeline[0]?.at;
-  const settled = phase === "done" || phase === "settled";
+function Fact({ label, value }: { label: string; value: string }) {
   return (
-    <Link to={`/app/swap/${swap.id}`} className="group block">
-      <Card className="transition-all hover:shadow-sm hover:ring-brand-300">
-        <CardHeader className="flex flex-row items-center justify-between pb-3">
-          <CardTitle className="inline-flex items-center gap-2 text-base font-semibold text-slate-900">
-            <span>Swap</span>
-            <span className="font-mono text-xs text-slate-500">{`${swap.id.slice(0, 6)}...${swap.id.slice(-4)}`}</span>
-          </CardTitle>
-          <StatusBadge variant={st.tone}>{st.label}</StatusBadge>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 gap-4 text-sm md:grid-cols-4">
-            <Detail label="Type" value={direction(swap.role)} />
-            <Detail label={swap.role === "Z" ? "You send" : "You pay"} value={<span className="font-mono">{swap.role === "Z" ? a.zec : a.btc}</span>} />
-            <Detail label={swap.role === "Z" ? "You receive" : "You receive"} value={<span className="font-mono">{swap.role === "Z" ? a.btc : a.zec}</span>} />
-            <Detail label="Started" value={<span className="font-mono">{started ? new Date(started).toLocaleString() : "–"}</span>} />
-          </div>
-          <p className={`mt-3 ${settled ? "text-sm font-medium text-brand-600" : "font-mono text-xs text-slate-500"}`}>{summary(swap, status)}</p>
-        </CardContent>
-      </Card>
-    </Link>
+    <div className="flex gap-4">
+      <dt className="w-28 shrink-0 text-slate-500">{label}</dt>
+      <dd className="min-w-0 text-slate-900">{value}</dd>
+    </div>
   );
 }

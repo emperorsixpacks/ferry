@@ -42,13 +42,13 @@ export function Safety() {
     <Layout>
       <div className="space-y-8">
         <div className="space-y-4">
-          <p className="font-mono text-xs tracking-widest text-brand-600">DOCUMENTATION</p>
+          <p className="font-mono text-xs tracking-widest text-slate-600">DOCUMENTATION</p>
           <h1 className="text-3xl font-bold tracking-tight text-slate-900">What could go wrong</h1>
           <p className="max-w-3xl text-slate-600">
             Who you have to trust, what happens if the other side disappears or cheats, what they and everyone else get to see, and the limits we know about.
           </p>
           <div className="flex flex-wrap items-center gap-3 pt-1">
-            <StatusBadge variant="outline" className="border-brand-200 bg-brand-50/40 text-brand-700">
+            <StatusBadge variant="outline" className="border-slate-200 bg-slate-50 text-slate-700">
               <ShieldCheck size={10} weight="fill" />
               Threat model
             </StatusBadge>
@@ -67,9 +67,9 @@ export function Safety() {
                   <a
                     key={s.id}
                     href={`#${s.id}`}
-                    className={`-ml-px flex items-center gap-3 border-l-2 py-2 pl-3 text-sm transition-colors ${on ? "border-brand-500 font-semibold text-brand-600" : "border-transparent text-slate-600 hover:text-slate-900"}`}
+                    className={`-ml-px flex items-center gap-3 border-l-2 py-2 pl-3 text-sm transition-colors ${on ? "border-slate-900 font-semibold text-slate-600" : "border-transparent text-slate-600 hover:text-slate-900"}`}
                   >
-                    <span className={`font-mono text-[10px] tracking-widest ${on ? "text-brand-500" : "text-slate-400"}`}>{String(i + 1).padStart(2, "0")}</span>
+                    <span className={`font-mono text-[10px] tracking-widest ${on ? "text-slate-900" : "text-slate-400"}`}>{String(i + 1).padStart(2, "0")}</span>
                     <span>{s.label}</span>
                   </a>
                 );
@@ -78,7 +78,7 @@ export function Safety() {
           </aside>
 
           <div className="min-w-0 space-y-12">
-            <Section id="trust" n="01" eyebrow="Who you trust" icon={<ShieldCheck size={18} weight="duotone" className="text-brand-500" />} title="Nobody holds your coins, ever">
+            <Section id="trust" n="01" eyebrow="Who you trust" icon={<ShieldCheck size={18} weight="duotone" className="text-slate-900" />} title="Nobody holds your coins, ever">
               <p>
                 There is no exchange, bridge or Ferry server in the middle. At every moment your coins are either in your wallet or locked where the two
                 blockchains' own rules decide who gets them. What you do rely on:
@@ -86,12 +86,12 @@ export function Safety() {
               <Trust />
             </Section>
 
-            <Section id="whatif" n="02" eyebrow="What if…" icon={<Lightning size={18} weight="duotone" className="text-brand-500" />} title="Pick what goes wrong">
+            <Section id="whatif" n="02" eyebrow="What if…" icon={<Lightning size={18} weight="duotone" className="text-slate-900" />} title="Pick what goes wrong">
               <p>You have ZEC and want bitcoin; the other side has bitcoin and wants ZEC. They always lock first. Choose a situation to see where both coins end up.</p>
               <WhatIf />
             </Section>
 
-            <Section id="online" n="03" eyebrow="Your one job" icon={<Clock size={18} weight="duotone" className="text-brand-500" />} title="Stay online, or arm a watchtower">
+            <Section id="online" n="03" eyebrow="Your one job" icon={<Clock size={18} weight="duotone" className="text-slate-900" />} title="Stay online, or arm a watchtower">
               <p>
                 Ferry watches the deadlines and acts for you, but only while it is running. This is true of every swap of this kind, not just Ferry. Being late
                 costs the bitcoin side more than the ZEC side. If you can't stay online, a watchtower can meet the deadlines for you.
@@ -100,12 +100,12 @@ export function Safety() {
               <Watchtower />
             </Section>
 
-            <Section id="them" n="04" eyebrow="What they learn" icon={<Eye size={18} weight="duotone" className="text-brand-500" />} title="The other side sees the swap, not you">
+            <Section id="them" n="04" eyebrow="What they learn" icon={<Eye size={18} weight="duotone" className="text-slate-900" />} title="The other side sees the swap, not you">
               <p>Both sides can watch the one shared address made for this swap. That's all they can watch.</p>
               <Them />
             </Section>
 
-            <Section id="world" n="05" eyebrow="What the world sees" icon={<EyeSlash size={18} weight="duotone" className="text-brand-500" />} title="Your ZEC never leaves the shielded pool">
+            <Section id="world" n="05" eyebrow="What the world sees" icon={<EyeSlash size={18} weight="duotone" className="text-slate-900" />} title="Your ZEC never leaves the shielded pool">
               <p>
                 Ferry refuses to lock unless your shielded balance alone covers the swap, and refuses to sign anything with a see-through part. Our end-to-end
                 test checks every ZEC transaction after it is mined. From the latest run:
@@ -113,7 +113,7 @@ export function Safety() {
               <World />
             </Section>
 
-            <Section id="limits" n="06" eyebrow="Known limits" icon={<Warning size={18} weight="duotone" className="text-brand-500" />} title="What we haven't solved yet">
+            <Section id="limits" n="06" eyebrow="Known limits" icon={<Warning size={18} weight="duotone" className="text-slate-900" />} title="What we haven't solved yet">
               <p>Said plainly, so you can weigh them yourself.</p>
               <Limits />
             </Section>
@@ -122,11 +122,11 @@ export function Safety() {
               <CardContent className="space-y-4 py-8 text-center">
                 <p className="text-lg font-semibold text-slate-900">Want the details?</p>
                 <div className="flex flex-wrap items-center justify-center gap-3">
-                  <Link to="/app" className="inline-flex items-center gap-2 rounded bg-brand-500 px-8 py-3 font-semibold text-white transition-colors hover:bg-brand-600">
+                  <Link to="/app" className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-8 py-3 font-semibold text-white transition-colors hover:bg-slate-800">
                     Try a swap
                     <ArrowRight size={14} weight="bold" />
                   </Link>
-                  <Link to="/inspect" className="inline-flex items-center gap-2 rounded border border-slate-300 px-6 py-3 font-semibold text-slate-800 transition-colors hover:border-brand-300">
+                  <Link to="/inspect" className="inline-flex items-center gap-2 rounded border border-slate-300 px-6 py-3 font-semibold text-slate-800 transition-colors hover:border-slate-400">
                     Watch the protocol live
                   </Link>
                 </div>
@@ -154,7 +154,7 @@ function Trust() {
           <Box key={t} label={t}>
             <p className="text-slate-600">{d}</p>
             {warn ? (
-              <p className="mt-3 inline-flex items-center gap-1.5 font-mono text-[10px] tracking-widest text-amber-700 uppercase">
+              <p className="mt-3 inline-flex items-center gap-1.5 font-mono text-[10px] tracking-widest text-slate-700 uppercase">
                 <Warning size={12} weight="fill" />
                 {warn}
               </p>
@@ -245,7 +245,7 @@ function WhatIf() {
             type="button"
             aria-pressed={x.k === k}
             onClick={() => setK(x.k)}
-            className={`rounded border px-3 py-2 text-left text-sm transition-colors ${x.k === k ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-700 hover:border-brand-300"}`}
+            className={`rounded border px-3 py-2 text-left text-sm transition-colors ${x.k === k ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-700 hover:border-slate-400"}`}
           >
             {x.label}
           </button>
@@ -260,7 +260,7 @@ function WhatIf() {
         </Box>
       </div>
       <div className="flex gap-3 rounded border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
-        <CheckCircle size={18} weight="fill" className="mt-0.5 shrink-0 text-brand-500" />
+        <CheckCircle size={18} weight="fill" className="mt-0.5 shrink-0 text-slate-900" />
         <p>{c.o.why}</p>
       </div>
     </div>
@@ -278,15 +278,15 @@ function Online() {
         <div className="absolute inset-y-0 left-0 bg-slate-900" style={{ width: `${D1}%` }} />
         <div className="absolute inset-y-0 bg-slate-400" style={{ left: `${D1}%`, width: `${D2 - D1}%` }} />
         {[D1, D2].map((d) => (
-          <div key={d} className="absolute -top-1.5 h-5 w-px bg-brand-500" style={{ left: `${d}%` }} />
+          <div key={d} className="absolute -top-1.5 h-5 w-px bg-slate-900" style={{ left: `${d}%` }} />
         ))}
       </div>
       <div className="relative mt-2 h-4 font-mono text-[10px] tracking-widest text-slate-500 uppercase">
         <span className="absolute left-0">Locked</span>
-        <span className="absolute -translate-x-1/2 whitespace-nowrap text-brand-600" style={{ left: `${D1}%` }}>
+        <span className="absolute -translate-x-1/2 whitespace-nowrap text-slate-600" style={{ left: `${D1}%` }}>
           Deadline 1
         </span>
-        <span className="absolute -translate-x-1/2 whitespace-nowrap text-brand-600" style={{ left: `${D2}%` }}>
+        <span className="absolute -translate-x-1/2 whitespace-nowrap text-slate-600" style={{ left: `${D2}%` }}>
           Deadline 2
         </span>
       </div>
@@ -295,7 +295,7 @@ function Online() {
           <Label>If you (ZEC) miss deadline 1</Label>
           <p className="mt-1 text-slate-700">You can no longer claim the bitcoin, but you still get your ZEC back.</p>
         </div>
-        <div className="rounded border border-brand-300 bg-brand-50/40 p-3">
+        <div className="rounded border border-slate-300 bg-slate-50 p-3">
           <Label>If they (bitcoin) miss deadline 2</Label>
           <p className="mt-1 text-slate-700">They lose their bitcoin to you. That's what keeps them honest.</p>
         </div>
@@ -322,7 +322,7 @@ function Watchtower() {
       <ul className="mt-3 space-y-2">
         {cant.map((c) => (
           <li key={c} className="flex gap-2 text-slate-700">
-            <ShieldCheck size={16} className="mt-0.5 shrink-0 text-brand-500" />
+            <ShieldCheck size={16} className="mt-0.5 shrink-0 text-slate-900" />
             It can't {c}
           </li>
         ))}
@@ -331,7 +331,7 @@ function Watchtower() {
           At worst it fails to act (for USDC, also if it runs out of fee money), and you are back to staying online yourself
         </li>
       </ul>
-      <div className="mt-4 rounded border border-brand-300 bg-brand-50/40 p-3">
+      <div className="mt-4 rounded border border-slate-300 bg-slate-50 p-3">
         <Label>If you hold the bitcoin, litecoin or USDC: only your own tower</Label>
         <p className="mt-1 text-slate-700">
           Your refund reveals your half of the shared ZEC key, and for USDC the tower holds that half itself, since the contract's refund needs it. A tower
@@ -365,7 +365,7 @@ function Them() {
           <ul className="space-y-2">
             {never.map((s) => (
               <li key={s} className="flex gap-2 text-slate-700">
-                <EyeSlash size={16} className="mt-0.5 shrink-0 text-brand-500" />
+                <EyeSlash size={16} className="mt-0.5 shrink-0 text-slate-900" />
                 {s}
               </li>
             ))}
@@ -412,7 +412,7 @@ function World() {
                   {what} <span className="font-mono text-xs text-slate-400">{id}…</span>
                 </td>
                 <td className="px-4 py-3 font-mono text-slate-900">0</td>
-                <td className="px-4 py-3 font-mono text-brand-600">{n}</td>
+                <td className="px-4 py-3 font-mono text-slate-600">{n}</td>
               </tr>
             ))}
           </tbody>
@@ -451,7 +451,7 @@ function Limits() {
     <div className="space-y-2">
       {LIMITS.map(([t, d]) => (
         <div key={t} className="flex gap-4 rounded border border-slate-200 bg-white p-4">
-          <Warning size={18} weight="duotone" className="mt-0.5 shrink-0 text-amber-600" />
+          <Warning size={18} weight="duotone" className="mt-0.5 shrink-0 text-slate-700" />
           <div className="space-y-1">
             <p className="font-semibold text-slate-900">{t}</p>
             <p className="text-slate-600">{d}</p>

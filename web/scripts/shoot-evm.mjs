@@ -124,7 +124,7 @@ await until(id2, (s) => s.outcome, "refunded");
 await shoot("07-swap-refunded", { full: true });
 await goto("/inspect");
 await shoot("08-inspect-refund", { full: true, settle: 2500 });
-await goto("/app");
+await goto("/app/activity");
 await shoot("09-app-with-swaps", { full: true });
 
 await browser.close();
