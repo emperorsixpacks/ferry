@@ -24,7 +24,7 @@ import { usePath } from "./router";
 // `/app/route/:id` one private swap (coin → shielded ZEC → coin), `/app/near/:id` one NEAR Intents
 // swap (shielded ZEC for any of its assets, or the other way), `/app/combo/:id` one private swap
 // with NEAR Intents at an end, `/wallet` the node's coins (add funds, send them to your own
-// wallet), `/ramp` Naira on- and off-ramp (not available yet), `/help`
+// wallet), `/ramp` Naira on- and off-ramp (not available yet; not linked from the header), `/help`
 // plain answers, `/how-it-works` and `/safety` the deep explanations, `/privacy` what a chain
 // analyst sees of one swap done four ways (a bridge, NEAR Intents, Ferry, a Ferry route),
 // `/inspect` the live two-party protocol view for developers.
