@@ -519,3 +519,285 @@ async fn buy_zec_b_taker_with_a_z_maker() {
         "Z received 40 USDC for 1 ZEC"
     );
 }
+
+// ---------------------------------------------------------------- route legs (crate::route)
+
+/// The mock chain's address of `owner`'s wallet (crates/ferryd/src/mock_zec.rs).
+fn mock_wallet(owner: &str) -> String {
+    format!("uregtest1mockwallet{}", hex::encode(owner))
+}
+
+/// A wallet's shielded balance on the test's mock Zcash chain.
+fn mock_balance(chain: &Chain, owner: &str) -> u64 {
+    let raw = std::fs::read_to_string(chain.dir.path().join("zec-chain.json")).unwrap();
+    let v: Value = serde_json::from_str(&raw).unwrap();
+    v["balances"][owner].as_u64().unwrap_or(0)
+}
+
+/// Forwards every request to `target`, holding `POST /peer/swaps` back for `delay`: a maker
+/// that takes its time, so a start stays in progress.
+async fn slow_maker(target: String, delay: Duration) -> String {
+    use axum::extract::{Request, State};
+    use axum::response::{IntoResponse, Response};
+    async fn forward(State((target, delay)): State<(String, Duration)>, req: Request) -> Response {
+        let (parts, body) = req.into_parts();
+        let bytes = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+        if parts.method == reqwest::Method::POST && parts.uri.path() == "/peer/swaps" {
+            tokio::time::sleep(delay).await;
+        }
+        let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
+        let mut rb =
+            reqwest::Client::new().request(parts.method.clone(), format!("{target}{path}"));
+        for h in [
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::CONTENT_TYPE,
+        ] {
+            if let Some(v) = parts.headers.get(&h) {
+                rb = rb.header(h, v.clone());
+            }
+        }
+        let r = rb.body(bytes).send().await.unwrap();
+        let status = r.status();
+        (status, r.bytes().await.unwrap()).into_response()
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new()
+        .fallback(forward)
+        .with_state((target, delay));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    url
+}
+
+async fn post_swap(http: &reqwest::Client, d: &Daemon, body: Value) -> (u16, Value) {
+    let r = http
+        .post(format!("{}/api/swaps", d.api))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    (r.status().as_u16(), r.json().await.unwrap_or_default())
+}
+
+async fn api_get(http: &reqwest::Client, d: &Daemon, path: &str) -> Value {
+    http.get(format!("{}{path}", d.api))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+/// `base` with the fields of `extra` added.
+fn with(base: &Value, extra: Value) -> Value {
+    let mut b = base.clone();
+    b.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    b
+}
+
+/// Leg 1 of a route on EVM (buying ZEC, the user is a B taker): ferryd advertises routes and its
+/// own shielded address; refuses a bad label, a sweep destination of another network, a limit
+/// of the wrong role and a maker asking more than `max_counter`; refuses a second start with a
+/// label that is in use, while its first start is still being handled and after; and its sweep
+/// pays the address it was given, not its own wallet.
+#[tokio::test]
+async fn route_leg_one_buys_zec_into_another_wallet() {
+    let Some(chain) = Chain::start().await else {
+        return;
+    };
+    let http = api_client();
+    let maker = chain.ferryd(
+        "z",
+        "maker-z",
+        "z.key",
+        &[
+            "--maker-offer",
+            &format!("{RATE}"),
+            "--zec-mock-balance",
+            "500000000",
+        ],
+    );
+    let user = chain.ferryd("b", "user-b", "b.key", &[]);
+    maker.ready(&http).await;
+    user.ready(&http).await;
+
+    let status = api_get(&http, &user, "/api/status").await;
+    assert_eq!(status["features"], json!(["route"]), "{status}");
+    let addresses = api_get(&http, &user, "/api/addresses").await;
+    assert_eq!(addresses["zec"]["address"], mock_wallet("user-b"));
+
+    let to = mock_wallet("user-z");
+    let one_zec = 100_000_000u64;
+    let base = json!({"maker": maker.peer, "zec_zat": one_zec});
+    for (extra, why) in [
+        (json!({"route": "R1/1"}), "route may hold only"),
+        (
+            json!({"sweep_to": "utest1mockwallet757365722d7a"}),
+            "sweep_to: not a wallet address",
+        ),
+        (json!({"min_counter": 1}), "min_counter is for role Z only"),
+        (
+            json!({"route": "r1/1", "max_counter": RATE - 1}),
+            "above your limit",
+        ),
+    ] {
+        let (code, body) = post_swap(&http, &user, with(&base, extra.clone())).await;
+        assert_eq!(code, 400, "{extra}: {body}");
+        assert!(
+            body["error"].as_str().unwrap_or("").contains(why),
+            "{extra}: {body}"
+        );
+    }
+    assert_eq!(api_get(&http, &user, "/api/swaps").await, json!([]));
+
+    // A start that takes a while: the same label again gets 409 with the label code, any other
+    // start a plain 409, and the first one still creates its swap.
+    let slow = slow_maker(maker.peer.clone(), Duration::from_secs(3)).await;
+    let leg = json!({"maker": slow, "zec_zat": one_zec, "route": "r1/1",
+                     "sweep_to": to, "max_counter": RATE});
+    let first = {
+        let (http, api, leg) = (http.clone(), user.api.clone(), leg.clone());
+        tokio::spawn(async move {
+            let r = http
+                .post(format!("{api}/api/swaps"))
+                .json(&leg)
+                .send()
+                .await
+                .unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap())
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let (code, body) = post_swap(&http, &user, leg.clone()).await;
+    assert_eq!(
+        (code, body["code"].as_str()),
+        (409, Some("route_label_in_use")),
+        "{body}"
+    );
+    let (code, body) = post_swap(&http, &user, with(&base, json!({"route": "r2/1"}))).await;
+    assert_eq!((code, body["code"].as_str()), (409, None), "{body}");
+    let (code, body) = first.await.unwrap();
+    assert_eq!(code, 201, "{body}\n{}", tail(&user.log));
+    let id = body["id"].as_str().unwrap().to_string();
+    let (code, body) = post_swap(&http, &user, leg).await;
+    assert_eq!(
+        (code, body["code"].as_str()),
+        (409, Some("route_label_in_use")),
+        "{body}"
+    );
+    assert!(body["error"].as_str().unwrap().contains(&id), "{body}");
+    assert_eq!(
+        api_get(&http, &user, "/api/swaps")
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "one label, one swap"
+    );
+
+    let v = user.swap(&http, &id).await;
+    assert_eq!(
+        (v["route"].as_str(), v["sweep_to"].as_str()),
+        (Some("r1/1"), Some(to.as_str()))
+    );
+    let v = user
+        .until(&http, &id, 120, "the swap", |v| v["outcome"] == "swapped")
+        .await;
+    let swept = v["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "zec_sweep_broadcast")
+        .unwrap();
+    assert!(
+        swept["label"]
+            .as_str()
+            .unwrap()
+            .contains("the shielded address given for this swap"),
+        "{swept}"
+    );
+    assert_eq!(
+        mock_balance(&chain, "user-z"),
+        one_zec,
+        "the sweep paid user-z"
+    );
+    assert_eq!(
+        mock_balance(&chain, "user-b"),
+        0,
+        "not the sweeper's wallet"
+    );
+    // The maker never saw the destination or the label.
+    let m = maker.swap(&http, &id).await;
+    assert!(m["sweep_to"].is_null() && m["route"].is_null(), "{m}");
+}
+
+/// Leg 2 of a route on EVM (selling ZEC, the user is a Z taker): a maker paying less than
+/// `min_counter` is refused, `sweep_to` is refused for role Z, and a swap whose record can't be
+/// saved is refused with no swap left behind, in memory or on disk.
+#[tokio::test]
+async fn route_leg_two_price_floor_and_an_unsaved_swap() {
+    let Some(chain) = Chain::start().await else {
+        return;
+    };
+    let http = api_client();
+    let maker = chain.ferryd(
+        "b",
+        "maker-b",
+        "b.key",
+        &["--maker-offer", &format!("{RATE}")],
+    );
+    let user = chain.ferryd("z", "user-z", "z.key", &["--zec-mock-balance", "500000000"]);
+    maker.ready(&http).await;
+    user.ready(&http).await;
+    let base = json!({"maker": maker.peer, "zec_zat": 100_000_000u64, "route": "r9/2"});
+    let (code, body) = post_swap(&http, &user, with(&base, json!({"min_counter": RATE + 1}))).await;
+    assert_eq!(code, 400, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("below your minimum"),
+        "{body}"
+    );
+    let (code, body) = post_swap(
+        &http,
+        &user,
+        with(&base, json!({"sweep_to": mock_wallet("x")})),
+    )
+    .await;
+    assert_eq!(code, 400, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("role B only"),
+        "{body}"
+    );
+    assert_eq!(api_get(&http, &user, "/api/swaps").await, json!([]));
+
+    // The record can't be written: refused, and nothing is left to resume.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let swaps = chain.dir.path().join("user-z").join("evm-swaps");
+        std::fs::set_permissions(&swaps, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let (code, body) = post_swap(&http, &user, with(&base, json!({"min_counter": RATE}))).await;
+        std::fs::set_permissions(&swaps, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(code, 500, "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("could not save"),
+            "{body}"
+        );
+        assert_eq!(
+            api_get(&http, &user, "/api/swaps").await,
+            json!([]),
+            "no swap in memory"
+        );
+        assert_eq!(
+            std::fs::read_dir(&swaps).unwrap().count(),
+            0,
+            "none on disk"
+        );
+    }
+}

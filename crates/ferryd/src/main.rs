@@ -9,6 +9,7 @@ mod pricefeed;
 mod quote;
 mod rebroadcast;
 mod record;
+mod route;
 mod tower;
 mod view;
 
@@ -83,11 +84,14 @@ async fn main() -> anyhow::Result<()> {
 /// Secrets given as files (kept out of `ps` and `docker inspect`).
 fn resolve_secret_files(cli: &mut Cli) -> anyhow::Result<()> {
     if let Some(path) = &cli.btc_rpc_pass_file {
-        let pass = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let pass =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         cli.btc_rpc_pass = pass.trim().to_string();
     }
     if let Some(path) = &cli.api_token_file {
-        let existing = std::fs::read_to_string(path).ok().map(|t| t.trim().to_string());
+        let existing = std::fs::read_to_string(path)
+            .ok()
+            .map(|t| t.trim().to_string());
         let token = match existing.filter(|t| !t.is_empty()) {
             Some(t) => t,
             None => {
@@ -104,6 +108,10 @@ fn resolve_secret_files(cli: &mut Cli) -> anyhow::Result<()> {
             }
         };
         cli.api_token = Some(token);
+    }
+    // A provider key often sits in the RPC URL.
+    if let Some(path) = &cli.evm.evm_rpc_file {
+        cli.evm.evm_rpc = evm::config::read_rpc_file(path).map_err(anyhow::Error::msg)?;
     }
     Ok(())
 }

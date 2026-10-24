@@ -91,17 +91,26 @@ pub trait ZecLeg: Send + Sync {
         fvk: &[u8; 96],
     ) -> impl Future<Output = Result<Vec<ZecNote>, Self::Error>> + Send;
 
-    /// Spend the joint address's notes to our own wallet, authorizing with `ask` (RedPallas,
-    /// `rsk = ask + α`). The sweep must include the lock note, a note worth at least
-    /// `lock_value`; one that would leave it behind is refused. Retrying after an error returns
-    /// the sweep already built if it may still confirm, rather than building another.
-    /// Returns the txid.
+    /// Spend the joint address's notes to our own wallet, or to `to` when given (an address
+    /// [`ZecLeg::check_address`] accepted), authorizing with `ask` (RedPallas, `rsk = ask + α`).
+    /// The sweep must include the lock note, a note worth at least `lock_value`; one that would
+    /// leave it behind is refused. Retrying after an error returns the sweep already built if it
+    /// may still confirm, rather than building another. Returns the txid.
     fn sweep(
         &self,
         fvk: &[u8; 96],
         ask: &[u8; 32],
         lock_value: u64,
+        to: Option<&str>,
     ) -> impl Future<Output = Result<String, Self::Error>> + Send;
+
+    /// Whether a sweep may pay `address`: a shielded address of our network that a sweep can
+    /// pay (a unified address with an Orchard receiver, which Ironwood shares). `Err` says why
+    /// not, or that the check itself failed. The default refuses every address: a backend that
+    /// cannot check one never sweeps to one.
+    fn check_address(&self, _address: &str) -> impl Future<Output = Result<(), String>> + Send {
+        async { Err("this Zcash backend cannot check addresses".to_string()) }
+    }
 
     /// Confirmations of a transaction (`Some(0)` while in the mempool, `None` if unknown).
     fn confirmations(

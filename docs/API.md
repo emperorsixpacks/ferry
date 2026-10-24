@@ -204,11 +204,23 @@ one swap start only.
     "zec": { "network": "regtest", "height": 233, "pool": "ironwood" }
   },
   "offer": { "pair": "ZEC/BTC", "rate_sat_per_zec": 410000, "min_zat": 10000000, "max_zat": 1000000000,
-             "fee_sat": 2000, "t1_blocks": 12, "t2_blocks": 24, "btc_lock_confs": 2, "zec_confs": 3 }
+             "fee_sat": 2000, "t1_blocks": 12, "t2_blocks": 24, "btc_lock_confs": 2, "zec_confs": 3 },
   // fee_sat: the fixed fee of each presigned BTC transaction (the redeem pays one; the refund
   // path pays two: cancel + refund). t1/t2 in BTC blocks; confirmations Z/B wait for.
+  "features": ["route"]
+  // What this ferryd supports beyond the base API. "route": POST /api/swaps takes the route
+  // fields (see "Route legs"). ferry-route starts a leg only on a daemon that lists it: an older
+  // ferryd would silently ignore those fields.
 }
 ```
+
+## GET /api/addresses
+
+Where to fund this party: `{"role", "name", "btc": {"coin", "network", "address"}, "zec":
+{"address"}}`. `btc.address` is a fresh address of the daemon's wallet (EVM: its account, with
+`token` and `symbol`). `zec.address` is the wallet's own shielded address (a unified address; the
+mock chain's is `u<network>1mockwallet<hex name>`), or null if the backend has none. ferry-route
+reads it from the user's Z daemon and gives it to leg 1 as `sweep_to`.
 
 **Litecoin.** A daemon started with `--chain ltc` swaps ZEC against LTC (docs/LITECOIN.md). Then
 `chains.btc` is `{ "coin": "ltc", "ticker": "LTC", … }`, `offer.pair` is `"ZEC/LTC"` and every
@@ -273,6 +285,45 @@ role gets `400 the counterparty also has role B`.
 An optional `quote` (a firm quote from that maker) fixes the rate: see
 [POST /api/swaps with a quote](#post-apiswaps-with-a-quote-taker).
 
+One start at a time: while a `POST /api/swaps` is being handled, another one gets `409 Another
+swap is being started`, and a maker takes no proposal meanwhile.
+
+### Route legs
+
+`ferry-route` (crates/ferry-route) starts each leg of a route (coin A → shielded ZEC → coin C)
+with these extra fields, all optional:
+
+```json
+{ "maker": "http://maker1:7112", "zec_zat": 100000000,
+  "route": "r9f3a0c2d4e5b6a71/1",    // a label: 1-80 chars of [a-z0-9/-], stored and shown as SwapView.route
+  "sweep_to": "utest1…",             // role B only: where B's sweep pays the ZEC (default: our own wallet)
+  "max_counter": 412500,             // role B only: refuse if the maker asks more counter units for zec_zat
+  "min_counter": 39200000 }          // role Z only: refuse if the maker pays fewer
+```
+
+- **`route`** is stored in the swap record before its first save, so a router that lost the
+  answer can find the swap by its label. One label, one swap: a label that a swap already carries
+  (running or finished), or that a start still in progress carries, is refused with
+  `409 {"error": "Route label in use: …", "code": "route_label_in_use"}`. A router reads that as
+  "the swap may exist" and looks it up by label; every other error status means no swap was
+  created.
+- **`sweep_to`** is checked before the maker is contacted (`400 sweep_to: …`): it must be a
+  unified address of our Zcash network with an Orchard receiver (Ironwood shares it), checked by
+  `ferry-zec-signer address`; the mock chain takes only its own wallet addresses. It is never part
+  of the peer protocol, so the maker never learns it, and the sweep is still built with
+  `--discard-ovk`. B's sweep pays it; Z's reclaim always goes to Z's own wallet. The token that
+  can set it is the token that controls the funds already; the demo UI server never forwards it.
+- **`max_counter` / `min_counter`** bound the maker's rate (or firm quote) at the moment the swap
+  starts: `400 The maker asks 0.00412501 BTC for 1.00 ZEC, above your limit of 0.004125 BTC
+  (max_counter)` / `… pays …, below your minimum of … (min_counter)`. A limit of the wrong role is
+  a `400`.
+
+A leg's timeline starts with a `route_leg` entry (local) naming the label and, for B, the sweep
+destination. The router's own API (`POST /api/routes`, `GET /api/routes/:id`, `continue`, `stop`,
+`event: route`) is in [crates/ferry-route/README.md](../crates/ferry-route/README.md); how a
+route runs and fails is in [PROTOCOL.md](PROTOCOL.md#routes) and
+[THREAT-MODEL.md](THREAT-MODEL.md#routes-coin-a--shielded-zec--coin-c).
+
 ## GET /api/swaps  → `[SwapView]`
 ## GET /api/swaps/:id → `SwapView`
 
@@ -304,7 +355,9 @@ An optional `quote` (a firm quote from that maker) fixes the rate: see
     "zec": ["Ironwood action (amount, sender, receiver encrypted)", "…"]
   },
   "watchtower": { "url": "http://…", "status": "pending|armed|refused", "package_id": "hex|null",
-                  "note": "Human-readable sentence", "next_try_ms": 0 }   // null without --watchtower
+                  "note": "Human-readable sentence", "next_try_ms": 0 },  // null without --watchtower
+  "route": "r9f3a0c2d4e5b6a71/1",   // the route label it was started with; null for a direct swap
+  "sweep_to": "utest1…"             // B taker: where its sweep pays; null: its own wallet
 }
 ```
 
@@ -368,7 +421,8 @@ free-form. The mock uses: `propose_sent`, `propose_received`, `dleq_verified`, `
 `lock_template_sent`, `cancel_sigs_sent`, `refund_adaptor_verified`, `cancel_sig_received`,
 `btc_lock_seen`, `zec_note_seen`, `zec_confirmed`, `redeem_adaptor_sent`, `redeem_adaptor_received`,
 `cancel_seen`, `punish_seen`, `swap_complete`, `refunded`, `reclaimed`, `punished`. ferryd also
-emits `sweep_delayed` (local) when it schedules the random delay before a ZEC sweep or reclaim,
+emits `route_leg` (local) first on a swap started as a route leg,
+`sweep_delayed` (local) when it schedules the random delay before a ZEC sweep or reclaim,
 `peer_message_ignored` / `peer_message_rejected` for a late or invalid peer message, and
 `redeem_adaptor_withheld` (B, local) when its redeem adaptor (EVM: Ready signature) had not reached Z
 by the time the swap moved on (the lock note spent, or the call-off) and so never will: B hands it
@@ -389,8 +443,15 @@ whenever a balance or height changes.
 Every non-2xx response has a JSON body `{ "error": "Human-readable sentence" }`. The UI shows
 `error` verbatim under the controls, so it should say what is wrong. For `POST /api/swaps`:
 
-- `400`: bad body, amount outside the offer's `min_zat`/`max_zat`, or insufficient funds
-- `409`: a swap is already in progress
+- `400`: bad body, amount outside the offer's `min_zat`/`max_zat`, insufficient funds, a bad
+  route field, or the maker's price past `max_counter` / `min_counter`
+- `409`: a swap is already in progress or being started; with `"code": "route_label_in_use"`,
+  the route label is taken (by a swap, or by a start still in progress)
+- `500 could not save the swap`: the record could not be written; no swap was created (nothing is
+  left in memory or on disk to resume)
+
+A body may carry a machine-readable `code` next to `error` where a caller must tell errors apart
+(today only `route_label_in_use`).
 
 ## POST /api/swaps/:id/fault (demo only)
 

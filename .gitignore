@@ -19,3 +19,4 @@ infra/deploy/secrets/
 HANDOFF.md
 .evm-testnet/
 .evm-testnet-fork/
+.demo-route/

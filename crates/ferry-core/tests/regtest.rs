@@ -121,6 +121,7 @@ impl ZecLeg for MockZec {
         fvk: &[u8; 96],
         ask: &[u8; 32],
         _lock_value: u64,
+        _to: Option<&str>,
     ) -> Result<String, MockError> {
         let scalar = ferry_dleq::pallas_scalar_from_bytes(ask)
             .ok_or(MockError("ask not canonical".into()))?;
@@ -275,7 +276,7 @@ impl World {
                 Action::SweepZec { joint_fvk, ask } => {
                     let txid = self
                         .zec
-                        .sweep(&joint_fvk, ask.expose(), 0)
+                        .sweep(&joint_fvk, ask.expose(), 0, None)
                         .await
                         .expect("sweep with recovered ask");
                     self.sweep_txid[idx(from)] = Some(txid);

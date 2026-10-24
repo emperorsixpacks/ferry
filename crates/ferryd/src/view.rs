@@ -17,6 +17,8 @@ pub struct StatusView {
     pub balances: Balances,
     pub chains: Chains,
     pub offer: OfferView,
+    /// What this ferryd supports beyond the base API: `route` (crate::route).
+    pub features: Vec<&'static str>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -116,6 +118,10 @@ pub struct SwapView {
     pub observer: Observer,
     /// Our package at the watchtower; absent without --watchtower.
     pub watchtower: Option<crate::tower::TowerState>,
+    /// The route label the swap was started with (null for a direct swap).
+    pub route: Option<String>,
+    /// B taker: the shielded address our sweep pays (null: our own wallet).
+    pub sweep_to: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -227,6 +233,8 @@ pub fn swap_view(rec: &SwapRecord) -> SwapView {
                 .collect(),
         },
         watchtower: rec.watchtower.clone(),
+        route: rec.route.clone(),
+        sweep_to: rec.sweep_to.clone(),
     }
 }
 

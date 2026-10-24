@@ -143,13 +143,18 @@ struct CreateSwap {
     /// A firm quote from this maker (crate::quote), as `POST /peer/quote` returned it.
     #[serde(default)]
     quote: Option<crate::quote::SignedQuote>,
+    /// A route leg's label, sweep destination and price limit (crate::route).
+    #[serde(flatten)]
+    route: crate::route::RouteArgs,
 }
 
 async fn create_swap<L: ZecLeg + 'static>(
     State(d): D<L>,
     ApiJson(req): ApiJson<CreateSwap>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let id = d.create_swap(req.maker, req.zec_zat, req.quote).await?;
+    let id = d
+        .create_swap(req.maker, req.zec_zat, req.quote, req.route)
+        .await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 

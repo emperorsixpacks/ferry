@@ -55,7 +55,17 @@ RATE="${RATE:-410000}"
 B_FUND_BTC="${B_FUND_BTC:-1}"
 ZEC_BACKEND="${ZEC_BACKEND:-mock}"
 ZEC_BALANCE_ZAT="${ZEC_BALANCE_ZAT:-500000000}"
-ZEC_BLOCK_SECS="${ZEC_BLOCK_SECS:-3}"
+# The mock chain's block time is the same as infra/evm-demo.sh's, so the two can share one chain
+# (ZEC_MOCK_FILE): a mock height counts blocks of each daemon's own block time.
+ZEC_BLOCK_SECS="${ZEC_BLOCK_SECS:-$([ "$ZEC_BACKEND" = devtool ] && echo 3 || echo 2)}"
+# ZEC_MOCK_FILE: a mock Zcash chain shared with another demo (infra/route-demo.sh). A file given
+# here belongs to the caller, so `up` never deletes it; the default one is this demo's own.
+if [ -n "${ZEC_MOCK_FILE:-}" ]; then
+  ZEC_MOCK_OWNED=
+else
+  ZEC_MOCK_FILE="$STATE/zec-mock.json"
+  ZEC_MOCK_OWNED=1
+fi
 # ZEC_BACKEND=devtool: Zebra + Zaino regtest in Docker (amd64 images; emulated on arm64).
 ZEBRA_IMAGE="${ZEBRA_IMAGE:-zfnd/zebra:7.0.0-rc.0}"
 ZAINO_IMAGE="${ZAINO_IMAGE:-zingodevops/zaino:0.10.2-no-tls}"
@@ -124,7 +134,8 @@ Environment (defaults in brackets):
   Z_PORT [$Z_PORT]  B_PORT [$B_PORT]  Z_PEER_PORT [$Z_PEER_PORT]  B_PEER_PORT [$B_PEER_PORT]
   UI_ORIGINS [$UI_ORIGINS] (browser origins allowed on the API)  RATE [$RATE sat/ZEC]  B_FUND_BTC [$B_FUND_BTC]
   T1 [$T1]  T2 [$T2]  DELTA [$DELTA]  BTC_LOCK_CONFS [$BTC_LOCK_CONFS]  ZEC_CONFS [$ZEC_CONFS]  POLL_MS [$POLL_MS]
-  ZEC_BACKEND [mock|devtool, $ZEC_BACKEND]   mock: a stand-in Zcash chain in $STATE/zec-mock.json
+  ZEC_BACKEND [mock|devtool, $ZEC_BACKEND]   mock: a stand-in Zcash chain in ZEC_MOCK_FILE [$ZEC_MOCK_FILE]
+    (a file you name is shared, e.g. with infra/evm-demo.sh, and never deleted by this script)
     ZEC_BALANCE_ZAT [$ZEC_BALANCE_ZAT] (Z's starting shielded balance)  ZEC_BLOCK_SECS [$ZEC_BLOCK_SECS]
     devtool: real Ironwood via ferry-zec on Zebra ($ZEBRA_CONTAINER, RPC :$ZEC_RPC_PORT) + Zaino
       ($ZAINO_CONTAINER, :$ZAINO_PORT). A miner wallet takes the (Ironwood) coinbase and pays Z
@@ -205,7 +216,7 @@ start_ferryd() { # start_ferryd <key> <role> <name> <api port> <peer port> [extr
   shift 5
   local zec_args=()
   case "$ZEC_BACKEND" in
-    mock) zec_args=(--zec mock --zec-mock-file "$STATE/zec-mock.json" --zec-mock-block-secs "$ZEC_BLOCK_SECS") ;;
+    mock) zec_args=(--zec mock --zec-mock-file "$ZEC_MOCK_FILE" --zec-mock-block-secs "$ZEC_BLOCK_SECS") ;;
     devtool)
       local extra_var="ZEC_ARGS_$(echo "$key" | tr a-z A-Z)"
       # shellcheck disable=SC2206
@@ -447,7 +458,9 @@ cmd_up() {
   fi
   command -v docker >/dev/null || die "docker is required"
   command -v python3 >/dev/null || die "python3 is required"
-  rm -rf "$STATE/z" "$STATE/b" "$STATE/zec-mock.json"
+  rm -rf "$STATE/z" "$STATE/b"
+  # A shared chain (ZEC_MOCK_FILE given) is its owner's to reset.
+  if [ -n "$ZEC_MOCK_OWNED" ]; then rm -f "$ZEC_MOCK_FILE"; fi
   mkdir -p "$STATE/logs"
 
   if [ -z "${FERRYD_SKIP_BUILD:-}" ]; then
