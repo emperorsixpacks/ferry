@@ -134,6 +134,9 @@ pub struct EvmOffer {
     pub liquidity: Option<crate::config::Liquidity>,
     #[serde(default)]
     pub paused: bool,
+    /// The key this maker signs firm quotes with (crate::quote; compressed secp256k1, hex).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_key: Option<String>,
 }
 
 impl EvmOffer {
@@ -259,6 +262,9 @@ pub fn network_name(chain_id: u64) -> String {
 pub struct EvmProposeRequest {
     pub envelope: EvmEnvelope,
     pub taker_url: String,
+    /// A firm quote this proposal takes (crate::quote): the maker holds it to that quote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_id: Option<String>,
 }
 
 /// `0x`-prefixed hex for 20-byte addresses.
@@ -395,6 +401,7 @@ mod tests {
             rate_updated_at: None,
             liquidity: None,
             paused: false,
+            quote_key: None,
         }
     }
 

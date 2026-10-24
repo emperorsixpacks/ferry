@@ -4,6 +4,7 @@
 pub mod config;
 mod daemon;
 mod http;
+mod quote;
 pub(crate) mod record;
 mod view;
 
@@ -46,7 +47,12 @@ pub async fn run<L: ZecLeg + 'static>(cli: Cli, leg: L) -> anyhow::Result<()> {
     };
     tokio::try_join!(
         axum::serve(api, http::api_router(daemon.clone())).with_graceful_shutdown(shutdown()),
-        axum::serve(peer, http::peer_router(daemon)).with_graceful_shutdown(shutdown()),
+        // the peer's address, for the firm-quote rate limit (crate::quote)
+        axum::serve(
+            peer,
+            http::peer_router(daemon).into_make_service_with_connect_info::<std::net::SocketAddr>()
+        )
+        .with_graceful_shutdown(shutdown()),
     )?;
     Ok(())
 }

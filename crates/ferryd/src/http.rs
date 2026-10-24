@@ -2,7 +2,8 @@
 //!
 //! Peer protocol (maker side; the taker initiates every request):
 //! - `GET  /peer/offer`                       terms, rate and the maker's role
-//! - `POST /peer/swaps`                       `{envelope: Propose, taker_url}` → `Accept` envelope
+//! - `POST /peer/quote`                       `{pair, taker_role, bucket_zat}` → a signed firm quote
+//! - `POST /peer/swaps`                       `{envelope: Propose, taker_url, quote_id?}` → `Accept`
 //! - `POST /peer/swaps/:id/messages`          one taker envelope (retries are acknowledged once)
 //! - `GET  /peer/swaps/:id/messages?after=n`  the maker's envelopes from index n
 
@@ -70,6 +71,7 @@ pub fn api_router<L: ZecLeg + 'static>(daemon: Arc<Daemon<L>>) -> Router {
 pub fn peer_router<L: ZecLeg + 'static>(daemon: Arc<Daemon<L>>) -> Router {
     Router::new()
         .route("/peer/offer", get(offer::<L>))
+        .route("/peer/quote", post(quote::<L>))
         .route("/peer/swaps", post(propose::<L>))
         .route(
             "/peer/swaps/{id}/messages",
@@ -145,13 +147,16 @@ async fn get_swap<L: ZecLeg + 'static>(
 struct CreateSwap {
     maker: String,
     zec_zat: u64,
+    /// A firm quote from this maker (crate::quote), as `POST /peer/quote` returned it.
+    #[serde(default)]
+    quote: Option<crate::quote::SignedQuote>,
 }
 
 async fn create_swap<L: ZecLeg + 'static>(
     State(d): D<L>,
     ApiJson(req): ApiJson<CreateSwap>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let id = d.create_swap(req.maker, req.zec_zat).await?;
+    let id = d.create_swap(req.maker, req.zec_zat, req.quote).await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
@@ -208,6 +213,14 @@ async fn addresses<L: ZecLeg + 'static>(
 
 async fn offer<L: ZecLeg + 'static>(State(d): D<L>) -> Json<crate::config::Offer> {
     Json(d.offer_now().await)
+}
+
+async fn quote<L: ZecLeg + 'static>(
+    State(d): D<L>,
+    peer: crate::quote::PeerIp,
+    ApiJson(req): ApiJson<crate::quote::QuoteRequest>,
+) -> Result<Json<crate::quote::SignedQuote>, ApiError> {
+    d.issue_quote(req, peer.0).await.map(Json)
 }
 
 async fn propose<L: ZecLeg + 'static>(

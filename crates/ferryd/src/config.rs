@@ -182,6 +182,10 @@ pub struct Cli {
     /// Testing: pause the offer after this many seconds without a fresh price (default 300).
     #[arg(long, hide = true, default_value_t = crate::pricefeed::STALE_AFTER.as_secs())]
     pub maker_price_stale_secs: u64,
+    /// How long a firm quote (POST /peer/quote) is good for, in seconds.
+    #[arg(long, default_value_t = crate::quote::QUOTE_TTL.as_secs(),
+          value_parser = clap::value_parser!(u64).range(5..=300))]
+    pub maker_quote_secs: u64,
 
     #[arg(long, default_value_t = 12)]
     pub t1: u16,
@@ -335,6 +339,7 @@ impl Cli {
             rate_updated_at: None,
             liquidity: None,
             paused: false,
+            quote_key: None,
         }
     }
 
@@ -445,6 +450,9 @@ pub struct Offer {
     /// The live rate went stale: `making` is false until a feed answers again.
     #[serde(default)]
     pub paused: bool,
+    /// The key this maker signs firm quotes with (crate::quote; compressed secp256k1, hex).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_key: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,6 +503,9 @@ pub fn zat_for(units: u64, rate_sat_per_zec: u64) -> u64 {
 pub struct ProposeRequest {
     pub envelope: Envelope,
     pub taker_url: String,
+    /// A firm quote this proposal takes (crate::quote): the maker holds it to that quote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote_id: Option<String>,
 }
 
 /// Reply to `POST /peer/swaps/:id/messages`.
