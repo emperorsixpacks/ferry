@@ -33,6 +33,10 @@ FEE_SAT="${FEE_SAT:-1500}"
 POLL_MS="${POLL_MS:-5000}"
 ZEC_BACKEND="${ZEC_BACKEND:-devtool}"
 ZEC_NETWORK="${ZEC_NETWORK:-test}"
+ZEC_SERVER="${ZEC_SERVER:-testnet.zec.rocks:443}" # lightwalletd/Zaino host:port (TLS for remote hosts)
+ZEC_NODE_RPC="${ZEC_NODE_RPC:-}" # optional Zebra JSON-RPC; without it tip/confirmations come from the wallet scan
+ZEC_DEVTOOL="${ZEC_DEVTOOL:-$ROOT/vendor/zcash-devtool/target/release/zcash-devtool}"
+ZEC_SIGNER="${ZEC_SIGNER:-$ROOT/tools/ferry-zec-signer/target/release/ferry-zec-signer}"
 UI_ORIGINS="${UI_ORIGINS:-http://localhost:5180 http://127.0.0.1:5180}"
 FERRYD="${FERRYD:-$ROOT/target/debug/ferryd}"
 
@@ -55,6 +59,8 @@ before \`status\` shows the node synced: until then ferryd cannot see new transa
 
 Funding: send signet sats to B's address and TAZ to Z's address (any signet / Zcash testnet
 faucet works). B needs the swap amount plus the lock's fee; Z needs the ZEC amount plus fees.
+Z's received TAZ is spendable only after 10 confirmations (about 13 minutes; zcash-devtool's
+default policy for notes from another wallet), so fund Z first.
 Then start a swap from the UI or with:
   source $STATE/env
   curl -XPOST localhost:$Z_PORT/api/swaps -H "authorization: Bearer \$FERRY_Z_TOKEN" \\
@@ -78,9 +84,14 @@ Environment (defaults in brackets):
   T1 [$T1]  T2 [$T2]  DELTA [$DELTA]  BTC_LOCK_CONFS [$BTC_LOCK_CONFS]  ZEC_CONFS [$ZEC_CONFS]
   CANCEL_CONFS [$CANCEL_CONFS]  FEE_SAT [$FEE_SAT]  POLL_MS [$POLL_MS]  UI_ORIGINS [$UI_ORIGINS]
   ZEC_BACKEND [devtool|mock, $ZEC_BACKEND]  ZEC_NETWORK [$ZEC_NETWORK]
-    devtool: the Zcash side runs on testnet through ferry-zec. Pass its endpoints and binaries
-    with ZEC_ARGS (both daemons), ZEC_ARGS_Z / ZEC_ARGS_B, e.g.
-      ZEC_ARGS="--zec-server <lightwalletd host:port> --zec-node-rpc <zebrad url> --zec-devtool <path>"
+    devtool: the Zcash side runs on testnet through ferry-zec (zcash-devtool wallets in
+      $STATE/{z,b}/zec-wallet, created on first start with the chain tip as birthday).
+      ZEC_SERVER (required): lightwalletd/Zaino host:port; TLS is used for non-local hosts.
+      ZEC_NODE_RPC (optional): a Zebra JSON-RPC URL; without it the chain tip and confirmations
+        come from the wallet's own scan and the observer panel has no ZEC lines.
+      ZEC_DEVTOOL [$ZEC_DEVTOOL]
+      ZEC_SIGNER [$ZEC_SIGNER] (built on first \`up\` if missing)
+      Extra flags: ZEC_ARGS (both daemons), ZEC_ARGS_Z / ZEC_ARGS_B.
     mock: a stand-in Zcash chain, to rehearse the Bitcoin signet leg alone.
   FAULTS=1 enables the demo fault endpoint.   FERRYD_ARGS (extra flags for both daemons)
 EOF
@@ -162,7 +173,11 @@ start_ferryd() { # start_ferryd <key> <role> <name> <api port> <peer port> [extr
       local extra_var
       extra_var="ZEC_ARGS_$(echo "$key" | tr a-z A-Z)"
       # shellcheck disable=SC2206
-      zec_args=(--zec devtool --zec-network "$ZEC_NETWORK" ${ZEC_ARGS:-} ${!extra_var:-}) ;;
+      zec_args=(--zec devtool --zec-network "$ZEC_NETWORK" --zec-server "$ZEC_SERVER"
+        --zec-devtool "$ZEC_DEVTOOL" --zec-signer "$ZEC_SIGNER")
+      [ -n "$ZEC_NODE_RPC" ] && zec_args+=(--zec-node-rpc "$ZEC_NODE_RPC")
+      # shellcheck disable=SC2206
+      zec_args+=(${ZEC_ARGS:-} ${!extra_var:-}) ;;
     *) die "ZEC_BACKEND must be devtool or mock" ;;
   esac
   local origins=() extra=()
@@ -196,6 +211,14 @@ cmd_up() {
   if [ -z "${FERRYD_SKIP_BUILD:-}" ]; then
     log "building ferryd"
     (cd "$ROOT" && cargo build -q -p ferryd) || die "cargo build failed"
+  fi
+  if [ "$ZEC_BACKEND" = devtool ]; then
+    [ -n "$ZEC_SERVER" ] || die "ZEC_SERVER=<lightwalletd host:port> is required for the Zcash testnet (or ZEC_BACKEND=mock)"
+    [ -x "$ZEC_DEVTOOL" ] || die "zcash-devtool not found at $ZEC_DEVTOOL (build vendor/zcash-devtool with --features regtest_support, or set ZEC_DEVTOOL)"
+    if [ ! -x "$ZEC_SIGNER" ]; then
+      log "building ferry-zec-signer"
+      (cd "$ROOT/tools/ferry-zec-signer" && cargo build -q --release) || die "building ferry-zec-signer failed"
+    fi
   fi
   start_node
   sync_line
