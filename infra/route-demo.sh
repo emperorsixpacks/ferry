@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Local privacy-hub demo: a route BTC -> shielded ZEC -> USDC, two Ferry swaps chained through one
-# mock Zcash chain by ferry-route. Leg 1 runs on regtest BTC (infra/demo.sh), leg 2 on USDC in
-# FerryLock on anvil (infra/evm-demo.sh). Run `infra/route-demo.sh help`.
+# Local privacy-hub demo: a route BTC -> shielded ZEC -> USDC, Ferry swaps chained through one mock
+# Zcash chain by ferry-route. Leg 1 runs on regtest BTC (infra/demo.sh), leg 2 on USDC in FerryLock
+# on anvil (infra/evm-demo.sh). By default ferry-route splits a route into parts of standard sizes,
+# each its own swap; the first four stories ask for one swap each way. Run `infra/route-demo.sh help`.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -29,8 +30,11 @@ USDC_RATE="${USDC_RATE:-40000000}"           # USDC base units (10^-6) per ZEC
 ROUTER_PORT="${ROUTER_PORT:-7140}"
 # Both demos share one mock Zcash chain, so both use one block time.
 ZEC_BLOCK_SECS="${ZEC_BLOCK_SECS:-2}"
-MAKER_ZEC_ZAT="${MAKER_ZEC_ZAT:-500000000}"  # maker-z's shielded ZEC; user-z starts with none
-ROUTE_ZAT="${ROUTE_ZAT:-100000000}"          # the ZEC each route buys (1 ZEC)
+MAKER_ZEC_ZAT="${MAKER_ZEC_ZAT:-1000000000}" # maker-z's shielded ZEC; user-z starts with none
+ROUTE_ZAT="${ROUTE_ZAT:-100000000}"          # the ZEC each one-swap route buys (1 ZEC)
+PARTS_ZAT="${PARTS_ZAT:-85000000}"           # the parts stories' route: 0.5 + 0.25 + 0.1 ZEC
+# The standard sizes (ferry-route's default --denominations, the firm-quote buckets), in zat.
+DENOMINATIONS="10000000 25000000 50000000 100000000 250000000 500000000 1000000000 2500000000 5000000000 10000000000"
 # Short demo timings (ferry-route flags): the sweep's confirmations before leg 2, the retry
 # interval and the leg-2 window. The privacy pause is per route (each story names its own).
 ROUTE_ZEC_CONFS="${ROUTE_ZEC_CONFS:-10}"
@@ -50,14 +54,20 @@ Ferry privacy-hub demo: BTC -> shielded ZEC -> USDC, two atomic swaps run by fer
                              :$L1_MAKER_PORT) and user-b (your B daemon, :$L1_USER_PORT); anvil (:$ANVIL_PORT) with
                              user-z (your Z daemon, :$L2_USER_PORT, no ZEC) and maker-b (B maker, :$L2_MAKER_PORT);
                              one mock Zcash chain for all four; ferry-route on :$ROUTER_PORT
-  infra/route-demo.sh test   up, then four routes, then down; exits non-zero if one fails:
+  infra/route-demo.sh test   up, then six routes, then down; exits non-zero if one fails.
+                             One swap each way (standard_amounts: false):
                              happy   BTC -> ZEC -> USDC to done (the router restarts twice midway)
                              payout  the same, with leg 2 paying a third address (payout_to), as a
                                      route ending on NEAR Intents would
                              refund  leg 2 is refunded: the route holds shielded ZEC; continue
                                      finishes it
                              stop    stopped during leg 1: the route ends holding the ZEC
-  infra/route-demo.sh happy | payout | refund | stop    one story on a running demo
+                             In standard amounts (the router's default), PARTS_ZAT in parts:
+                             parts   0.5 + 0.25 + 0.1 ZEC bought, and sold, part by part, each
+                                     after its own short random gap (the router restarts midway)
+                             partrefund  one leg-2 part is refunded: the others go through, the
+                                     route ends holding that part's ZEC; continue sells it
+  infra/route-demo.sh happy | payout | refund | stop | parts | partrefund    one story
   infra/route-demo.sh status | down | help
 
 The router's API: curl -H "authorization: Bearer \$(cat $STATE/router/api-token)" \\
@@ -65,7 +75,7 @@ The router's API: curl -H "authorization: Bearer \$(cat $STATE/router/api-token)
 Environment (defaults in brackets): FERRY_ROUTE_DEMO_DIR [$STATE] BITCOIND_CONTAINER BTC_RPC_PORT
   ANVIL_PORT L1_MAKER_PORT L1_USER_PORT L1_MAKER_PEER_PORT L1_USER_PEER_PORT L2_USER_PORT
   L2_MAKER_PORT L2_USER_PEER_PORT L2_MAKER_PEER_PORT ROUTER_PORT (as above)
-  ROUTE_ZAT [$ROUTE_ZAT] ROUTE_ZEC_CONFS [$ROUTE_ZEC_CONFS] ROUTE_RETRY_SECS [$ROUTE_RETRY_SECS]
+  ROUTE_ZAT [$ROUTE_ZAT] PARTS_ZAT [$PARTS_ZAT] ROUTE_ZEC_CONFS [$ROUTE_ZEC_CONFS] ROUTE_RETRY_SECS [$ROUTE_RETRY_SECS]
   ROUTE_LEG2_WINDOW_SECS [$ROUTE_LEG2_WINDOW_SECS] ZEC_BLOCK_SECS [$ZEC_BLOCK_SECS]
   BTC_RATE [$BTC_RATE] USDC_RATE [$USDC_RATE] MAKER_ZEC_ZAT [$MAKER_ZEC_ZAT] PAYOUT_ADDR [$PAYOUT_ADDR]
 EOF
@@ -148,6 +158,14 @@ wait_for() {
 }
 
 state_is() { [ "$(route_field "$RID" 'v["state"]')" = "$1" ]; }
+# A route's parts, one per line: leg n zec_zat status label
+parts_of() { route "$1" | python3 -c '
+import json, sys
+for p in json.load(sys.stdin)["parts"]:
+    print(p["leg"], p["n"], p["zec_zat"], p["status"], p["label"])'; }
+# How many parts of a leg are through (bought or sold)
+parts_done() { route_field "$1" "v[\"legs\"][$2 - 1][\"parts_done\"]"; }
+is_denomination() { case " $DENOMINATIONS " in *" $1 "*) return 0 ;; esac; return 1; }
 
 # units_for <zat> <rate>: what ferryd quotes, zat * rate / 10^8 rounded to the nearest unit.
 units_for() { python3 -c 'import sys; print((int(sys.argv[1]) * int(sys.argv[2]) + 50000000) // 100000000)' "$1" "$2"; }
@@ -210,47 +228,41 @@ for r in json.load(sys.stdin):
   evm_demo status || true
 }
 
-# POST /api/routes for ROUTE_ZAT with a 1% price margin each way; prints the route id.
-new_route() { # new_route <delay min> <delay max> [payout_to]
-  local max_in min_out out payout=""
-  [ -n "${3:-}" ] && payout=", \"payout_to\": \"$3\""
-  max_in=$(units_for "$ROUTE_ZAT" "$BTC_RATE")
+# POST /api/routes with a 1% price margin each way; prints the route id. standard: true splits the
+# route into standard parts (the router's default), false asks for one swap each way.
+new_route() { # new_route <zat> <delay min> <delay max> <standard: true|false> [payout_to]
+  local zat=$1 max_in min_out out payout=""
+  [ -n "${5:-}" ] && payout=", \"payout_to\": \"$5\""
+  max_in=$(units_for "$zat" "$BTC_RATE")
   max_in=$((max_in + max_in / 100))
-  min_out=$(pct "$(units_for $((ROUTE_ZAT - ROUTE_FEES_ZAT)) "$USDC_RATE")" 99)
+  min_out=$(pct "$(units_for $((zat - ROUTE_FEES_ZAT)) "$USDC_RATE")" 99)
   out=$(curl -s -H "authorization: Bearer $(cat "$STATE/router/api-token")" \
     -H 'content-type: application/json' -d "{
-    \"from\": \"btc\", \"to\": \"usdc-base\", \"zec_zat\": $ROUTE_ZAT,
+    \"from\": \"btc\", \"to\": \"usdc-base\", \"zec_zat\": $zat,
     \"maker1\": {\"url\": \"http://127.0.0.1:$L1_MAKER_PEER_PORT\", \"name\": \"maker-z\"},
     \"maker2\": [{\"url\": \"http://127.0.0.1:$L2_MAKER_PEER_PORT\", \"name\": \"maker-b\"}],
-    \"max_in\": $max_in, \"min_out\": $min_out, \"delay_secs\": [$1, $2]$payout}" \
+    \"max_in\": $max_in, \"min_out\": $min_out, \"delay_secs\": [$2, $3],
+    \"standard_amounts\": $4$payout}" \
     "http://127.0.0.1:$ROUTER_PORT/api/routes")
   echo "$out" | json 'v["id"]' 2>/dev/null || die "the route was refused: $out"
 }
 
-# Each leg's chain transactions, from its daemon's timeline.
+# Each part's chain transactions, from its daemon's timeline.
 show_txs() { # show_txs <route id>
-  local n who swap
-  for n in 1 2; do
+  local leg n zat status label who swap
+  while read -r leg n zat status label; do
     who=user-b
-    [ "$n" = 2 ] && who=user-z
-    for label in $(route "$1" | python3 -c '
-import json, sys
-r = json.load(sys.stdin)
-l = r["legs"][int(sys.argv[1]) - 1]
-# every label this leg had: earlier swaps were followed under <id>/2, <id>/2-2, ...
-labels = [r["id"] + "/1"] if sys.argv[1] == "1" else [r["id"] + "/2"] + [r["id"] + "/2-%d" % g for g in range(2, 2 + len(l["earlier_swaps"]))]
-print(" ".join(labels))' "$n"); do
-      swap=$(labelled "$who" "$label")
-      [ "$swap" = null ] && continue
-      echo "$swap" | python3 -c '
+    [ "$leg" = 2 ] && who=user-z
+    swap=$(labelled "$who" "$label")
+    [ "$swap" = null ] && continue
+    echo "$swap" | python3 -c '
 import json, sys
 s = json.load(sys.stdin)
-print("  leg %s (%s on %s, %s, outcome %s):" % (sys.argv[1], s["role"], sys.argv[2], s["route"], s["outcome"]))
+print("  leg %s part %s, %s ZEC (%s on %s, %s, outcome %s):" % (sys.argv[1], sys.argv[2], int(sys.argv[3]) / 1e8, s["role"], sys.argv[4], s["route"], s["outcome"]))
 for e in s["timeline"]:
     if e.get("txid"):
-        print("    %-4s %-22s %s%s" % (e["chain"], e["kind"], e["txid"], "" if e.get("height") is None else "  (height %d)" % e["height"]))' "$n" "$who"
-    done
-  done
+        print("    %-4s %-22s %s%s" % (e["chain"], e["kind"], e["txid"], "" if e.get("height") is None else "  (height %d)" % e["height"]))' "$leg" "$n" "$zat" "$who"
+  done < <(parts_of "$1")
 }
 
 finish() { # finish <route id> <started epoch>
@@ -266,10 +278,10 @@ story_happy() {
   t0=$(date +%s)
   z0=$(zec_balance user-z)
   u0=$(token_balance user-z)
-  RID=$(new_route 10 15)
+  RID=$(new_route "$ROUTE_ZAT" 10 15 false)
   log "route $RID"
-  wait_for 120 "leg 1 to start" '[ "$(labelled user-b "$RID/1")" != null ]'
-  sweep_to=$(labelled user-b "$RID/1" | json 'v["sweep_to"]')
+  wait_for 120 "leg 1 to start" '[ "$(labelled user-b "$RID/1/1")" != null ]'
+  sweep_to=$(labelled user-b "$RID/1/1" | json 'v["sweep_to"]')
   [ "$sweep_to" = "$(d user-z /api/addresses | json 'v["zec"]["address"]')" ] ||
     die "leg 1 sweeps to $sweep_to, not user-z's wallet"
   log "leg 1 sweeps to user-z's shielded address ($sweep_to)"
@@ -286,7 +298,7 @@ story_happy() {
   fi
   wait_for 300 "the route to finish" 'state_is done || state_is holding || state_is failed'
   state_is done || die "the route ended $(route_field "$RID" 'v["state"]'): $(route_field "$RID" 'v["note"]')"
-  [ "$(labelled_count user-z "$RID/2")" = 1 ] || die "leg 2 ran $(labelled_count user-z "$RID/2") times"
+  [ "$(labelled_count user-z "$RID/2/1")" = 1 ] || die "leg 2 ran $(labelled_count user-z "$RID/2/1") times"
   local zec2 got out_min z1
   zec2=$(route_field "$RID" 'v["amounts"]["zec2_zat"]')
   out_min=$(route_field "$RID" 'v["amounts"]["out_min"]')
@@ -306,15 +318,15 @@ story_payout() {
   t0=$(date +%s)
   u0=$(token_balance user-z)
   p0=$(usdc_at "$PAYOUT_ADDR")
-  RID=$(new_route 0 0 "$PAYOUT_ADDR")
+  RID=$(new_route "$ROUTE_ZAT" 0 0 false "$PAYOUT_ADDR")
   log "route $RID"
   [ "$(route_field "$RID" 'v["payout_to"]')" = "$PAYOUT_ADDR" ] || die "the route does not show payout_to"
-  wait_for 120 "leg 1 to start" '[ "$(labelled user-b "$RID/1")" != null ]'
-  [ "$(labelled user-b "$RID/1" | json 'v["payout_to"]')" = null ] || die "leg 1 carries a payout_to"
+  wait_for 120 "leg 1 to start" '[ "$(labelled user-b "$RID/1/1")" != null ]'
+  [ "$(labelled user-b "$RID/1/1" | json 'v["payout_to"]')" = null ] || die "leg 1 carries a payout_to"
   wait_for 600 "the route to finish" 'state_is done || state_is holding || state_is failed'
   state_is done || die "the route ended $(route_field "$RID" 'v["state"]'): $(route_field "$RID" 'v["note"]')"
-  [ "$(labelled user-z "$RID/2" | json 'v["payout_to"]')" = "$PAYOUT_ADDR" ] || die "leg 2 does not pay $PAYOUT_ADDR"
-  [ "$(labelled user-z "$RID/2" | json 'v["counter"]["claimer"]')" = "$PAYOUT_ADDR" ] ||
+  [ "$(labelled user-z "$RID/2/1" | json 'v["payout_to"]')" = "$PAYOUT_ADDR" ] || die "leg 2 does not pay $PAYOUT_ADDR"
+  [ "$(labelled user-z "$RID/2/1" | json 'v["counter"]["claimer"]')" = "$PAYOUT_ADDR" ] ||
     die "leg 2's claimer is not $PAYOUT_ADDR"
   out_min=$(route_field "$RID" 'v["amounts"]["out_min"]')
   wait_for 30 "USDC at $PAYOUT_ADDR" '[ "$(usdc_at "$PAYOUT_ADDR")" -gt "$p0" ]'
@@ -329,11 +341,11 @@ story_refund() {
   log "--- refund: user-z stalls after locking ZEC in leg 2; maker-b refunds at t1; the route holds the ZEC; continue finishes it"
   local t0 swap id t1 held
   t0=$(date +%s)
-  RID=$(new_route 0 0)
+  RID=$(new_route "$ROUTE_ZAT" 0 0 false)
   log "route $RID"
-  wait_for 300 "leg 2's swap" '[ "$(labelled user-z "$RID/2")" != null ]'
-  id=$(labelled user-z "$RID/2" | json 'v["id"]')
-  wait_for 60 "user-z to lock ZEC" '[ "$(labelled user-z "$RID/2" | json "v[\"state\"]")" = ZecLocked ]'
+  wait_for 300 "leg 2's swap" '[ "$(labelled user-z "$RID/2/1")" != null ]'
+  id=$(labelled user-z "$RID/2/1" | json 'v["id"]')
+  wait_for 60 "user-z to lock ZEC" '[ "$(labelled user-z "$RID/2/1" | json "v[\"state\"]")" = ZecLocked ]'
   d user-z "/api/swaps/$id/fault" -X POST -H 'content-type: application/json' -d '{"fault":"stall"}' >/dev/null ||
     die "could not stall user-z"
   log "user-z is stalled (it will not claim)"
@@ -343,15 +355,15 @@ story_refund() {
   "$CAST" rpc evm_mine --rpc-url "http://127.0.0.1:$ANVIL_PORT" >/dev/null
   log "jumped anvil to t1 ($t1)"
   wait_for 120 "the route to hold the ZEC" 'state_is holding'
-  [ "$(labelled user-z "$RID/2" | json 'v["outcome"]')" = refunded ] || die "leg 2 did not end refunded"
+  [ "$(labelled user-z "$RID/2/1" | json 'v["outcome"]')" = refunded ] || die "leg 2 did not end refunded"
   held=$(route_field "$RID" 'v["zec"]["held_zat"]')
   log "holding: \"$(route_field "$RID" 'v["note"]')\""
   d router "/api/routes/$RID/continue" -X POST -H 'content-type: application/json' -d '{}' >/dev/null ||
     die "continue was refused"
-  log "continue: leg 2 again, as $RID/2-2"
+  log "continue: leg 2 again, as $RID/2/2"
   wait_for 300 "the route to finish" 'state_is done || state_is failed || state_is holding'
   state_is done || die "after continue the route is $(route_field "$RID" 'v["state"]'): $(route_field "$RID" 'v["note"]')"
-  [ "$(labelled user-z "$RID/2-2" | json 'v["outcome"]')" = swapped ] || die "the second leg-2 swap did not swap"
+  [ "$(labelled user-z "$RID/2/2" | json 'v["outcome"]')" = swapped ] || die "the second leg-2 swap did not swap"
   log "refund: leg 2 refunded (user-z reclaimed its ZEC, held ~$held zat), then continue sold it"
   finish "$RID" "$t0"
 }
@@ -361,7 +373,7 @@ story_stop() {
   local t0 z0
   t0=$(date +%s)
   z0=$(zec_balance user-z)
-  RID=$(new_route 0 0)
+  RID=$(new_route "$ROUTE_ZAT" 0 0 false)
   log "route $RID"
   [ "$(route_field "$RID" 'v["state"]')" = leg1 ] || die "the route is not in leg 1"
   d router "/api/routes/$RID/stop" -X POST >/dev/null || die "stop was refused"
@@ -370,10 +382,109 @@ story_stop() {
   wait_for 300 "leg 1 to finish and the route to hold" 'state_is holding || state_is failed'
   state_is holding || die "the route ended $(route_field "$RID" 'v["state"]')"
   # The route holds once leg 1 is redeemed (the ZEC is the user's); the sweep follows.
-  wait_for 60 "leg 1's sweep" '[ "$(labelled user-b "$RID/1" | json "v[\"outcome\"]")" = swapped ]'
-  [ "$(labelled user-z "$RID/2")" = null ] || die "a leg-2 swap exists after stop"
+  wait_for 60 "leg 1's sweep" '[ "$(labelled user-b "$RID/1/1" | json "v[\"outcome\"]")" = swapped ]'
+  [ "$(labelled user-z "$RID/2/1")" = null ] || die "a leg-2 swap exists after stop"
   wait_for 60 "the ZEC in user-z's wallet" '[ "$(zec_balance user-z)" = "$((z0 + ROUTE_ZAT))" ]'
   log "stop: no leg 2; user-z holds the $ROUTE_ZAT zat leg 1 bought"
+  finish "$RID" "$t0"
+}
+
+# Every part's swap: one per label, of the part's size, a standard size; prints "leg n zat".
+check_parts() { # check_parts <route id>
+  local leg n zat status label who swap
+  while read -r leg n zat status label; do
+    is_denomination "$zat" || die "part $leg/$n is $zat zat, not a standard size"
+    [ "$status" = swapped ] || continue
+    who=user-b
+    [ "$leg" = 2 ] && who=user-z
+    [ "$(labelled_count "$who" "$label")" = 1 ] || die "$label has $(labelled_count "$who" "$label") swaps"
+    swap=$(labelled "$who" "$label")
+    [ "$(echo "$swap" | json 'v["amounts"]["zec_zat"]')" = "$zat" ] || die "$label's swap is not $zat zat"
+  done < <(parts_of "$1")
+}
+
+# The sizes of a leg's parts, largest first, in ZEC: "0.5 0.25 0.1"
+sizes_of() { route "$1" | python3 -c '
+import json, sys
+z = sorted((p["zec_zat"] for p in json.load(sys.stdin)["parts"] if p["leg"] == int(sys.argv[1]) and p["status"] not in ("not_started", "refunded")), reverse=True)
+print(" ".join("%g" % (x / 1e8) for x in z))' "$2"; }
+
+story_parts() {
+  log "--- parts: $PARTS_ZAT zat in standard amounts, each part its own swap after a 2-5 s random gap; the router restarts midway"
+  local t0 z0 u0 zec2 got out_min z1 overlap
+  t0=$(date +%s)
+  z0=$(zec_balance user-z)
+  u0=$(token_balance user-z)
+  RID=$(new_route "$PARTS_ZAT" 2 5 true)
+  log "route $RID"
+  [ "$(route_field "$RID" 'v["standard_amounts"]')" = true ] || die "the route is not in standard amounts"
+  [ "$(route_field "$RID" 'v["legs"][0]["parts"]')" -ge 3 ] || die "leg 1 has fewer than 3 parts"
+  log "plan: buy $(sizes_of "$RID" 1) ZEC, sell $(sizes_of "$RID" 2) ZEC (left in the wallet: $(route_field "$RID" 'v["amounts"]["left_zat"]') zat)"
+  check_parts "$RID"
+  wait_for 300 "the first part of leg 1" '[ "$(parts_done "$RID" 1)" -ge 1 ]'
+  stop_pid router
+  start_router
+  log "restarted ferry-route with $(parts_done "$RID" 1) of $(route_field "$RID" 'v["legs"][0]["parts"]') parts bought"
+  wait_for 900 "the route to finish" 'state_is done || state_is holding || state_is failed'
+  state_is done || die "the route ended $(route_field "$RID" 'v["state"]'): $(route_field "$RID" 'v["note"]')"
+  check_parts "$RID"
+  [ "$(route_field "$RID" 'v["legs"][0]["parts_done"]')" = "$(route_field "$RID" 'v["legs"][0]["parts"]')" ] || die "not every part of leg 1 bought"
+  [ "$(route_field "$RID" 'v["legs"][1]["parts_done"]')" = "$(route_field "$RID" 'v["legs"][1]["parts"]')" ] || die "not every part of leg 2 sold"
+  zec2=$(route_field "$RID" 'v["amounts"]["zec2_zat"]')
+  out_min=$(route_field "$RID" 'v["amounts"]["out_min"]')
+  z1=$((z0 + PARTS_ZAT - zec2))
+  wait_for 30 "user-z to hold $z1 zat ($z0 + $PARTS_ZAT bought - $zec2 sold; the mock has no fees)" '[ "$(zec_balance user-z)" = "$z1" ]'
+  got=$(($(token_balance user-z) - u0))
+  [ "$got" -ge "$out_min" ] || die "user-z received $got USDC units, below out_min $out_min"
+  overlap=$(route "$RID" | python3 -c '
+import json, sys
+p = json.load(sys.stdin)["parts"]
+first_sell = min(x["started_at"] for x in p if x["leg"] == 2)
+last_buy = max(x["ended_at"] for x in p if x["leg"] == 1)
+print("yes" if first_sell < last_buy else "no")')
+  log "parts: bought $(sizes_of "$RID" 1) ZEC and sold $(sizes_of "$RID" 2) ZEC, one swap per part, every amount standard; $got USDC units (out_min $out_min); a sale began while leg 1 was still buying: $overlap"
+  finish "$RID" "$t0"
+}
+
+# A leg-2 part of route $1 whose swap has locked its ZEC (its label), or nothing.
+locked_part() { d user-z /api/swaps | python3 -c '
+import json, sys
+m = [s["route"] for s in json.load(sys.stdin) if (s.get("route") or "").startswith(sys.argv[1] + "/2/") and s["state"] == "ZecLocked"]
+print(m[0] if m else "")' "$1"; }
+
+story_partrefund() {
+  log "--- partrefund: $PARTS_ZAT zat in standard amounts; user-z stalls after locking one leg-2 part and maker-b refunds it at t1; the other parts go through; the route ends holding that part's ZEC; continue sells it"
+  local t0 label id t1 note n_sold
+  t0=$(date +%s)
+  RID=$(new_route "$PARTS_ZAT" 2 5 true)
+  log "route $RID: buy $(sizes_of "$RID" 1) ZEC, sell $(sizes_of "$RID" 2) ZEC"
+  wait_for 600 "a leg-2 part to lock its ZEC" '[ -n "$(locked_part "$RID")" ]'
+  label=$(locked_part "$RID")
+  id=$(labelled user-z "$label" | json 'v["id"]')
+  d user-z "/api/swaps/$id/fault" -X POST -H 'content-type: application/json' -d '{"fault":"stall"}' >/dev/null ||
+    die "could not stall user-z"
+  log "user-z is stalled on $label (it will not claim)"
+  wait_for 60 "maker-b to sign Ready" '[ "$(d maker-b /api/swaps/$id | json "v[\"state\"]")" = ReadySent ]'
+  t1=$(d maker-b "/api/swaps/$id" | json 'v["deadlines"]["t1_unix"]')
+  "$CAST" rpc evm_setNextBlockTimestamp "$t1" --rpc-url "http://127.0.0.1:$ANVIL_PORT" >/dev/null
+  "$CAST" rpc evm_mine --rpc-url "http://127.0.0.1:$ANVIL_PORT" >/dev/null
+  log "jumped anvil to t1 ($t1)"
+  wait_for 900 "the route to stop moving" 'state_is holding || state_is done || state_is failed'
+  state_is holding || die "the route ended $(route_field "$RID" 'v["state"]'), not holding: $(route_field "$RID" 'v["note"]')"
+  [ "$(labelled user-z "$label" | json 'v["outcome"]')" = refunded ] || die "$label did not end refunded"
+  n_sold=$(route_field "$RID" 'v["legs"][1]["parts_done"]')
+  [ "$n_sold" -ge 1 ] || die "no other leg-2 part went through"
+  note=$(route_field "$RID" 'v["note"]')
+  case "$note" in *"was called off and refunded"*"You received"*"hold about"*) ;; *) die "unexpected note: $note" ;; esac
+  log "holding: \"$note\""
+  check_parts "$RID"
+  d router "/api/routes/$RID/continue" -X POST -H 'content-type: application/json' -d '{}' >/dev/null ||
+    die "continue was refused"
+  log "continue: the refunded part's ZEC is planned again ($(sizes_of "$RID" 2) ZEC to sell in all)"
+  wait_for 600 "the route to finish" 'state_is done || state_is failed || state_is holding'
+  state_is done || die "after continue the route is $(route_field "$RID" 'v["state"]'): $(route_field "$RID" 'v["note"]')"
+  check_parts "$RID"
+  log "partrefund: one leg-2 part refunded and held ($n_sold others sold), then sold after continue"
   finish "$RID" "$t0"
 }
 
@@ -386,7 +497,9 @@ cmd_test() {
   story_payout
   story_refund
   story_stop
-  log "all four routes passed ($(($(date +%s) - t0))s)"
+  story_parts
+  story_partrefund
+  log "all six routes passed ($(($(date +%s) - t0))s)"
 }
 
 case "${1:-help}" in
@@ -397,6 +510,8 @@ case "${1:-help}" in
   payout) story_payout ;;
   refund) story_refund ;;
   stop) story_stop ;;
+  parts) story_parts ;;
+  partrefund) story_partrefund ;;
   test) cmd_test ;;
   help | -h | --help) usage ;;
   *) usage; exit 2 ;;
