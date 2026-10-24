@@ -165,7 +165,8 @@ protocol working.
 The public UI is guarded by `web/server/prod.mjs`: visitors can only read status and start a swap
 on a Z (selling ZEC), or on a B for the pairs `BUY_ZEC` names (buying it, section 7.6). Starts
 are capped at `DEMO_MAX_ZAT` (0.5 ZEC), `DEMO_RATE_PER_HOUR` per IP and `DEMO_SWAPS_PER_HOUR`
-across all visitors. These limits are shared by every pair and both directions.
+across all visitors. These limits are shared by every pair and both directions, and counted in the
+web server's memory: a redeploy or a restart of `web` starts them afresh.
 
 Each daemon runs several swaps at once, as many as its free funds cover, up to `MAX_SWAPS` in
 `.env` (ferryd `--max-swaps`; empty: ferryd's default, 4 on these test networks). Past that, or
@@ -529,6 +530,22 @@ It is the server's deploy, with these differences only:
   different wallets. Set `FERRYD_IMAGE` and `WEB_IMAGE` in that `.env` to name the images apart
   from others on the machine (e.g. `ferry-local-ferryd:local`).
 - `migrate-wallets` works with `local` too; it keeps the replaced volumes in `~/ferry-local-backups`.
+
+What behaves differently on a Mac with Docker Desktop (checked on Apple silicon, arm64), and is
+not a sign of a problem on the server:
+- **Closed tabs hold their live-update stream for minutes.** Docker Desktop's port forwarding
+  tells Caddy late that a browser has gone, so the web server counts each closed or reloaded tab's
+  `/api/events` stream as open for 6 minutes or more, and after a few reloads answers "Too many
+  open Ferry tabs from your address" (`DEMO_SSE_PER_IP`, 8). On a Linux server the browser's
+  connection reaches Caddy directly and the stream is let go within about 20 s (ferryd's 15 s
+  keep-alive). Locally, raise the limits in `infra/deploy/.env` (`DEMO_SSE_PER_IP=200`,
+  `DEMO_SSE_TOTAL=2000`); restarting the web server (`infra/deploy/compose up -d --no-deps web`)
+  also frees them.
+- **File ownership isn't enforced on bind mounts**: a key file is readable by the daemons' uid
+  whoever owns it. On Linux it must belong to uid 10001 (`ctl secrets` sees to that for the keys it
+  creates; a key you copy into `infra/deploy/secrets/` by hand needs `sudo chown 10001:10001`).
+- Every image the deploy uses is published for both amd64 and arm64, so nothing runs emulated; the
+  binaries are built for the machine's own architecture.
 
 The coins are real test coins on the public test networks, from the same faucets. A wallet
 belongs in one place: don't run the same keys or Zcash wallet here and on the server at once.
