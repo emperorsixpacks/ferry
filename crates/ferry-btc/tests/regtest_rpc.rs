@@ -1016,3 +1016,100 @@ async fn package_cannot_rescue_a_parent_below_the_static_relay_fee() {
     );
     println!("a package does not lift a parent over the static relay fee: {pkg:?}");
 }
+
+/// What Bitcoin Core 28.1 does with a package whose parent has been mined in the meantime, the
+/// race between the daemon reading the parent as unconfirmed and sending it with its child. The
+/// daemon checks `gettxout` (confirmed chain only) just before `submitpackage` and, if the parent's
+/// output is there, sends nothing: the parent is final and there is nothing left to lift. What
+/// Core 28.1 answers is printed, not asserted (recorded 2026-10-22: `package_msg` "transaction
+/// failed" with the parent's "txn-already-known", and the child accepted into the mempool all the
+/// same, on its own merits). What the daemon relies on is asserted: `output_confirmed` tells a
+/// mined parent from one that is only in the mempool, and the child can be in the mempool
+/// afterwards, sent alone if the package did not take it. Bitcoin only (packages).
+#[tokio::test]
+#[ignore = "needs a regtest bitcoind"]
+async fn package_with_a_parent_that_is_already_confirmed() {
+    use ferry_btc::child::{build_child, ChildLimits};
+
+    let coin = coin();
+    assert!(coin.supports_packages(), "Bitcoin only");
+    let suffix = BtcKey::random().xonly().to_string();
+    let rpc = BitcoinRpc::new(url(coin), "ferry", "ferry")
+        .with_wallet(format!("ferry-btc-it-conf-{}", &suffix[..8]))
+        .with_coin(coin);
+    rpc.ensure_wallet().await.expect("node up?");
+    let net = Network::Regtest;
+    let miner = rpc.new_address(net).await.unwrap();
+    rpc.generate_to_address(101, &miner).await.unwrap();
+
+    let own = rpc.new_address(net).await.unwrap();
+    let parent = rpc
+        .fund_payment(&own, Amount::from_sat(1_500_000), 2)
+        .await
+        .unwrap();
+    let parent_txid = parent.tx.compute_txid();
+    let vout = parent
+        .tx
+        .output
+        .iter()
+        .position(|o| o.script_pubkey == own.script_pubkey())
+        .unwrap() as u32;
+    // Not sent yet: not in a block.
+    assert!(!rpc.output_confirmed(&parent_txid, vout).await.unwrap());
+    rpc.broadcast(&parent.tx).await.unwrap();
+    // In the mempool only: gettxout without the mempool does not see it.
+    assert!(!rpc.output_confirmed(&parent_txid, vout).await.unwrap());
+
+    let limits = ChildLimits {
+        max_fee: Amount::from_sat(1_000_000),
+        max_fee_rate: 1_000_000,
+    };
+    let dest = rpc.new_address(net).await.unwrap().script_pubkey();
+    let child = build_child(
+        &rpc,
+        &parent.tx,
+        vout,
+        &dest,
+        Amount::from_sat(5_000),
+        coin,
+        &limits,
+    )
+    .await
+    .unwrap();
+    let child_txid = child.tx.compute_txid();
+
+    // The parent is mined.
+    rpc.generate_to_address(1, &miner).await.unwrap();
+    assert_eq!(rpc.confirmations(&parent_txid).await.unwrap(), Some(1));
+    assert!(rpc.output_confirmed(&parent_txid, vout).await.unwrap());
+
+    // The package, now.
+    let tested = rpc
+        .test_accept(&[parent.tx.clone(), child.tx.clone()], None)
+        .await;
+    println!("testmempoolaccept [confirmed parent, child]: {tested:?}");
+    let pkg = rpc
+        .submit_package(
+            &[parent.tx.clone(), child.tx.clone()],
+            Some(limits.max_fee_rate),
+        )
+        .await;
+    println!("submitpackage [confirmed parent, child]: {pkg:?}");
+    let held = rpc.mempool_entry(&child_txid).await.unwrap();
+    println!(
+        "the child is in the mempool after the package: {}",
+        held.is_some()
+    );
+
+    // Whatever the package did, the child can be in the mempool: alone if it is not there.
+    if held.is_none() {
+        rpc.broadcast_capped(&child.tx, limits.max_fee_rate)
+            .await
+            .unwrap();
+    }
+    assert!(rpc.mempool_entry(&child_txid).await.unwrap().is_some());
+    rpc.generate_to_address(1, &miner).await.unwrap();
+    assert_eq!(rpc.confirmations(&child_txid).await.unwrap(), Some(1));
+    // Once the child is mined too, the output is spent: no longer an unspent confirmed output.
+    assert!(!rpc.output_confirmed(&parent_txid, vout).await.unwrap());
+}

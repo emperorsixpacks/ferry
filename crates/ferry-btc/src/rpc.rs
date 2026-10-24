@@ -930,6 +930,16 @@ impl BitcoinRpc {
         })
     }
 
+    /// Whether output `vout` of `txid` is an unspent output of the confirmed chain (`gettxout`
+    /// without the mempool): the transaction is in a block and nothing in a block has spent that
+    /// output. Works on a pruned node, which a lookup of the transaction itself does not.
+    pub async fn output_confirmed(&self, txid: &Txid, vout: u32) -> Result<bool, RpcError> {
+        let v: Value = self
+            .call("gettxout", json!([txid.to_string(), vout, false]))
+            .await?;
+        Ok(!v.is_null())
+    }
+
     /// `txid` in the node's mempool (`getmempoolentry`); None if it is not there (confirmed,
     /// evicted, replaced or never seen).
     pub async fn mempool_entry(&self, txid: &Txid) -> Result<Option<MempoolEntry>, RpcError> {

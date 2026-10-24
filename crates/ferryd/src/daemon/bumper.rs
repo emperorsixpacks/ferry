@@ -28,9 +28,11 @@ use crate::record::BumpState;
 /// restart. `--bump off` (the default) does the same from the start.
 const KILL_FILE: &str = "bump-off";
 
-/// Whether bumping is on: `--bump on` and no kill file.
-pub(super) fn bump_on(mode: BumpMode, data_dir: &Path) -> bool {
-    mode == BumpMode::On && !data_dir.join(KILL_FILE).exists()
+/// Whether bumping is on: `--bump on`, no kill file, and not a main network. (ferryd does not even
+/// start with `--bump on` on a mainnet, `Cli::check_bump`; this is the second lock on the same
+/// door, until the outside review of the bump is done.)
+pub(super) fn bump_on(mode: BumpMode, network: Network, data_dir: &Path) -> bool {
+    mode == BumpMode::On && network != Network::Bitcoin && !data_dir.join(KILL_FILE).exists()
 }
 
 /// The spend this swap is waiting on, if it is one we may bump: Z's redeem or punish, B's refund.
@@ -57,11 +59,35 @@ fn per_vb(rate: u64) -> String {
     format!("{:.1}", rate as f64 / 1000.0)
 }
 
-/// Write `label` to the timeline once per `key` for this spend.
+/// The most notes one spend's bump may write to the timeline.
+const MAX_NOTES: usize = 16;
+
+/// Write `label` to the timeline once per `key` for this spend, and at most [`MAX_NOTES`] times.
 fn note_once(rec: &mut SwapRecord, st: &mut BumpState, key: &str, label: String) {
-    if !st.noted.iter().any(|k| k == key) {
+    if st.noted.len() < MAX_NOTES && !st.noted.iter().any(|k| k == key) {
         st.noted.push(key.to_string());
         rec.log("btc", "fee_bump_note", label, None);
+    }
+}
+
+/// What a node's refusal says, without the numbers and txids it carries, so the same refusal is
+/// one note: "insufficient fee, rejecting replacement ab12..., not enough ..." is "insufficient fee".
+fn reason_code(why: &str) -> String {
+    why.split([',', ';', '('])
+        .next()
+        .unwrap_or(why)
+        .trim()
+        .chars()
+        .take(60)
+        .collect()
+}
+
+/// The node's own text of an answer that refused something, without the "rpc <method> error <code>"
+/// that [`RpcError`]'s display adds.
+fn refusal_text(e: &RpcError) -> String {
+    match e {
+        RpcError::Rpc { message, .. } => message.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -69,7 +95,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     /// One look at the spend we wait on: bump it if the rules say so. Any node error ends the
     /// look; the next tick tries again.
     pub(super) async fn bump(&self, rec: &mut SwapRecord) {
-        if !bump_on(self.cli.bump, &self.cli.data_dir) {
+        if !bump_on(self.cli.bump, self.cli.network, &self.cli.data_dir) {
             return;
         }
         let Some(spend) = live_spend(&rec.swap) else {
@@ -159,6 +185,12 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             return Ok(());
         }
         let entry = self.rpc.mempool_entry(&parent_txid).await?;
+        // In the node's mempool means the node took it and the counterparty can see it, however
+        // it got there (our package, a crash before this was saved): it counts as sent.
+        if entry.is_some() {
+            self.mark_announced(rec, parent_tx);
+        }
+        let announced = announced || entry.is_some();
         // A spend the node does not hold goes back in as a package only if the node took it
         // before (the counterparty may have seen it) or the timing rules still allow a first
         // broadcast. Otherwise a bump would reveal what the rebroadcaster is told not to.
@@ -316,15 +348,25 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             );
             return Ok(());
         }
-        // Two independent guards besides the planner's own arithmetic: the child's fee may not
-        // pass the cap, and its rate may not pass three times the wanted package rate (a child
-        // pays for its parent too, so up to about 2.5x is normal), or twice the last child's.
+        // The guards besides the planner's own arithmetic: the child's fee may not pass the cap
+        // (the soft cap, or the payout less dust when time is short), and its rate may not pass
+        // the ceiling. A child pays for its parent too, so its own rate is about 2.5x the wanted
+        // package rate for a parent of its size, and more for a parent that has unconfirmed
+        // ancestors to carry; the ceiling is therefore the larger of three times the wanted rate,
+        // twice the last child's rate, and the planned child's own rate with a margin. The node
+        // enforces the same ceiling as maxfeerate.
         let inc = floors.incremental.max(1);
+        let planned_rate = rate_of(plan.child_fee, child_vsize);
         let ceiling = plan
             .target_rate
             .saturating_mul(3)
             .saturating_add(inc.saturating_mul(2))
-            .max(rate_of(st.child_fee, st.child_vsize).saturating_mul(2));
+            .max(rate_of(st.child_fee, st.child_vsize).saturating_mul(2))
+            .max(
+                planned_rate
+                    .saturating_add(planned_rate / 8)
+                    .saturating_add(inc),
+            );
         let limits = ChildLimits {
             max_fee: Amount::from_sat(bump::cap(&bump_params, plan.urgent)),
             max_fee_rate: ceiling,
@@ -347,10 +389,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     rec,
                     st,
                     "not_ours",
-                    format!(
-                        "{name} cannot be bumped: the wallet could not sign for its output (it is \
-                         not one this wallet owns, or the wallet is locked)"
-                    ),
+                    format!("{name} cannot be bumped: its output is not one this wallet can spend"),
                 );
                 return Ok(());
             }
@@ -390,6 +429,12 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         }
 
         let child_txid = built.tx.compute_txid();
+        if package && self.rpc.output_confirmed(&parent_txid, 0).await? {
+            // The parent was mined since this tick began. A package whose parent is already in a
+            // block fails as a whole (the parent is "already known"), and there is nothing left
+            // to lift: the next tick sees the parent confirmed and stops.
+            return Ok(());
+        }
         // What the node says to the real send. An answer from the node that refuses it is a
         // refusal, tried again at the next block; a node that cannot be reached is an error.
         let refusal = if package {
@@ -399,22 +444,31 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 .await
             {
                 Ok(sent) if sent.success => None,
+                // The parent's own error says why; the child's is usually "missing inputs",
+                // because its parent did not go in.
                 Ok(sent) => Some(
                     sent.errors
-                        .first()
+                        .iter()
+                        .find(|(t, _)| *t == parent_txid)
+                        .or_else(|| sent.errors.first())
                         .map(|(_, e)| e.clone())
                         .unwrap_or(sent.message),
                 ),
-                Err(PackageError::Rpc(e @ RpcError::Rpc { .. })) => Some(e.to_string()),
+                Err(PackageError::Rpc(e @ RpcError::Rpc { .. })) => Some(refusal_text(&e)),
                 Err(e) => return Err(e.into()),
             }
         } else {
             match self.rpc.broadcast_capped(&built.tx, ceiling).await {
                 Ok(_) => None,
-                Err(e @ RpcError::Rpc { .. }) => Some(e.to_string()),
+                Err(e @ RpcError::Rpc { .. }) => Some(refusal_text(&e)),
                 Err(e) => return Err(e.into()),
             }
         };
+        if package && matches!(self.rpc.mempool_entry(&parent_txid).await, Ok(Some(_))) {
+            // The parent is in the mempool now, whether or not its child got in with it: it has
+            // been sent, so it is announced, as if the node had taken it alone.
+            self.mark_announced(rec, parent_tx);
+        }
         if let Some(why) = refusal {
             let what = if package {
                 format!("would not take {name} with its child as a package ({why})")
@@ -422,19 +476,6 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 format!("would not take the fee bump of {name} ({why})")
             };
             return self.refused(rec, st, tip, &what, &why);
-        }
-        if package {
-            // The parent went in through the package: it is announced now, as if sent alone.
-            if let Some(r) = rec
-                .rebroadcast
-                .iter_mut()
-                .find(|r| r.tx.compute_txid() == parent_txid)
-            {
-                if !r.announced {
-                    r.announced = true;
-                    self.narrate_broadcast(rec, parent_tx, parent_txid);
-                }
-            }
         }
 
         let base = parent.mempool.unwrap_or(Ancestry {
@@ -495,10 +536,27 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         note_once(
             rec,
             st,
-            &format!("refused:{why}"),
+            &format!("refused:{}", reason_code(why)),
             format!("The node {what}{hint}; trying again at the next block"),
         );
         Ok(())
+    }
+
+    /// Record that `parent_tx` has been sent (the node holds it): its entry in the rebroadcast set
+    /// becomes `announced` and the timeline gets its broadcast line, as `try_broadcast` does when
+    /// the node takes a spend alone.
+    fn mark_announced(&self, rec: &mut SwapRecord, parent_tx: &Transaction) {
+        let txid = parent_tx.compute_txid();
+        if let Some(r) = rec
+            .rebroadcast
+            .iter_mut()
+            .find(|r| r.tx.compute_txid() == txid)
+        {
+            if !r.announced {
+                r.announced = true;
+                self.narrate_broadcast(rec, parent_tx, txid);
+            }
+        }
     }
 }
 
@@ -510,16 +568,67 @@ mod tests {
     #[test]
     fn the_kill_switch_stops_bumping_at_once() {
         let dir = tempfile::tempdir().unwrap();
+        let reg = Network::Regtest;
         // Off by default, and off means off.
-        assert!(!bump_on(BumpMode::Off, dir.path()));
-        assert!(bump_on(BumpMode::On, dir.path()));
+        assert!(!bump_on(BumpMode::Off, reg, dir.path()));
+        assert!(bump_on(BumpMode::On, reg, dir.path()));
         // The file stops a running daemon at its next tick, no restart; removing it lets it on.
         let kill = dir.path().join(KILL_FILE);
         std::fs::write(&kill, "").unwrap();
-        assert!(!bump_on(BumpMode::On, dir.path()));
-        assert!(!bump_on(BumpMode::Off, dir.path()));
+        assert!(!bump_on(BumpMode::On, reg, dir.path()));
+        assert!(!bump_on(BumpMode::Off, reg, dir.path()));
         std::fs::remove_file(&kill).unwrap();
-        assert!(bump_on(BumpMode::On, dir.path()));
+        assert!(bump_on(BumpMode::On, reg, dir.path()));
+    }
+
+    /// The second lock on the mainnet door: whatever the flag says, a main network never bumps.
+    #[test]
+    fn a_main_network_never_bumps() {
+        let dir = tempfile::tempdir().unwrap();
+        for net in [Network::Regtest, Network::Testnet, Network::Signet] {
+            assert!(bump_on(BumpMode::On, net, dir.path()), "{net}");
+        }
+        assert!(!bump_on(BumpMode::On, Network::Bitcoin, dir.path()));
+        assert!(!bump_on(BumpMode::Off, Network::Bitcoin, dir.path()));
+    }
+
+    #[test]
+    fn a_refusal_is_one_note_whatever_numbers_it_carries() {
+        // Core's texts carry txids and amounts that change with every attempt.
+        assert_eq!(
+            reason_code("insufficient fee, rejecting replacement ab12cd, not enough additional fees to relay; 100 < 111"),
+            "insufficient fee"
+        );
+        assert_eq!(
+            reason_code("min relay fee not met, 2000 < 3330"),
+            "min relay fee not met"
+        );
+        assert_eq!(reason_code("txn-mempool-conflict"), "txn-mempool-conflict");
+        assert_eq!(
+            reason_code("  mempool min fee not met, 1 < 2  "),
+            "mempool min fee not met"
+        );
+        assert_eq!(reason_code(&"x".repeat(200)).len(), 60);
+        let e = RpcError::Rpc {
+            method: "sendrawtransaction".into(),
+            code: -26,
+            message: "insufficient fee, rejecting replacement".into(),
+        };
+        assert_eq!(refusal_text(&e), "insufficient fee, rejecting replacement");
+    }
+
+    #[test]
+    fn notes_are_written_once_and_at_most_sixteen_times() {
+        let mut rec = sample_record();
+        let mut st = BumpState::default();
+        note_once(&mut rec, &mut st, "a", "first".into());
+        note_once(&mut rec, &mut st, "a", "again".into());
+        assert_eq!(rec.timeline.len(), 1);
+        for i in 0..40 {
+            note_once(&mut rec, &mut st, &format!("k{i}"), format!("note {i}"));
+        }
+        assert_eq!(rec.timeline.len(), MAX_NOTES);
+        assert_eq!(st.noted.len(), MAX_NOTES);
     }
 
     #[test]

@@ -239,11 +239,14 @@ This is a known critique of this design, so here it is exactly:
   its own payout (child-pays-for-parent, CPFP), and replaces that child with a better one as the
   deadline nears. It needs no anchor and no coins besides the payout, and nobody else can attach
   anything to those transactions, because nobody else can spend the output. The child's fee is
-  capped: 10% of the payout while more than two blocks are left, the payout less dust after that,
-  plus a ceiling on its fee rate that the node enforces too (`maxfeerate`). The call-off is not
+  capped: 10% of the payout while more than two blocks are left, the payout less dust after that
+  (a penalty has no deadline and always stays at the 10%), plus a ceiling on its fee rate that
+  the node enforces too (`maxfeerate`). The call-off is not
   bumped, on purpose: it only delays the swap, and a call-off that could be bumped would let B
   outbid Z's claim in the race at the first deadline. `--bump off`, or a file named `bump-off` in
-  the data directory, stops all bumping at once.
+  the data directory, stops all bumping at once. And ferryd **refuses to start** with `--bump on`
+  (or `FERRY_BUMP=on`) on a Bitcoin or Litecoin mainnet, and never bumps there, until the review
+  below is done.
 - **What was checked.** On regtest Bitcoin Core 28.1
   ([evidence](evidence/btc-fee-bump-regtest-2026-10-22.txt)): a claim, a refund and a penalty that a
   rising mempool floor kept out were put back with a child as a package and confirmed; a child was
@@ -264,6 +267,10 @@ This is a known critique of this design, so here it is exactly:
     that swap.
   - A claim that pays a third-party address (`payout_to`) is not bumped: it has no output of Z's
     own. Forwarding the payout from a child is not built.
+  - The bump stops as soon as the other side's competing spend is seen, even unconfirmed: Z's
+    state moves to called-off when B's call-off is in the mempool, and B's to penalised when Z's
+    penalty is. A claim or refund put back as a package could still have replaced it; the state
+    machines (`ferry-core`) were not changed to allow that.
   - The watchtower does not bump (it holds no keys and cannot spend B's output), so a B that is
     offline relies on its refund's presigned fee.
   - Whether Bitcoin nodes and miners relay and mine packages the way Core 28 does is not measured

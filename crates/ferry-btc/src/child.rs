@@ -68,7 +68,7 @@ pub enum ChildError {
     UnsupportedInput(String),
     #[error("the child must pay to a spendable output script")]
     BadPayTo,
-    #[error("the wallet could not sign the child: the parent output is not one of its own, or the wallet is locked")]
+    #[error("the wallet could not sign the child: the parent output is not one of its own")]
     NotSigned,
     #[error("the wallet changed the child ({0})")]
     Altered(&'static str),
@@ -210,15 +210,14 @@ pub async fn build_child<W: ChildWallet>(
     if !complete {
         return Err(ChildError::NotSigned);
     }
-    // A segwit transaction's txid does not cover its witness: the same txid means the wallet
-    // changed neither inputs, outputs, version, locktime nor sequences.
+    // A segwit transaction's txid does not cover its witness but does cover everything else, the
+    // scriptSig included: the same txid means the wallet changed neither inputs, outputs,
+    // version, locktime, sequences nor put anything in a scriptSig.
     if signed.compute_txid() != template.compute_txid() {
         return Err(ChildError::Altered("txid differs from the template"));
     }
-    if signed.input.len() != 1
-        || !signed.input[0].script_sig.is_empty()
-        || signed.input[0].witness.is_empty()
-    {
+    // What is left to check is that it was signed at all (a witness).
+    if signed.input.len() != 1 || signed.input[0].witness.is_empty() {
         return Err(ChildError::Altered("the input is not a segwit spend"));
     }
     let vsize = signed.vsize() as u64;
@@ -479,7 +478,8 @@ mod tests {
             go(Coin::Ltc, 0, &p2tr(2)),
             Err(ChildError::Dust { dust, .. }) if dust == Amount::from_sat(3_300)
         ));
-        // A fee that is the whole output (or more) is refused as such, before dust.
+        // A fee equal to the whole output leaves nothing, which is below dust; one more satoshi
+        // than the output has cannot be paid at all.
         assert!(matches!(
             go(Coin::Btc, 1_000, &p2tr(2)),
             Err(ChildError::Dust { .. })
@@ -643,9 +643,15 @@ mod tests {
             err(Behaviour::NoWitness).await,
             ChildError::Altered(_)
         ));
+        // Anything put in a scriptSig changes the txid, so the txid check is what catches it.
         assert!(matches!(
             err(Behaviour::LegacyScriptSig).await,
-            ChildError::Altered(_)
+            ChildError::Altered(m) if m.contains("txid")
+        ));
+        // An unsigned input (no witness) has the template's txid and is caught by the witness check.
+        assert!(matches!(
+            err(Behaviour::NoWitness).await,
+            ChildError::Altered(m) if m.contains("segwit")
         ));
         // A 65-byte signature (a sighash byte) makes the child bigger than its fee was set for.
         assert!(matches!(

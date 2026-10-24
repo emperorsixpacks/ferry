@@ -243,8 +243,9 @@ pub struct Cli {
     /// Raise the fee of our own stuck tx_redeem (Z), tx_refund (B) or tx_punish (Z) by spending
     /// its payout in a child that pays more (CPFP), and replace that child by a better one as the
     /// deadline nears. Off by default; `--bump off` stops all bumping at once, and so does a file
-    /// named `bump-off` in --data-dir, checked every tick. tx_cancel is never bumped. Bitcoin and
-    /// Litecoin stay off mainnet until the review in docs/THREAT-MODEL.md is done.
+    /// named `bump-off` in --data-dir, checked every tick. tx_cancel is never bumped. REFUSED on
+    /// a Bitcoin or Litecoin mainnet (ferryd will not start) until the outside review in
+    /// docs/THREAT-MODEL.md is done.
     #[arg(long, value_enum, env = "FERRY_BUMP", default_value = "off")]
     pub bump: BumpMode,
     /// --bump: the most a child may pay while more than --bump-urgent-blocks blocks are left,
@@ -253,8 +254,10 @@ pub struct Cli {
           default_value_t = crate::bump::DEFAULT_SOFT_CAP_PERCENT,
           value_parser = clap::value_parser!(u64).range(1..=100))]
     pub bump_soft_cap_percent: u64,
-    /// --bump: at or below this many blocks left before the deadline, the urgent cap applies.
-    #[arg(long, default_value_t = crate::bump::DEFAULT_URGENT_BLOCKS)]
+    /// --bump: at or below this many blocks left before a redeem's or a refund's deadline, the
+    /// urgent cap applies (0 to 5). tx_punish has no deadline and is never urgent.
+    #[arg(long, default_value_t = crate::bump::DEFAULT_URGENT_BLOCKS,
+          value_parser = clap::value_parser!(u32).range(0..=5))]
     pub bump_urgent_blocks: u32,
     /// --bump: at most one replacement of our child per this many blocks, unless the wanted rate
     /// jumped by a quarter or the deadline is near.
@@ -432,6 +435,25 @@ impl Cli {
             grace: GRACE,
             max_gap_bps: self.maker_price_max_gap_bps,
         }))
+    }
+
+    /// The fee bump has not been reviewed outside the project (docs/THREAT-MODEL.md), and it moves
+    /// funds: until it has, `--bump on` is refused on a Bitcoin or Litecoin mainnet, whatever else
+    /// is set. It has no effect with `--counter evm`, so that is left alone. Take this check out
+    /// only together with that review.
+    pub fn check_bump(&self) -> Result<(), String> {
+        if self.bump == BumpMode::On
+            && self.counter == crate::evm::Counter::Btc
+            && self.network == Network::Bitcoin
+        {
+            return Err(format!(
+                "--bump on (or FERRY_BUMP=on) is not allowed on {} mainnet: the fee bump moves \
+                 funds and has not been reviewed outside the project yet (docs/THREAT-MODEL.md, \
+                 \"Fixed fees on prepared Bitcoin transactions\"). Leave it off, or use a test network",
+                self.chain.name()
+            ));
+        }
+        Ok(())
     }
 
     /// A maker that follows a price feed on mainnet (`counter_mainnet`, or Zcash mainnet) keeps
@@ -652,6 +674,55 @@ mod tests {
             100
         );
         assert!(cli(&["--bump-min-interval-blocks", "0"]).is_err());
+        // The urgent window is 0 to 5 blocks: a longer one would make a spend urgent from the
+        // start, and a window that long is no emergency.
+        assert_eq!(cli(&["--bump-urgent-blocks", "0"]).unwrap().bump_urgent_blocks, 0);
+        assert_eq!(cli(&["--bump-urgent-blocks", "5"]).unwrap().bump_urgent_blocks, 5);
+        assert!(cli(&["--bump-urgent-blocks", "6"]).is_err());
+        assert!(cli(&["--bump-urgent-blocks", "-1"]).is_err());
+    }
+
+    /// `--bump on` is refused on a Bitcoin or Litecoin mainnet until the outside review is done;
+    /// off is always fine, and test networks are fine. (The environment form, FERRY_BUMP=on, is
+    /// checked against the real binary in tests/bump_gate.rs.)
+    #[test]
+    fn bump_is_refused_on_mainnet() {
+        let cli = |extra: &[&str]| {
+            let base = [
+                "ferryd",
+                "--role",
+                "z",
+                "--name",
+                "n",
+                "--data-dir",
+                "/nonexistent",
+            ];
+            Cli::try_parse_from(base.iter().chain(extra)).unwrap()
+        };
+        for chain in ["btc", "ltc"] {
+            let on = cli(&["--chain", chain, "--network", "bitcoin", "--bump", "on"]);
+            let err = on.check_bump().unwrap_err();
+            assert!(err.contains("not allowed") && err.contains("mainnet"), "{err}");
+            assert!(err.contains(if chain == "btc" { "Bitcoin" } else { "Litecoin" }), "{err}");
+            // Off is the default and is fine on mainnet.
+            for extra in [
+                &["--chain", chain, "--network", "bitcoin"][..],
+                &["--chain", chain, "--network", "bitcoin", "--bump", "off"],
+            ] {
+                assert_eq!(cli(extra).check_bump(), Ok(()), "{extra:?}");
+            }
+            // Test networks may bump.
+            for net in ["regtest", "testnet", "signet"] {
+                if chain == "ltc" && net == "signet" {
+                    continue; // Litecoin has no signet; the chain check refuses it elsewhere
+                }
+                let on = cli(&["--chain", chain, "--network", net, "--bump", "on"]);
+                assert_eq!(on.check_bump(), Ok(()), "{chain} {net}");
+            }
+        }
+        // With an EVM counter the flag does nothing, so it is not in the way.
+        let evm = cli(&["--counter", "evm", "--network", "bitcoin", "--bump", "on"]);
+        assert_eq!(evm.check_bump(), Ok(()));
     }
 
     /// On mainnet (the counter-chain's or Zcash's) a maker that follows a price feed keeps at

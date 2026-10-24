@@ -106,6 +106,7 @@ pub struct Params {
     /// Dust threshold of the child's output script: the child may not leave less.
     pub dust: u64,
     pub soft_cap_percent: u64,
+    /// At or below this many blocks left, a redeem or refund is urgent (a punish never is).
     pub urgent_blocks: u32,
     pub min_interval_blocks: u64,
 }
@@ -258,7 +259,9 @@ pub fn decide(i: &BumpInput) -> BumpDecision {
         return Exhausted(ExhaustedReason::ParentBelowMinRelay);
     }
     let blocks_left = i.deadline.blocks_left();
-    let urgent = blocks_left <= i.params.urgent_blocks;
+    // tx_punish has no deadline, so it is never urgent, however wide the urgent window is set:
+    // it may take the soft cap and no more.
+    let urgent = !matches!(i.deadline, Deadline::Liveness) && blocks_left <= i.params.urgent_blocks;
     let floor = i.floors.floor();
     // A node that reports no incremental fee would let a replacement add nothing; one satoshi
     // per kvB keeps the arithmetic strictly increasing.
@@ -800,6 +803,28 @@ mod tests {
     }
 
     #[test]
+    fn punish_is_never_urgent_whatever_the_window() {
+        // tx_punish has no deadline: its "blocks left" is a constant 6, which a wide urgent
+        // window (the flag allows 0 to 5; the planner must not rely on it) would call urgent.
+        for window in [0, 2, 5, 6, 7, 40] {
+            let mut i = base();
+            i.params.payout = 28_000;
+            i.params.urgent_blocks = window;
+            i.estimate = Some(900_000);
+            i.deadline = Deadline::Liveness;
+            let p = plan(decide(&i));
+            assert!(!p.urgent, "window {window}");
+            assert_eq!(p.child_fee, 2_800, "the soft cap, window {window}");
+            // A redeem with the same window and blocks left is urgent from the window up.
+            i.deadline = Deadline::Redeem {
+                t1: 12,
+                lock_confs: 12 - 1 - window.min(11),
+            };
+            assert!(plan(decide(&i)).urgent, "window {window}");
+        }
+    }
+
+    #[test]
     fn a_parent_in_the_mempool_with_unconfirmed_ancestors_is_judged_as_a_whole() {
         // Ancestors that drag the package down: 3_000 sat over 400 vB (7.5 sat/vB).
         let mut i = base();
@@ -829,7 +854,7 @@ mod tests {
                 payout in 1_000u64..20_000_000,
                 dust in 294u64..3_300,
                 soft in 1u64..60,
-                urgent_blocks in 0u32..5,
+                urgent_blocks in 0u32..40,
                 interval in 0u64..4,
                 child_vsize in 100u64..140,
             ) -> Params {
@@ -1059,6 +1084,17 @@ mod tests {
                             prop_assert!(q.child_fee >= p.child_fee + fee_for(i.floors.incremental.max(1), i.params.child_vsize));
                         }
                     }
+                }
+            }
+
+            /// tx_punish has no deadline: whatever the urgent window, it is never urgent and never
+            /// pays more than the soft cap.
+            #[test]
+            fn punish_is_never_urgent(i in input()) {
+                let i = BumpInput { deadline: Deadline::Liveness, ..i };
+                if let Bump(p) = decide(&i) {
+                    prop_assert!(!p.urgent);
+                    prop_assert!(p.child_fee <= cap(&i.params, false), "over the soft cap");
                 }
             }
 
