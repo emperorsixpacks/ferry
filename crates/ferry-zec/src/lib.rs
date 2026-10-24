@@ -57,7 +57,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use ferry_core::{SendFailure, ZecLeg, ZecNote, ZecStatus};
+use ferry_core::{SendFailure, ZecLeg, ZecNote, ZecStatus, ZecTxState, ZecWithdrawal};
 use rusqlite::OpenFlags;
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -132,6 +132,8 @@ struct Inner {
     cache: Mutex<Cache>,
     own_account: String,
     own_address: String,
+    /// Where deposits go: a shielded-only address of our own account (see [`deposit_address`]).
+    deposit_address: String,
 }
 
 /// [`ZecLeg`] over a zcash-devtool wallet.
@@ -199,6 +201,15 @@ impl DevtoolZecLeg {
             .find_map(|l| l.trim().strip_prefix("Default Address:"))
             .map(|a| a.trim().to_string())
             .ok_or_else(|| ZecError::Other("list-addresses printed no default address".into()))?;
+        let deposit_address = match deposit_address(&cfg, &own_account).await {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(
+                    "no shielded-only deposit address ({e}); deposits are shown the default address"
+                );
+                own_address.clone()
+            }
+        };
 
         let inner = Arc::new(Inner {
             http: reqwest::Client::new(),
@@ -206,6 +217,7 @@ impl DevtoolZecLeg {
             cache: Mutex::new(Cache::default()),
             own_account,
             own_address,
+            deposit_address,
             cfg,
         });
         tracing::info!(account = %inner.own_account, address = %inner.own_address, "Zcash wallet ready");
@@ -464,6 +476,159 @@ impl Inner {
         .await?;
         combine(cfg, &proven, &signed, &done).await?;
         Ok(done)
+    }
+
+    /// Builds, checks, proves and signs a withdrawal of `amount` from our own account to `to`,
+    /// up to the combined PCZT ready to broadcast, and reads its txid and fee from it. Nothing
+    /// here touches the network except the wallet sync. The caller holds the lock.
+    async fn build_withdrawal(
+        &self,
+        to: &str,
+        amount: u64,
+    ) -> Result<(PathBuf, ZecWithdrawal), ZecError> {
+        self.sync_locked().await?;
+        let cfg = &self.cfg;
+        // Shielded only: our Ironwood notes alone must cover it (and its fee); if they only lack
+        // confirmations, the caller may try again later.
+        let need = amount.saturating_add(SEND_FEE_RESERVE);
+        let unspent = self.unspent_ironwood(self.own_account.clone()).await?;
+        if unspent < need {
+            return Err(ZecError::Refused(format!(
+                "our Ironwood notes total {unspent} zat, short of {amount} zat plus up to \
+                 {SEND_FEE_RESERVE} zat in fees; Ferry sends only from Ironwood notes"
+            )));
+        }
+        let spendable = self.cache.lock().unwrap().balance.unwrap_or(0);
+        if spendable < need {
+            return Err(ZecError::NotSent(format!(
+                "only {spendable} of {unspent} zat in Ironwood notes is spendable yet; the rest \
+                 waits for confirmations"
+            )));
+        }
+        let key = format!(
+            "withdraw-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let (created, proven, signed, done) = pczt_stage_paths(cfg, &key).await?;
+        run_pczt(
+            cfg,
+            &[
+                "create",
+                &self.own_account,
+                "--ironwood-only",
+                "--address",
+                to,
+                "--value",
+                &amount.to_string(),
+                "--output",
+                &path_str(&created),
+            ],
+        )
+        .await?;
+        // The exact transaction that will be signed and broadcast: Ironwood in, Ironwood out,
+        // nothing transparent, Sapling or Orchard.
+        let p = pools(&cfg.signer, &created).await?;
+        if !p.ironwood_only() {
+            return Err(ZecError::Refused(format!(
+                "the withdrawal would not be Ironwood-only ({p}); Ferry sends only shielded ZEC"
+            )));
+        }
+        run_pczt(
+            cfg,
+            &["prove", &path_str(&created), "--output", &path_str(&proven)],
+        )
+        .await?;
+        run_pczt(
+            cfg,
+            &[
+                "sign",
+                "-i",
+                &path_str(&cfg.identity),
+                &path_str(&created),
+                "--output",
+                &path_str(&signed),
+            ],
+        )
+        .await?;
+        combine(cfg, &proven, &signed, &done).await?;
+        // The id it will be broadcast under (the extractor `pczt send` runs), and what it moves.
+        let txid = extract_txid(cfg, &done).await?;
+        let text = run_pczt(cfg, &["inspect", &path_str(&done)]).await?;
+        let shown = parse_inspect(&text)
+            .ok_or_else(|| ZecError::Other(format!("cannot read pczt inspect:\n{text}")))?;
+        if shown.txid.as_deref().is_some_and(|t| t != txid) {
+            return Err(ZecError::Other(format!(
+                "pczt inspect says txid {:?}, pczt extract {txid}",
+                shown.txid
+            )));
+        }
+        if !shown.outputs.contains(&amount) {
+            return Err(ZecError::Other(format!(
+                "the withdrawal has no output of {amount} zat: {:?}",
+                shown.outputs
+            )));
+        }
+        let spent: u64 = shown.spends.iter().sum();
+        let fee = spent
+            .checked_sub(shown.outputs.iter().sum())
+            .filter(|f| *f <= SEND_FEE_RESERVE)
+            .ok_or_else(|| {
+                ZecError::Refused(format!(
+                    "the withdrawal's fee is not between 0 and {SEND_FEE_RESERVE} zat (spends \
+                     {:?}, outputs {:?})",
+                    shown.spends, shown.outputs
+                ))
+            })?;
+        Ok((
+            done,
+            ZecWithdrawal {
+                txid,
+                fee,
+                spent,
+                spendable,
+            },
+        ))
+    }
+
+    /// What the wallet database says of a transaction (see [`ZecTxState`]).
+    async fn stored_tx_state(&self, txid: &str) -> Result<ZecTxState, ZecError> {
+        let mut key = hex::decode(txid).map_err(|e| ZecError::Other(format!("txid: {e}")))?;
+        key.reverse();
+        let row = query(&self.cfg.wallet_dir, move |c| {
+            c.query_row(
+                "SELECT t.mined_height, t.expiry_height,
+                        (SELECT COALESCE(MAX(height), 0) FROM blocks)
+                   FROM transactions t WHERE t.txid = ?1",
+                [key],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<u64>>(0)?,
+                        r.get::<_, Option<u64>>(1)?,
+                        r.get::<_, u64>(2)?,
+                    ))
+                },
+            )
+        })
+        .await;
+        let (mined, expiry, scanned) = match row {
+            Ok(r) => r,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(ZecTxState::Unknown),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(match mined {
+            Some(h) => {
+                let tip = self.node_height().await?.max(h);
+                ZecTxState::Mined {
+                    confirmations: (tip - h + 1) as u32,
+                }
+            }
+            // As LIVE_TX: unexpired against the wallet's scanned tip.
+            None if expiry.is_none_or(|e| e == 0 || e > scanned) => ZecTxState::Pending,
+            None => ZecTxState::Expired,
+        })
     }
 
     /// A transaction we built that spends one of the account's notes worth at least
@@ -747,20 +912,14 @@ impl ZecLeg for DevtoolZecLeg {
         })
     }
 
+    /// A shielded-only address of our own account (an Orchard receiver, which Ironwood shares,
+    /// and no transparent one), so whatever a wallet sends there arrives shielded.
     fn receive_address(&self) -> Option<String> {
-        Some(self.own_address().to_string())
+        Some(self.0.deposit_address.clone())
     }
 
-    /// `ferry-zec-signer address <net> <ua>`: a unified address of our network with an Orchard
-    /// receiver (Ironwood shares it). This crate decodes no addresses itself (it has no Zcash
-    /// crates); the signer is pinned to devtool's librustzcash.
     async fn check_address(&self, address: &str) -> Result<(), String> {
-        let mut cmd = Command::new(&self.0.cfg.signer);
-        cmd.args(["address", &self.0.cfg.network, address]);
-        let out = run_limited(cmd, "ferry-zec-signer address", None, READ_TIMEOUT)
-            .await
-            .map_err(|e| format!("could not check the address: {e}"))?;
-        address_verdict(out.status.success(), &out.stdout, &out.stderr)
+        signer_check_address(&self.0.cfg, address).await
     }
 
     fn joint_address(&self, fvk: &[u8; 96]) -> Result<String, ZecError> {
@@ -795,6 +954,46 @@ impl ZecLeg for DevtoolZecLeg {
 
     fn send_fee_reserve(&self) -> u64 {
         SEND_FEE_RESERVE
+    }
+
+    /// Built (Ironwood in, Ironwood out), signed and its txid read from the finished PCZT, all
+    /// under the wallet lock, then handed to `before_broadcast`, then `pczt send` (which stores
+    /// it in the wallet before broadcasting). From `pczt send` on it may have gone out.
+    async fn withdraw<F>(
+        &self,
+        to: &str,
+        amount: u64,
+        before_broadcast: F,
+    ) -> Result<ZecWithdrawal, ZecError>
+    where
+        F: FnOnce(&ZecWithdrawal) -> Result<(), String> + Send,
+    {
+        let _w = self.0.wallet.lock().await;
+        let (done, built) = self
+            .0
+            .build_withdrawal(to, amount)
+            .await
+            .map_err(not_sent)?;
+        before_broadcast(&built).map_err(ZecError::NotSent)?;
+        let cfg = &self.0.cfg;
+        let out = run_pczt(cfg, &["send", &path_str(&done), "-s", &cfg.server]).await?;
+        let txid = last_txid(&out)
+            .ok_or_else(|| ZecError::Other(format!("pczt send printed no txid:\n{out}")))?;
+        if txid != built.txid {
+            tracing::error!(%txid, expected = %built.txid, "the withdrawal went out under another txid");
+        }
+        match self.0.stored_tx_pools(&txid).await {
+            Ok(p) if p.ironwood_only() => {
+                tracing::info!(%txid, "ZEC withdrawal is Ironwood-only: {p}")
+            }
+            Ok(p) => tracing::error!(%txid, "SHIELDED-ONLY VIOLATION in a ZEC withdrawal: {p}"),
+            Err(e) => tracing::error!(%txid, "could not re-check the withdrawal's pools: {e}"),
+        }
+        Ok(ZecWithdrawal { txid, ..built })
+    }
+
+    async fn tx_state(&self, txid: &str) -> Result<ZecTxState, ZecError> {
+        self.0.stored_tx_state(txid).await
     }
 
     async fn lock_lapsed(&self, fvk: &[u8; 96], amount: u64) -> Result<bool, ZecError> {
@@ -993,6 +1192,145 @@ fn unspent_ironwood_sql() -> String {
                            JOIN transactions t ON t.id_tx = s.transaction_id
                            WHERE s.ironwood_received_note_id = n.id AND {LIVE_TX})"
     )
+}
+
+/// The file that keeps our deposit address (see [`deposit_address`]).
+const DEPOSIT_ADDRESS_FILE: &str = "ferry-deposit-address";
+
+/// A shielded-only address of our own account for deposits: `wallet generate-address --pool
+/// orchard` (an Orchard receiver, which Ironwood shares, and no transparent or Sapling one), so
+/// a wallet paying it can only send shielded ZEC. Made once and kept in
+/// `<wallet>/ferry-deposit-address`, so it stays the same across restarts.
+async fn deposit_address(cfg: &DevtoolConfig, account: &str) -> Result<String, ZecError> {
+    let file = cfg.wallet_dir.join(DEPOSIT_ADDRESS_FILE);
+    if let Ok(saved) = tokio::fs::read_to_string(&file).await {
+        let saved = saved.trim();
+        if !saved.is_empty() {
+            return Ok(saved.to_string());
+        }
+    }
+    let out = run_devtool_wallet(
+        cfg,
+        &[
+            "generate-address".into(),
+            account.into(),
+            "--pool".into(),
+            "orchard".into(),
+        ],
+        READ_TIMEOUT,
+    )
+    .await?;
+    let ua = out
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Address:"))
+        .map(|a| a.trim().to_string())
+        .ok_or_else(|| ZecError::Other("generate-address printed no address".into()))?;
+    signer_check_address(cfg, &ua)
+        .await
+        .map_err(|e| ZecError::Other(format!("the generated address {ua}: {e}")))?;
+    tokio::fs::write(&file, &ua).await?;
+    Ok(ua)
+}
+
+/// `ferry-zec-signer address <net> <ua>`: a unified address of our network with an Orchard
+/// receiver (Ironwood shares it). This crate decodes no addresses itself (it has no Zcash
+/// crates); the signer is pinned to devtool's librustzcash.
+async fn signer_check_address(cfg: &DevtoolConfig, address: &str) -> Result<(), String> {
+    let mut cmd = Command::new(&cfg.signer);
+    cmd.args(["address", &cfg.network, address]);
+    let out = run_limited(cmd, "ferry-zec-signer address", None, READ_TIMEOUT)
+        .await
+        .map_err(|e| format!("could not check the address: {e}"))?;
+    address_verdict(out.status.success(), &out.stdout, &out.stderr)
+}
+
+/// The txid of the transaction in a finished PCZT, as `pczt extract` (the extractor `pczt
+/// send` also runs) computes it. A txid covers no signature or proof, so it is the one the
+/// transaction is broadcast under.
+async fn extract_txid(cfg: &DevtoolConfig, done: &Path) -> Result<String, ZecError> {
+    let bytes = tokio::fs::read(done).await?;
+    let mut cmd = Command::new(&cfg.devtool);
+    cmd.args(["pczt", "extract"])
+        .env("RUST_LOG", "error")
+        .env("NO_COLOR", "1");
+    let out = run_limited(
+        cmd,
+        "zcash-devtool pczt extract",
+        Some(bytes),
+        BUILD_TIMEOUT,
+    )
+    .await?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() {
+        return Err(ZecError::Tool {
+            cmd: "zcash-devtool pczt extract".into(),
+            detail: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
+    }
+    last_txid(&text).ok_or_else(|| ZecError::Other(format!("pczt extract printed {text:?}")))
+}
+
+/// What `pczt inspect` shows of a PCZT's Ironwood actions, and its txid if it prints one.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Inspected {
+    /// Values of the notes spent (dummies left out).
+    spends: Vec<u64>,
+    /// Values of the outputs (dummies left out).
+    outputs: Vec<u64>,
+    txid: Option<String>,
+}
+
+/// Reads `pczt inspect`: the `- Spend: N zatoshis` and `- Output: N zatoshis…` lines under
+/// `K Ironwood actions:`, and `TxID: …`. None if a value line under Ironwood is unreadable or
+/// there is no Ironwood section.
+fn parse_inspect(text: &str) -> Option<Inspected> {
+    let mut out = Inspected::default();
+    let mut ironwood = false;
+    let mut seen = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if !line.starts_with(' ') && !line.starts_with('-') {
+            // A section header (or the TxID line) ends the previous section.
+            ironwood = t.ends_with("Ironwood actions:");
+            seen |= ironwood;
+            if let Some(id) = t.strip_prefix("TxID:") {
+                out.txid = Some(id.trim().to_string());
+            }
+            continue;
+        }
+        if !ironwood {
+            continue;
+        }
+        let value = |rest: &str| -> Option<Option<u64>> {
+            let rest = rest.trim();
+            if rest.starts_with("Zero value") {
+                return Some(None);
+            }
+            Some(Some(rest.split_whitespace().next()?.parse().ok()?))
+        };
+        if let Some(rest) = t.strip_prefix("- Spend:") {
+            out.spends.extend(value(rest)?);
+        } else if let Some(rest) = t.strip_prefix("- Output:") {
+            out.outputs.extend(value(rest)?);
+        }
+    }
+    seen.then_some(out)
+}
+
+/// Where a withdrawal's PCZT stages go: `<wallet>/pczt/<key>.{created,…}.pczt`.
+async fn pczt_stage_paths(
+    cfg: &DevtoolConfig,
+    key: &str,
+) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), ZecError> {
+    let dir = cfg.wallet_dir.join("pczt");
+    tokio::fs::create_dir_all(&dir).await?;
+    let file = |stage: &str| dir.join(format!("{key}.{stage}.pczt"));
+    Ok((
+        file("created"),
+        file("proven"),
+        file("signed"),
+        file("final"),
+    ))
 }
 
 /// Where one transaction's PCZT stages go: `<wallet>/pczt/<joint key>.<what>.{created,…}.pczt`.
@@ -1570,7 +1908,74 @@ mod tests {
             cache: Mutex::new(Cache::default()),
             own_account: "00000000-0000-0000-0000-000000000002".into(),
             own_address: String::new(),
+            deposit_address: String::new(),
         }
+    }
+
+    /// A withdrawal's state comes from the wallet database: mined (confirmations from the
+    /// tip), stored and unexpired (pending), stored and past its expiry (it can never confirm),
+    /// or never stored (never broadcast: devtool stores before it sends).
+    #[tokio::test]
+    async fn withdrawal_states_from_the_wallet() {
+        let dir = test_dir("tx-state");
+        let w = fake_wallet(&dir);
+        // Tip 120 (no node RPC: the wallet's own tip). Txid bytes are stored reversed.
+        exec(
+            &dir,
+            "CREATE TABLE scan_queue (block_range_end INTEGER);
+             INSERT INTO transactions VALUES (20, x'a1', '2026-10-20', 118, 160, x'00');
+             INSERT INTO transactions VALUES (21, x'a2', '2026-10-20', NULL, 140, x'00');
+             INSERT INTO transactions VALUES (22, x'a3', '2026-10-20', NULL, 0, x'00');",
+        );
+        assert_eq!(
+            w.stored_tx_state("a1").await.unwrap(),
+            ZecTxState::Mined { confirmations: 3 }
+        );
+        assert_eq!(w.stored_tx_state("a2").await.unwrap(), ZecTxState::Pending);
+        assert_eq!(w.stored_tx_state("a3").await.unwrap(), ZecTxState::Pending);
+        assert_eq!(w.stored_tx_state("a4").await.unwrap(), ZecTxState::Unknown);
+        exec(&dir, "INSERT INTO blocks VALUES (140);");
+        assert_eq!(w.stored_tx_state("a2").await.unwrap(), ZecTxState::Expired);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `pczt inspect`'s Ironwood actions give the fee (spends − outputs) and the outputs; dummy
+    /// actions count for nothing, and other sections are not read.
+    #[test]
+    fn inspect_parsing() {
+        let text = "\
+1 Sapling spends
+- 0: 7 zatoshis
+3 Ironwood actions:
+- 0:
+  - Spend: 500000000 zatoshis
+  - Output: 100000000 zatoshis to uregtest1abc
+- 1:
+  - Spend: Zero value (likely a dummy)
+  - Output: 399985000 zatoshis
+- 2:
+  - Spend: Zero value (likely a dummy)
+  - Output: Zero value (likely a dummy)
+
+TxID: 2e90568486787c4e6cd86db81f33d3adbf78cb16a7b915aa37436e52666e5d73
+Version: V5
+";
+        let got = parse_inspect(text).unwrap();
+        assert_eq!(got.spends, vec![500_000_000]);
+        assert_eq!(got.outputs, vec![100_000_000, 399_985_000]);
+        assert_eq!(
+            got.txid.as_deref(),
+            Some("2e90568486787c4e6cd86db81f33d3adbf78cb16a7b915aa37436e52666e5d73")
+        );
+        assert_eq!(
+            parse_inspect("1 Orchard actions:\n- 0:\n  - Spend: 5 zatoshis\n"),
+            None
+        );
+        assert_eq!(
+            parse_inspect("1 Ironwood actions:\n- 0:\n  - Spend: lots zatoshis\n"),
+            None,
+            "an unreadable value is an error, not a zero"
+        );
     }
 
     /// Audit N1: a stored sweep that never made it must neither make the lock note look spent

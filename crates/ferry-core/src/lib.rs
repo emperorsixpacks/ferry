@@ -27,7 +27,7 @@ pub use swap::{
     accept, check_payout_address, check_payout_type, Action, ChainEvent, Event, Proposal, Swap,
 };
 pub use z::{ZState, ZSwap};
-pub use zec::{SendFailure, ZecLeg, ZecNote, ZecStatus};
+pub use zec::{SendFailure, ZecLeg, ZecNote, ZecStatus, ZecTxState, ZecWithdrawal};
 
 pub use ferry_btc::{Role, Spend};
 
