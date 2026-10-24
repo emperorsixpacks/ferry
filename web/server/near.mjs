@@ -1973,6 +1973,8 @@ export function nearDesk({
         // why not: "demo" (this server doesn't run NEAR swaps) or "mainnet" (its nodes are on test networks)
         reason: runs(sell) || runs(buy) || compose?.runs || alone ? null : reason() ?? "mainnet",
         tokens: tokens ?? [],
+        // the host's per-swap range in zatoshi (the public demo caps it); null when there is none
+        limits: Number.isFinite(maxZat) ? { max_zat: maxZat, min_zat: minZat } : null,
         explorer: EXPLORER_URL,
         // the coins a NEAR sell / buy can go through here (the user's nodes whose coin 1Click lists)
         vias: { sell: tokens ? await listed(sell) : [], buy: tokens ? await listed(buy) : [] },

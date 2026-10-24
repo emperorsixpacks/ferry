@@ -37,6 +37,7 @@ export function NearCard({ asset, pick, path, ctx, onPick, onFlip, blocked }: Ca
   const dir: Direction = path.dir ?? d.dir;
   const selling = dir === "sell";
   const [amount, setAmount] = useState("1.00");
+  const [touched, setTouched] = useState(false);
   const [picker, setPicker] = useState<Side | null>(null);
   const [settings, setSettings] = useState(false);
   const [confirm, setConfirm] = useState(false);
@@ -55,6 +56,12 @@ export function NearCard({ asset, pick, path, ctx, onPick, onFlip, blocked }: Ca
   const receive = !selling && runs ? receiveFor("zec", buyNode, d.info.own) : null;
   const receiveTo = useReceive(receive?.key ?? null);
 
+  // a host can cap swaps below the default amount (the public demo does): start at the cap
+  const cap = near.info?.limits?.max_zat;
+  useEffect(() => {
+    if (!touched && cap != null && cap > 0 && cap < 1e8) setAmount(zec(cap));
+  }, [cap, touched]);
+
   const problem = (() => {
     if (amount.trim() === "") return selling ? "Enter how much ZEC to sell." : "Enter how much ZEC you want.";
     if (!valid) return "Enter an amount, like 1.00.";
@@ -70,6 +77,7 @@ export function NearCard({ asset, pick, path, ctx, onPick, onFlip, blocked }: Ca
     if (zecBal == null) return;
     const most = Math.max(0, zecBal - ZEC_FEE_RESERVE);
     const [whole_, frac = ""] = (most / 1e8).toFixed(8).replace(/0+$/, "").split(".");
+    setTouched(true);
     setAmount(`${whole_}.${frac.padEnd(2, "0")}`);
     input.current?.focus();
   };
@@ -118,7 +126,10 @@ export function NearCard({ asset, pick, path, ctx, onPick, onFlip, blocked }: Ca
         aria-label={selling ? "ZEC to sell" : "ZEC to buy"}
         placeholder="0"
         value={amount}
-        onChange={(e) => setAmount(e.target.value.replace(",", "."))}
+        onChange={(e) => {
+          setTouched(true);
+          setAmount(e.target.value.replace(",", "."));
+        }}
         aria-invalid={!!problem && valid}
         aria-describedby="near-message"
         className={cn("h-12 w-full min-w-0 bg-transparent leading-none font-medium tracking-tight text-slate-900 tabular-nums placeholder:text-slate-300 focus:outline-none focus-visible:outline-none", amountSize(amount))}

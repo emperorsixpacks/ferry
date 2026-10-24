@@ -397,6 +397,8 @@ export interface NearInfo {
   // why not: "demo" (a public demo: quotes only) or "mainnet" (the nodes are on test networks)
   reason: "demo" | "mainnet" | null;
   tokens: NearToken[];
+  // the host's per-swap range in zatoshi (the public demo caps it), null when there is none
+  limits?: { max_zat: number; min_zat: number } | null;
   explorer: string;
   // the coins a NEAR sell / buy can go through here
   vias?: { sell: PairId[]; buy: PairId[] };

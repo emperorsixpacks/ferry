@@ -318,6 +318,16 @@ test("on a public demo, or a test network, quotes only", async () => {
   assert.equal((await test_.n.info()).reason, "mainnet");
 });
 
+test("the info says the host's per-swap range, so a card can start inside it", async () => {
+  assert.equal((await desk().n.info()).limits, null);
+  const capped = desk({ desk: { limits: { maxZat: 50_000_000, minZat: 1_000_000 } } });
+  assert.deepEqual((await capped.n.info()).limits, { max_zat: 50_000_000, min_zat: 1_000_000 });
+  // and a quote above it is refused, which is what a card that ignored the range kept hitting
+  const over = await capped.n.quote({ direction: "sell", zec_zat: 100_000_000, asset: "nep141:sol.omft.near" });
+  assert.equal(over.status, 400);
+  assert.match(over.body.error, /limited to 0\.50 ZEC/);
+});
+
 test("a sell: a real quote to the person's address, then the Ferry swap paying into its deposit address", async () => {
   const { n, one, d } = desk();
   let gated = null;
