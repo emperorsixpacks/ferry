@@ -8,7 +8,8 @@ export interface Status {
   name: string;
   // btc_sat saturates at u64::MAX for an 18-decimal token; token_units (EVM) is the exact
   // balance as a decimal string. Read it with counterBalance().
-  balances: { zec_shielded_zat: number; btc_sat: number; token_units?: string };
+  // eth_wei (EVM): the account's ETH for gas, as a decimal string.
+  balances: { zec_shielded_zat: number; btc_sat: number; token_units?: string; eth_wei?: string };
   chains: {
     // the coin swapped against ZEC ("btc" | "ltc"); older daemons leave it out (btc)
     // coin "usdc": an EVM daemon (--counter evm); `time` is the latest block's unix time
@@ -32,6 +33,8 @@ export interface Status {
     // the largest ZEC amount this party's balance covers as maker
     liquidity_zat?: number;
     paused?: boolean;
+    // started with --maker-offer (older daemons leave it out)
+    maker?: boolean;
   };
 }
 
@@ -48,6 +51,9 @@ export interface SwapView {
   id: string;
   coin?: string;
   role: Role;
+  // this daemon started the swap (proposed to a maker); false: it is the maker. Older daemons
+  // leave it out.
+  taker?: boolean;
   counterparty: string;
   state: string;
   outcome: Outcome;
@@ -80,6 +86,14 @@ export interface SwapView {
 }
 
 export const DAEMONS: Record<Role, string> = { Z: "/daemon/z", B: "/daemon/b" };
+// Which way the swap goes, for the person: selling shielded ZEC (their Z daemon takes from a B
+// maker) or buying it (their B daemon takes from a Z maker).
+export type Direction = "sell" | "buy";
+export const roleOf = (dir: Direction): Role => (dir === "sell" ? "Z" : "B");
+export const directionOf = (role: Role): Direction => (role === "Z" ? "sell" : "buy");
+// a swap the person started, as opposed to one their daemon made as a maker (in a local demo the
+// two parties are both "theirs")
+export const isMine = (v: SwapView) => v.taker !== false;
 // The counter-coin balance in base units: the exact token_units when the daemon sends it (a JS
 // number above 2^53 rounds, which is fine for showing it).
 export const counterBalance = (s: Status) => (s.balances.token_units != null ? Number(s.balances.token_units) : s.balances.btc_sat);
@@ -92,10 +106,13 @@ export const EVM_CHAINS: ChainId[] = ["base", "ethereum", "arbitrum", "optimism"
 export type PairId = "btc" | "ltc" | `${(typeof EVM_TOKENS)[number]}-${ChainId}`;
 export const PAIR_IDS: PairId[] = ["btc", "ltc", ...EVM_TOKENS.flatMap((t) => EVM_CHAINS.map((c): PairId => `${t}-${c}`))];
 export const pairDaemon = (id: PairId) => `/daemon/${id}`;
+// a pair's buy-side (B) daemon, when the UI server fronts one besides the main B
+export const pairBuyDaemon = (id: PairId) => `/daemon/b-${id}`;
 export const pairCoin = (id: PairId) => id.split("-")[0] as CoinId;
 export const pairChain = (id: PairId) => (id.split("-")[1] as ChainId | undefined) ?? null;
 export const pairId = (coin: CoinId, chain: ChainId | null): PairId => (coin === "btc" || coin === "ltc" ? coin : `${coin}-${chain ?? "base"}`);
-// Which party this browser is: the swap app shows only that side. `?as=b` overrides it.
+// The side the swap page starts on until the viewer flips it (the UI server's FERRY_LOCAL: z
+// sells ZEC, b buys it). `?as=b` overrides it, as does a direction the viewer picked before.
 export const LOCAL_ROLE: Role = (() => {
   const q = new URLSearchParams(window.location.search).get("as");
   const v = (q ?? __FERRY_LOCAL__).toUpperCase();
@@ -124,16 +141,35 @@ export const getStatus = (daemon: string) => call<Status>(daemon, "/api/status")
 export const getSwaps = (daemon: string) => call<SwapView[]>(daemon, "/api/swaps");
 // `maker` is a name from GET /api/makers; the UI server maps it to the maker's allowlisted URL
 // (the browser never sends a URL). Left out, the server's first maker. `quote`: the id of that
-// maker's firm price (POST /api/quotes), which the server forwards as the maker signed it.
+// maker's firm price (POST /api/quotes), which the server forwards as the maker signed it. The
+// same call sells ZEC on a Z daemon and buys it on a B daemon; the amount is the ZEC either way.
 export const startSwap = (zec_zat: number, daemon: string = DAEMONS.Z, maker?: string, quote?: string) =>
   call<{ id: string }>(daemon, "/api/swaps", maker === undefined ? { zec_zat } : quote === undefined ? { maker, zec_zat } : { maker, zec_zat, quote });
 
-// The other pairs this UI server has a daemon for (GET /api/pairs); none from an older server.
-export async function getPairs(): Promise<PairId[]> {
-  const res = await fetch("/api/pairs");
-  if (!res.ok) return [];
-  const data = (await res.json().catch(() => null)) as { pairs?: unknown } | null;
-  return Array.isArray(data?.pairs) ? PAIR_IDS.filter((id) => (data.pairs as unknown[]).includes(id)) : [];
+// The daemons this UI server fronts (GET /api/pairs): which other pairs have a sell-side (Z)
+// daemon at /daemon/<pair> or a buy-side (B) one at /daemon/b-<pair>, and whether the main Z
+// (/daemon/z) and B (/daemon/b) take swaps, whatever pair they run.
+export interface PairsInfo {
+  sell: PairId[];
+  buy: PairId[];
+  // "auto": used unless the daemon's status says it is a maker (offer.maker)
+  main: { sell: boolean | "auto"; buy: boolean | "auto" };
+}
+
+export async function getPairs(): Promise<PairsInfo> {
+  // an older server: no extra pairs, and the page's own side only
+  const old: PairsInfo = { sell: [], buy: [], main: { sell: LOCAL_ROLE === "Z", buy: LOCAL_ROLE === "B" } };
+  const res = await fetch("/api/pairs").catch(() => null);
+  if (!res?.ok) return old;
+  const data = (await res.json().catch(() => null)) as { pairs?: unknown; buy?: unknown; main?: { sell?: unknown; buy?: unknown } } | null;
+  const ids = (v: unknown) => (Array.isArray(v) ? PAIR_IDS.filter((id) => (v as unknown[]).includes(id)) : []);
+  if (!data) return old;
+  const side = (v: unknown) => (v === true || v === false || v === "auto" ? v : "auto");
+  return {
+    sell: ids(data.pairs),
+    buy: ids(data.buy),
+    main: data.main ? { sell: side(data.main.sell), buy: side(data.main.buy) } : old.main,
+  };
 }
 
 // One maker the UI server allowlists, with its live offer (GET /api/makers).

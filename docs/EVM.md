@@ -12,7 +12,8 @@ testnet is Base Sepolia, and local runs use anvil.
 
 To run it: `ferryd --counter evm` with the `--evm-*` flags (below). `infra/evm-demo.sh test`
 runs a happy swap, a refund and a punish against anvil with the mock ZEC leg (`TOKEN=weth` for
-WETH). `infra/evm-testnet.sh` sets up the public run on Base Sepolia and Zcash testnet
+WETH; `MAKER=z` for buying ZEC, a B taker with a Z maker: either role can make, B still locks
+first). `infra/evm-testnet.sh` sets up the public run on Base Sepolia and Zcash testnet
 ([Running on Base Sepolia](#running-on-base-sepolia)).
 
 ## Contract
@@ -70,7 +71,11 @@ How it is checked:
    and B's `refunder`. The terms add the chain id, the FerryLock address, the token, `amount`,
    absolute `t1` and `t2`, both Δ margins, the confirmation targets and `maxTip`. The salt comes
    from the session id, so both sides know the swap id before anything is on chain.
-2. **Lock.** B approves the token and calls `lock`.
+2. **Lock.** B approves the token and calls `lock`. ferryd answers the proposal (or the UI's
+   start) first and locks afterwards, from its own loop, on a swap it has already saved: on a
+   public chain the two receipts take several blocks, and a taker that stopped waiting must never
+   leave a lock behind that the maker doesn't track. Receipts are polled every second on a remote
+   node.
 3. **Check.** Z waits for the lock's confirmations, then compares **every** term on chain with
    what it expects. This includes `bAddr`: if B committed to some other `b'`, B's refund would
    reveal `b'`, not `b`, and Z's ZEC would be stuck. ferryd also refuses to start unless the code

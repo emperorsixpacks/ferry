@@ -4,26 +4,32 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 import { makerDirectory, parseMakers } from "./server/makers.mjs";
 import { quoteDesk } from "./server/quotes.mjs";
-import { envName, pairDaemons } from "./server/pairs.mjs";
+import { extraDaemons, mainSide, pairsBody } from "./server/pairs.mjs";
 
-// The UI talks to two ferryd daemons. In dev and preview they are proxied under /daemon/z and
-// /daemon/b: the proxy adds each daemon's API token (FERRY_Z_TOKEN, FERRY_B_TOKEN; infra/demo.sh
-// writes them to .demo/env), so the token never reaches the browser and EventSource, which can't
-// set headers, still authenticates. The browser's Origin header is passed through unchanged, so
-// ferryd's --ui-origin allowlist keeps applying.
-// The local party's daemons for other pairs (FERRY_LTC_URL, FERRY_USDC_BASE_URL, ..., with
-// FERRY_<PAIR>_TOKEN) are proxied under /daemon/<pair>; see server/pairs.mjs.
+// The UI talks to the user's ferryd daemons: Z sells ZEC, B buys it. In dev and preview the main
+// two are proxied under /daemon/z and /daemon/b: the proxy adds each daemon's API token
+// (FERRY_Z_TOKEN, FERRY_B_TOKEN; infra/demo.sh writes them to .demo/env), so the token never
+// reaches the browser and EventSource, which can't set headers, still authenticates. The
+// browser's Origin header is passed through unchanged, so ferryd's --ui-origin allowlist keeps
+// applying.
+// The daemons for other pairs (FERRY_LTC_URL, FERRY_USDC_BASE_URL, ... for selling ZEC,
+// FERRY_LTC_B_URL, ... for buying it, with FERRY_<PAIR>_TOKEN / FERRY_<PAIR>_B_TOKEN) are
+// proxied under /daemon/<pair> and /daemon/b-<pair>; see server/pairs.mjs. The page leaves out
+// a main daemon that is a maker (the usual demo's B); FERRY_B_BUYS / FERRY_Z_SELLS = 0 or 1 say
+// so explicitly.
 const Z_URL = process.env.FERRY_Z_URL ?? "http://127.0.0.1:7101";
 const B_URL = process.env.FERRY_B_URL ?? "http://127.0.0.1:7102";
-const PAIRS: { id: string; url: string }[] = pairDaemons(process.env);
+const EXTRA = extraDaemons(process.env);
+const PAIRS_BODY = pairsBody(EXTRA, { mainSell: mainSide(process.env.FERRY_Z_SELLS), mainBuy: mainSide(process.env.FERRY_B_BUYS) });
 const TOKENS: Record<string, string | undefined> = {
   z: process.env.FERRY_Z_TOKEN,
   b: process.env.FERRY_B_TOKEN,
-  ...Object.fromEntries(PAIRS.map((p) => [p.id, process.env[`FERRY_${envName(p.id)}_TOKEN`]])),
+  ...Object.fromEntries(EXTRA.map((d) => [d.key, process.env[`FERRY_${d.tokenName}_TOKEN`]])),
 };
-const TARGETS: Record<string, string> = { z: Z_URL, b: B_URL, ...Object.fromEntries(PAIRS.map((p) => [p.id, p.url])) };
+const TARGETS: Record<string, string> = { z: Z_URL, b: B_URL, ...Object.fromEntries(EXTRA.map((d) => [d.key, d.url])) };
 
-// keyed by an exact pattern: a plain "/daemon/b" prefix would also catch /daemon/btc
+// keyed by an exact pattern: a plain "/daemon/b" prefix would also catch /daemon/btc and
+// /daemon/b-btc
 function daemon(key: string, target: string, token: string | undefined): ProxyOptions {
   return {
     target,
@@ -60,7 +66,7 @@ function makers(): Plugin {
   };
   const handle: Connect.NextHandleFunction = (req, res, next) => {
     const url = req.url?.split("?")[0];
-    if (url === "/api/pairs" && req.method === "GET") return send(res, 200, { pairs: PAIRS.map((p) => p.id) });
+    if (url === "/api/pairs" && req.method === "GET") return send(res, 200, PAIRS_BODY);
     if (url === "/api/makers" && req.method === "GET") {
       dir.list().then(
         (list) => send(res, 200, { makers: list }),
@@ -134,7 +140,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss(), makers()],
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
   define: {
-    // The party the swap app at / belongs to (z or b).
+    // The direction the swap page starts in until the viewer flips it: z sells ZEC, b buys it.
     __FERRY_LOCAL__: JSON.stringify(process.env.FERRY_LOCAL ?? "z"),
   },
   server: { port: Number(process.env.PORT ?? 5180), strictPort: true, proxy },

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ArrowRight, ArrowsLeftRight } from "@phosphor-icons/react";
-import { getSwaps, pairChain, pairCoin, type PairId, type Status, type SwapView } from "@/api";
+import { directionOf, getSwaps, isMine, pairChain, pairCoin, type Direction, type PairId, type Status, type SwapView } from "@/api";
 import { coin, coinOf } from "@/format";
 import { navigate } from "@/router";
 import { phaseOf } from "@/swap/steps";
@@ -11,30 +11,48 @@ import { useLocal } from "../lib/daemon";
 import { pairName } from "../lib/pairs";
 import { STATUS_WORD, swapAmounts, wordsFor, type Words } from "../lib/progress";
 
-// /app/activity: every swap this party's Ferry nodes know, newest first, across the coins this
-// server offers. A row opens the swap (switching the coin on screen first when it's another one).
+// /app/activity: every swap the person started on their Ferry nodes, newest first, both ways
+// round (selling ZEC on their Z nodes, buying it on their B nodes) and across the coins this
+// server offers. A row opens the swap, switching the coin and direction on screen first when it's
+// another one. Swaps a node of theirs made as a maker (in a local demo) are not theirs to list.
 
 const POLL_MS = 10_000;
 
 interface Item {
   swap: SwapView;
   pair: PairId;
+  dir: Direction;
   status: Status | null;
   words: Words;
 }
 
+interface Source {
+  pair: PairId;
+  dir: Direction;
+  daemon: string;
+  status: Status | null;
+}
+
 export function Activity() {
   const d = useLocal();
-  const others = d.pairs.filter((p) => p.daemon && p.daemon !== d.daemon);
-  const key = others.map((p) => p.daemon).join(",");
+  // every daemon this server fronts, each once: the followed one included (it may not be probed yet)
+  const sources: Source[] = [];
+  for (const p of d.pairs)
+    for (const dir of ["sell", "buy"] as const) {
+      const daemon = p[dir].daemon;
+      if (daemon && !sources.some((x) => x.daemon === daemon)) sources.push({ pair: p.id, dir, daemon, status: p[dir].status });
+    }
+  if (d.daemon && !sources.some((x) => x.daemon === d.daemon)) sources.push({ pair: d.pair, dir: d.dir, daemon: d.daemon, status: d.status });
+  const polled = sources.filter((x) => x.daemon !== d.daemon);
+  const key = polled.map((x) => x.daemon).join(",");
   const [extra, setExtra] = useState<Record<string, SwapView[]>>({});
 
   useEffect(() => {
-    if (!others.length) return;
+    if (!polled.length) return;
     let alive = true;
     const load = async () => {
-      const got = await Promise.all(others.map((p) => getSwaps(p.daemon!).catch(() => [] as SwapView[])));
-      if (alive) setExtra(Object.fromEntries(others.map((p, i) => [p.id, got[i]])));
+      const got = await Promise.all(polled.map((x) => getSwaps(x.daemon).catch(() => [] as SwapView[])));
+      if (alive) setExtra(Object.fromEntries(polled.map((x, i) => [x.daemon, got[i]])));
     };
     load();
     const id = setInterval(load, POLL_MS);
@@ -45,20 +63,21 @@ export function Activity() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
-  const items: Item[] = [
-    ...d.list.map((swap) => ({ swap, pair: d.pair, status: d.status, words: wordsFor(coin()) })),
-    ...others.flatMap((p) =>
-      (extra[p.id] ?? []).map((swap) => ({
-        swap,
-        pair: p.id,
-        status: p.status,
-        words: wordsFor(coinOf(p.status ?? { chains: { btc: { coin: pairCoin(p.id) } } }, pairChain(p.id))),
-      })),
-    ),
-  ].sort((x, y) => (y.swap.timeline[0]?.at ?? "").localeCompare(x.swap.timeline[0]?.at ?? ""));
+  const seen = new Set<string>();
+  const items: Item[] = sources
+    .flatMap((x) => {
+      const followed = x.daemon === d.daemon;
+      // the followed daemon's views are live (the provider also holds the other side's, polled)
+      const swaps = followed ? Object.values(d.swaps).filter((s) => s.role === d.role) : (extra[x.daemon] ?? []);
+      const words = followed ? wordsFor(coin()) : wordsFor(coinOf(x.status ?? { chains: { btc: { coin: pairCoin(x.pair) } } }, pairChain(x.pair)));
+      return swaps.filter(isMine).map((swap) => ({ swap, pair: x.pair, dir: directionOf(swap.role), status: followed ? d.status : x.status, words }));
+    })
+    .filter((it) => !seen.has(it.swap.id) && !!seen.add(it.swap.id))
+    .sort((x, y) => (y.swap.timeline[0]?.at ?? "").localeCompare(x.swap.timeline[0]?.at ?? ""));
 
   const open = (it: Item) => {
-    if (it.pair !== d.pair) d.choosePair(it.pair);
+    if (it.pair !== d.pair) d.choosePair(it.pair, it.dir);
+    if (it.dir !== d.dir) d.chooseDirection(it.dir);
     navigate(`/app/swap/${it.swap.id}`);
   };
 
@@ -66,7 +85,7 @@ export function Activity() {
     <Layout>
       <div className="mx-auto w-full max-w-[640px]">
         <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Activity</h1>
-        <p className="mt-1 text-slate-600">Your swaps, newest first.</p>
+        <p className="mt-1 text-slate-600">Your swaps both ways, newest first.</p>
         {items.length === 0 ? (
           <div className="mt-8 rounded-3xl border border-slate-200 px-6 py-14 text-center">
             <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-600">
@@ -124,6 +143,8 @@ function Row({ item, onOpen }: { item: Item; onOpen: () => void }) {
           {z ? a.zec : a.coin} <span className="text-slate-400">→</span> <span className="whitespace-nowrap">{z ? a.coin : a.zec}</span>
         </span>
         <span className="mt-0.5 block truncate text-[13px] text-slate-500">
+          <span className="font-medium text-slate-700">{z ? "Sell ZEC" : "Buy ZEC"}</span>
+          {" · "}
           {started ? new Date(started).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "–"}
           <span className="hidden sm:inline"> · {pairName(pair).title}</span>
         </span>

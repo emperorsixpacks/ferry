@@ -154,7 +154,9 @@ pub struct Cli {
     #[arg(long, default_value_t = 2.0)]
     pub zec_sync_secs: f64,
 
-    /// Accept proposals as maker: RATE_SAT_PER_ZEC[:MIN_ZAT:MAX_ZAT].
+    /// Accept proposals as maker: RATE_SAT_PER_ZEC[:MIN_ZAT:MAX_ZAT]. Either role can make: a B
+    /// maker pays RATE per ZEC it buys (takers sell ZEC), a Z maker asks RATE per ZEC it sells
+    /// (takers buy ZEC) and quotes its spendable shielded ZEC, less the lock fee, as liquidity.
     #[arg(long)]
     pub maker_offer: Option<OfferArg>,
     /// Follow the market instead of the fixed --maker-offer rate: `kraken`, `coingecko`, a comma
@@ -164,7 +166,7 @@ pub struct Cli {
     #[arg(long, requires = "maker_offer")]
     pub maker_price_feed: Option<crate::pricefeed::FeedArg>,
     /// Spread over the feed price, in basis points (50 = +0.5%). May be negative: a B maker buying
-    /// ZEC quotes below the market.
+    /// ZEC quotes below the market, a Z maker selling ZEC above it.
     #[arg(long, default_value_t = 0, allow_negative_numbers = true,
           value_parser = clap::value_parser!(i32).range(-5_000..=5_000))]
     pub maker_spread_bps: i32,

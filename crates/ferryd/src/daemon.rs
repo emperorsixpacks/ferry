@@ -105,9 +105,17 @@ fn peer_name(role: Role) -> &'static str {
 }
 
 fn btc_str(sat: u64) -> String {
-    let s = format!("{:.8}", Amount::from_sat(sat).to_btc());
-    format!("{} BTC", s.trim_end_matches('0').trim_end_matches('.'))
+    coin_str(sat, "BTC")
 }
+
+/// `sat` base units of an 8-decimal coin, e.g. "0.0041 LTC".
+fn coin_str(sat: u64, ticker: &str) -> String {
+    let s = format!("{:.8}", Amount::from_sat(sat).to_btc());
+    format!("{} {ticker}", s.trim_end_matches('0').trim_end_matches('.'))
+}
+
+/// What B keeps on top of the amount for the lock transaction's own (wallet-chosen) fee.
+const LOCK_FEE_RESERVE_SAT: u64 = 10_000;
 
 /// Rescan window when importing a swap's addresses (recent blocks are kept even when pruned).
 const WATCH_RESCAN_SECS: u64 = 2 * 24 * 3600;
@@ -456,9 +464,13 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         );
         rec.pending.extend(actions.into_iter().map(Pending::from));
 
+        // In memory and on disk before anything moves funds: B's lock is funded by the tick
+        // loop, so a caller that gives up on this request can't orphan it.
         let mut st = self.state.lock().await;
-        self.drive_pending(&mut rec).await;
-        self.save(&rec);
+        self.drive_local(&mut rec).await;
+        if !self.save(&rec) {
+            return Err(ApiError(500, "could not save the swap".into()));
+        }
         st.swaps.insert(id.clone(), rec);
         self.publish(&mut st);
         Ok(id)
@@ -521,8 +533,15 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     .map_err(|e| ApiError(503, e.to_string()))?
                     .to_sat();
                 // The lock pays its own (wallet-chosen) fee on top of the amount.
-                if have < params.btc_amount + 10_000 {
-                    return Err(ApiError::bad("B does not have enough BTC"));
+                let need = params.btc_amount.saturating_add(LOCK_FEE_RESERVE_SAT);
+                if have < need {
+                    let t = self.cli.chain.ticker();
+                    return Err(ApiError::bad(format!(
+                        "B does not have enough {t}: {} needed (the amount plus about {} for the lock's fee), {} in the wallet",
+                        coin_str(need, t),
+                        coin_str(LOCK_FEE_RESERVE_SAT, t),
+                        coin_str(have, t)
+                    )));
                 }
             }
         }
@@ -651,13 +670,20 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             None,
         );
         rec.pending.extend(actions.into_iter().map(Pending::from));
-        self.drive_pending(&mut rec).await;
+        // Only the Accept goes out from here; a B maker's lock is funded by the tick loop once
+        // the record is in memory, so a taker that gives up on this request orphans nothing.
+        self.drive_local(&mut rec).await;
         let reply = rec
             .outbox
             .first()
             .cloned()
             .ok_or_else(|| ApiError(500, "no Accept produced".into()))?;
-        self.save(&rec);
+        // A swap we can't persist is refused (nothing has moved yet, and a firm quote it named
+        // is given back). Saved, it is in memory before the reply, and only then is the quote
+        // taken for good.
+        if !self.save(&rec) {
+            return Err(ApiError(500, "could not save the swap".into()));
+        }
         st.swaps.insert(id, rec);
         self.publish(&mut st);
         if let Some(q) = quote {
@@ -704,7 +730,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             return Err(ApiError(429, "too many messages for this swap".into()));
         }
         let name = env.message.name();
-        let result = self.process(rec, Event::Peer(env)).await;
+        let result = self.process_local(rec, Event::Peer(env)).await;
         match &result {
             // Only accepted envelopes are remembered, so garbage cannot grow the record.
             Ok(()) => rec.received.push(digest),
@@ -733,7 +759,8 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         if rec.stalled {
             return Err(ApiError(503, "stalled".into()));
         }
-        Ok(rec.outbox.get(after..).unwrap_or_default().to_vec())
+        let end = rec.deliverable().max(after);
+        Ok(rec.outbox.get(after..end).unwrap_or_default().to_vec())
     }
 
     /// Demo fault injection.
@@ -793,6 +820,43 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     async fn process(&self, rec: &mut SwapRecord, event: Event) -> Result<(), ferry_core::Error> {
         self.apply(rec, event)?;
         self.drive_pending(rec).await;
+        Ok(())
+    }
+
+    /// Run the pending actions at the head of the queue that need no chain, node or wallet (the
+    /// messages to send), and stop at the first one that does. Peer and API handlers use
+    /// this instead of `drive_pending`: a handler's future is dropped when its caller gives up,
+    /// so it must never be the one to move funds. Locks, broadcasts and sends of ZEC run in the
+    /// tick loop, on a record that is already in memory and on disk.
+    async fn drive_local(&self, rec: &mut SwapRecord) {
+        while rec.pending.first().is_some_and(Pending::is_local) {
+            if rec.stalled || !self.save(rec) {
+                break;
+            }
+            let p = rec.pending[0].clone();
+            match self.execute(rec, p).await {
+                Ok(ev) => {
+                    rec.pending.remove(0);
+                    if let Some(ev) = ev {
+                        if let Err(e) = self.apply(rec, ev) {
+                            tracing::warn!(id = %rec.id, "follow-up event rejected: {e}");
+                        }
+                    }
+                }
+                Err(Retry) => break,
+            }
+        }
+        self.save(rec);
+    }
+
+    /// A peer handler's [`Self::process`]: apply the event, run only the local actions.
+    async fn process_local(
+        &self,
+        rec: &mut SwapRecord,
+        event: Event,
+    ) -> Result<(), ferry_core::Error> {
+        self.apply(rec, event)?;
+        self.drive_local(rec).await;
         Ok(())
     }
 
@@ -1458,7 +1522,19 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     async fn exchange(&self, rec: &mut SwapRecord) {
         let base = format!("{}/peer/swaps/{}/messages", rec.counterparty, rec.id);
         let token = rec.swap.session().peer_token().unwrap_or_default();
-        while rec.sent < rec.outbox.len() {
+        let deliverable = rec.deliverable();
+        if rec.sent == deliverable
+            && deliverable < rec.outbox.len()
+            && !rec.has("redeem_adaptor_withheld")
+        {
+            rec.log(
+                "local",
+                "redeem_adaptor_withheld",
+                "Kept the redeem adaptor back: the swap moved on before Z received it, so it is never handed over",
+                None,
+            );
+        }
+        while rec.sent < deliverable {
             let resp = self
                 .http
                 .post(&base)

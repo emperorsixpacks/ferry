@@ -609,6 +609,9 @@ pub fn feed_client() -> reqwest::Result<reqwest::Client> {
 pub struct Funds {
     pub zec_shielded_zat: u64,
     pub btc_sat: u64,
+    /// Zatoshi a Z maker's wallet needs on top of the amount to fund the lock
+    /// ([`ferry_core::ZecLeg::send_fee_reserve`]).
+    pub zec_fee_reserve: u64,
 }
 
 /// `base` as it stands right now: the live rate (or the fixed one), where it comes from, whether
@@ -644,7 +647,9 @@ pub fn live_offer(
     }
     if let Some(f) = funds.filter(|_| base.making) {
         let fillable = match base.role {
-            ferry_core::Role::Z => f.zec_shielded_zat,
+            // what the lock can carry once its fee is set aside: the same bar `check_funds`
+            // applies to a proposal, so a taker never proposes the full figure and is refused
+            ferry_core::Role::Z => f.zec_shielded_zat.saturating_sub(f.zec_fee_reserve),
             ferry_core::Role::B => {
                 let spendable = f.btc_sat.saturating_sub(base.terms.btc_fee);
                 zat_for(spendable, offer.rate_sat_per_zec)
@@ -665,6 +670,7 @@ impl<L: ferry_core::ZecLeg + 'static> crate::daemon::Daemon<L> {
         let funds = balances.map(|b| Funds {
             zec_shielded_zat: b.zec_shielded_zat,
             btc_sat: b.btc_sat,
+            zec_fee_reserve: self.leg.send_fee_reserve(),
         });
         live_offer(&self.offer, self.price.as_deref(), funds, Instant::now())
     }
@@ -877,6 +883,7 @@ mod tests {
         let funds = Funds {
             zec_shielded_zat: 0,
             btc_sat: 2_002_000,
+            zec_fee_reserve: 50_000,
         };
         // fixed rate: liquidity from B's BTC, less one presigned fee, at the fixed rate
         let o = live_offer(&base, None, Some(funds), Instant::now());
@@ -905,6 +912,7 @@ mod tests {
         let rich = Funds {
             zec_shielded_zat: 50_000_000_000,
             btc_sat: 0,
+            zec_fee_reserve: 50_000,
         };
         assert_eq!(
             live_offer(&z, None, Some(rich), t0)
@@ -913,6 +921,34 @@ mod tests {
                 .zec_zat,
             z.max_zat
         );
+        // ...less the lock's fee below the max: what the lock can carry, nothing more
+        let some = Funds {
+            zec_shielded_zat: 300_000_000,
+            ..rich
+        };
+        assert_eq!(
+            live_offer(&z, None, Some(some), t0)
+                .liquidity
+                .unwrap()
+                .zec_zat,
+            300_000_000 - 50_000
+        );
+        let dust = Funds {
+            zec_shielded_zat: 10_000,
+            ..rich
+        };
+        assert_eq!(
+            live_offer(&z, None, Some(dust), t0)
+                .liquidity
+                .unwrap()
+                .zec_zat,
+            0
+        );
+        // a Z maker following a feed asks the market price plus its spread
+        let zl = LiveRate::new(cfg(vec![], 100));
+        zl.apply(&[(SourceKind::Kraken, Ok(0.004))], t0, 9);
+        let o = live_offer(&z, Some(&zl), Some(some), t0);
+        assert_eq!((o.rate_sat_per_zec, o.making), (404_000, true));
 
         // the JSON a taker gets
         let v = serde_json::to_value(live_offer(&base, Some(&live), Some(funds), t0)).unwrap();

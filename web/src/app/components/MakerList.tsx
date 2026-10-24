@@ -8,8 +8,9 @@ import { secondsLeft, type FirmQuote } from "../lib/quotes";
 import { arrowKeys } from "./ui/sheet";
 
 // The swap partners this server lists for the coin on screen, in the swap settings: "Best rate"
-// (Ferry picks for the amount) or one partner. A partner that is offline, paused or can't take
-// the amount is listed but can't be picked.
+// (Ferry picks for the amount) or one partner. Partners for the direction on screen come first
+// (buying ZEC: the ones who sell it); one that is offline, paused, can't take the amount or only
+// swaps the other way is listed but can't be picked.
 
 export function PartnerList({
   makers,
@@ -38,23 +39,39 @@ export function PartnerList({
   // firm prices for the amount (lib/quotes), shown in place of a partner's indicative rate
   firm?: FirmQuote[];
 }) {
-  const mine = (makers ?? []).filter(swappable);
+  const all = (makers ?? []).filter(swappable);
+  // A partner of our own role swaps only the other way (a Z partner only sells ZEC): named in one
+  // line under the list, not offered. The ones that don't say (offline) are listed after ours.
+  const otherWay = (m: Maker) => m.role != null && m.role === role;
+  const mine = [...all.filter((m) => m.role != null && !otherWay(m)), ...all.filter((m) => m.role == null)];
+  const others = all.filter(otherWay).map((m) => m.name);
+  const none = !mine.some((m) => m.role != null);
+  const verb = role === "B" ? "sell" : "buy";
   if (makers === undefined) return <p className="px-5 py-6 text-sm text-slate-500">Looking for partners…</p>;
   if (makers === null) return <p className="px-5 py-4 text-sm text-slate-500">This server has one swap partner, set by whoever runs it.</p>;
   return (
     <div role="radiogroup" aria-label="Swap partner" onKeyDown={arrowKeys} className="space-y-1 px-2">
       <Option active={pick === null} can onClick={() => onPick(null)} title="Best rate" meta={current && pick === null ? `Ferry picks for your amount · now ${current}` : "Ferry picks for your amount"} />
-      {mine.length === 0 ? (
-        <p className="px-3 py-4 text-sm text-slate-500">No partners swap ZEC for {coin().ticker} on this server yet.</p>
-      ) : (
-        mine.map((m) => (
-          <PartnerRow key={m.name} m={m} role={role} zat={zat} active={m.name === pick} onPick={onPick} age={m.rate_age_s != null ? m.rate_age_s + (now - fetchedAt) / 1000 : null} firm={firm.find((q) => q.maker === m.name)} now={now} />
-        ))
-      )}
+      {none ? (
+        <p className="px-3 py-4 text-sm text-slate-500">
+          No partners {verb} ZEC for {coin().ticker} on this server yet.
+        </p>
+      ) : null}
+      {mine.map((m) => (
+        <PartnerRow key={m.name} m={m} role={role} zat={zat} active={m.name === pick} onPick={onPick} age={m.rate_age_s != null ? m.rate_age_s + (now - fetchedAt) / 1000 : null} firm={firm.find((q) => q.maker === m.name)} now={now} />
+      ))}
+      {others.length ? (
+        <p className="px-3 pt-1 pb-1 text-[13px] text-slate-500">
+          {names(others)} only {role === "B" ? "buy" : "sell"} ZEC, so {others.length === 1 ? "it's" : "they're"} not available here.
+        </p>
+      ) : null}
       {error ? <p className="px-3 text-xs text-rose-700">{error}</p> : null}
     </div>
   );
 }
+
+// "Bram", "Bram and Kestrel", "Bram, Kestrel and Heron OTC"
+const names = (list: string[]) => (list.length < 2 ? list.join("") : `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`);
 
 function PartnerRow({ m, role, zat, active, onPick, age, firm, now }: { m: Maker; role: Role; zat: number; active: boolean; onPick: (name: string) => void; age: number | null; firm?: FirmQuote; now: number }) {
   const q = quoteOf(m);
@@ -68,7 +85,7 @@ function PartnerRow({ m, role, zat, active, onPick, age, firm, now }: { m: Maker
   if (!m.online) meta = "Offline";
   else if (m.paused) meta = `Paused${age != null && !fixed ? ` · rate from ${ago(age)}` : ""}`;
   else if (!m.available) meta = "Not taking swaps";
-  else if (!takes) meta = "Swaps the same side as you";
+  else if (!takes) meta = m.role === "Z" ? "Only sells ZEC" : m.role === "B" ? "Only buys ZEC" : "Swaps the same side as you";
   else if (q && !fitsAmount) meta = zat < q.min ? `Takes at least ${zec(q.min)} ZEC` : `Takes up to ${zec(capacity(q))} ZEC right now`;
   else meta = q ? `Takes ${zec(q.min)}–${zec(capacity(q))} ZEC` : "Taking swaps";
   // a firm price covers the amount on screen: its countdown says more than the partner's range

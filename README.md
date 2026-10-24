@@ -44,6 +44,20 @@ Full protocol, abort cases and timing rules: [docs/PROTOCOL.md](docs/PROTOCOL.md
 Who you trust, what can go wrong and what each side learns, in plain language:
 [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) (also in the app at `/safety`).
 
+## Selling or buying ZEC
+
+The swap card goes both ways. The arrow between **Sell** and **Buy** flips it: selling, you give
+shielded ZEC and get the coin; buying, you pay with BTC, LTC, USDC or WETH and the ZEC arrives in
+your shielded wallet. You always type the ZEC amount, which is exactly what moves.
+
+Underneath nothing changes but who goes first. The coin's holder (B) always locks first and the
+ZEC's holder (Z) second, whoever proposed the swap: selling ZEC is your Z node taking a B maker's
+offer; buying ZEC is your B node taking a Z maker's offer (`ferryd --role z --maker-offer RATE`,
+quoting what it asks per ZEC, its spendable shielded ZEC as liquidity). Starting a buy is one call
+on your B node, `POST /api/swaps {"maker": <Z maker's peer URL>, "zec_zat": ...}`, and the same
+safety rules hold either way round. When you buy, your coins are locked first: if the partner never
+locks its ZEC, they come back after the deadline.
+
 ## What each chain sees
 
 | | Bitcoin observer | Zcash observer |
@@ -63,6 +77,8 @@ infra/demo.sh up                # bitcoind regtest + two ferryd daemons + block 
 cd web && pnpm install && source ../.demo/env && pnpm dev:ui   # the crossing, live, at http://localhost:5180
 infra/demo.sh help              # the three demo stories (swap, refund, punish) and curl examples
 infra/demo.sh down
+MAKER=z infra/demo.sh test      # buying ZEC: Z makes, B takes; happy, refund and punish on regtest
+MAKER=z infra/evm-demo.sh test  # the same with USDC on anvil (TOKEN=weth for WETH)
 infra/demo-watchtower.sh run    # a party is killed mid-swap; its watchtower refunds or punishes
 CHAIN=ltc infra/demo-watchtower.sh run   # the same on Litecoin (CHAIN=evm: USDC in FerryLock on anvil)
 infra/demo-ltc.sh up            # the same demo against litecoind regtest (ZEC/LTC)

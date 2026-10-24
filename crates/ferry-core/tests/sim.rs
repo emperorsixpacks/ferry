@@ -38,8 +38,14 @@ fn address(seed: u8) -> Address {
     Address::p2tr(&secp, xonly, None, Network::Regtest)
 }
 
+/// Either party can be the taker (propose) and the other the maker (accept): selling ZEC is a
+/// Z taker with a B maker, buying ZEC a B taker with a Z maker. The stories run both ways.
+const TAKERS: [Role; 2] = [Role::B, Role::Z];
+
 #[derive(Default)]
 struct Faults {
+    /// Who proposes the swap (default B; the maker is the other party).
+    taker: Option<Role>,
     /// Redeem through the 2-of-2 script leaf instead of the MuSig2 key path.
     script_path: bool,
     drop_redeem_adaptor: bool,
@@ -84,18 +90,26 @@ struct Sim {
 
 impl Sim {
     fn new(faults: Faults) -> Sim {
-        // B is the taker here, Z the maker.
         let sid = [42u8; 32];
         let p = SwapParams {
             keypath: !faults.script_path,
             ..params()
         };
-        let (proposal, propose) = Proposal::new(&mut OsRng, sid, Role::B, p, address(1)).unwrap();
-        let (z, z_actions) = accept(&mut OsRng, &propose, address(2)).unwrap();
-        let Action::SendMessage(accept_env) = &z_actions[0] else {
+        // B's address is address(1), Z's address(2), whoever proposes.
+        let taker = faults.taker.unwrap_or(Role::B);
+        let addr = |r: Role| address(if r == Role::B { 1 } else { 2 });
+        let (proposal, propose) = Proposal::new(&mut OsRng, sid, taker, p, addr(taker)).unwrap();
+        let (maker, maker_actions) = accept(&mut OsRng, &propose, addr(taker.peer())).unwrap();
+        assert_eq!(maker.role(), taker.peer());
+        let Action::SendMessage(accept_env) = &maker_actions[0] else {
             panic!("expected Accept")
         };
-        let (b, b_actions) = proposal.on_accept(&mut OsRng, accept_env).unwrap();
+        let (taken, taker_actions) = proposal.on_accept(&mut OsRng, accept_env).unwrap();
+        let maker_actions = maker_actions[1..].to_vec();
+        let (b, z, b_actions, z_actions) = match taker {
+            Role::B => (taken, maker, taker_actions, maker_actions),
+            Role::Z => (maker, taken, maker_actions, taker_actions),
+        };
         let mut sim = Sim {
             b,
             z,
@@ -112,7 +126,7 @@ impl Sim {
             refused_amount: None,
             redeem_adaptors_sent: 0,
         };
-        sim.exec(Role::Z, z_actions[1..].to_vec());
+        sim.exec(Role::Z, z_actions);
         sim.exec(Role::B, b_actions);
         sim.pump();
         sim
@@ -408,22 +422,27 @@ impl Sim {
 
 #[test]
 fn happy_path() {
-    let mut sim = Sim::new(Faults::default());
-    assert_eq!(sim.b_state(), BState::CancelSigned);
-    assert_eq!(sim.z_state(), ZState::CancelSigned);
-    sim.mine_until(10, |s| {
-        s.b_state() == BState::ZecSwept && s.z_state() == ZState::BtcRedeemed
-    });
-    let redeem = sim.txid(ferry_core::Spend::Redeem);
-    assert!(sim.mined(&redeem));
-    assert_eq!(
-        sim.chain[&redeem].0.input[0].witness.len(),
-        1,
-        "MuSig2 key-path spend"
-    );
-    assert!(!sim.chain.contains_key(&sim.txid(ferry_core::Spend::Cancel)));
-    sim.assert_sweep_valid(Role::B);
-    assert!(sim.rejected.is_empty(), "{:?}", sim.rejected);
+    for taker in TAKERS {
+        let mut sim = Sim::new(Faults {
+            taker: Some(taker),
+            ..Default::default()
+        });
+        assert_eq!(sim.b_state(), BState::CancelSigned);
+        assert_eq!(sim.z_state(), ZState::CancelSigned);
+        sim.mine_until(10, |s| {
+            s.b_state() == BState::ZecSwept && s.z_state() == ZState::BtcRedeemed
+        });
+        let redeem = sim.txid(ferry_core::Spend::Redeem);
+        assert!(sim.mined(&redeem));
+        assert_eq!(
+            sim.chain[&redeem].0.input[0].witness.len(),
+            1,
+            "MuSig2 key-path spend"
+        );
+        assert!(!sim.chain.contains_key(&sim.txid(ferry_core::Spend::Cancel)));
+        sim.assert_sweep_valid(Role::B);
+        assert!(sim.rejected.is_empty(), "{:?}", sim.rejected);
+    }
 }
 
 #[test]
@@ -470,51 +489,63 @@ fn happy_path_script_path() {
 
 #[test]
 fn refund_when_b_withholds_redeem_adaptor() {
-    let mut sim = Sim::new(Faults {
-        drop_redeem_adaptor: true,
-        ..Default::default()
-    });
-    sim.mine_until(40, |s| {
-        s.b_state() == BState::Refunded && s.z_state() == ZState::ZecReclaimed
-    });
-    assert!(sim.mined(&sim.txid(ferry_core::Spend::Refund)));
-    sim.assert_sweep_valid(Role::Z);
-    assert!(sim.sweeps.iter().all(|(r, ..)| *r == Role::Z));
+    for taker in TAKERS {
+        let mut sim = Sim::new(Faults {
+            taker: Some(taker),
+            drop_redeem_adaptor: true,
+            ..Default::default()
+        });
+        sim.mine_until(40, |s| {
+            s.b_state() == BState::Refunded && s.z_state() == ZState::ZecReclaimed
+        });
+        assert!(sim.mined(&sim.txid(ferry_core::Spend::Refund)));
+        sim.assert_sweep_valid(Role::Z);
+        assert!(sim.sweeps.iter().all(|(r, ..)| *r == Role::Z));
+    }
 }
 
 #[test]
 fn no_redeem_adaptor_once_the_lock_note_is_spent() {
-    let mut sim = Sim::new(Faults {
-        zec_note_spent_early: true,
-        ..Default::default()
-    });
-    sim.mine_until(40, |s| s.b_state() == BState::Refunded);
-    assert_eq!(sim.redeem_adaptors_sent, 0, "B must not hand Z the BTC too");
-    assert!(!sim.chain.contains_key(&sim.txid(ferry_core::Spend::Redeem)));
-    assert!(sim.mined(&sim.txid(ferry_core::Spend::Refund)));
-    // Control: the same swap with an unspent note does send it.
-    let mut sim = Sim::new(Faults::default());
-    sim.mine_until(10, |s| s.b_state() == BState::ZecSwept);
-    assert_eq!(sim.redeem_adaptors_sent, 1);
+    for taker in TAKERS {
+        let mut sim = Sim::new(Faults {
+            taker: Some(taker),
+            zec_note_spent_early: true,
+            ..Default::default()
+        });
+        sim.mine_until(40, |s| s.b_state() == BState::Refunded);
+        assert_eq!(sim.redeem_adaptors_sent, 0, "B must not hand Z the BTC too");
+        assert!(!sim.chain.contains_key(&sim.txid(ferry_core::Spend::Redeem)));
+        assert!(sim.mined(&sim.txid(ferry_core::Spend::Refund)));
+        // Control: the same swap with an unspent note does send it.
+        let mut sim = Sim::new(Faults {
+            taker: Some(taker),
+            ..Default::default()
+        });
+        sim.mine_until(10, |s| s.b_state() == BState::ZecSwept);
+        assert_eq!(sim.redeem_adaptors_sent, 1);
+    }
 }
 
 #[test]
 fn refund_when_z_never_locks() {
-    let mut sim = Sim::new(Faults {
-        z_never_sends_zec: true,
-        ..Default::default()
-    });
-    sim.mine_until(40, |s| {
-        s.b_state() == BState::Refunded && s.z_state() == ZState::ZecReclaiming
-    });
-    assert!(sim.mined(&sim.txid(ferry_core::Spend::Refund)));
-    // Z believes it locked (its wallet lied), but there is no note: the sweep never confirms.
-    sim.mine(20);
-    assert_eq!(sim.z_state(), ZState::ZecReclaiming);
-    // The daemon finds no note and no lock that could still land: the swap ends as refunded.
-    sim.deliver(Role::Z, Event::ZecLockLapsed).unwrap();
-    assert_eq!(sim.z_state(), ZState::Refunded);
-    assert!(sim.z.is_final());
+    for taker in TAKERS {
+        let mut sim = Sim::new(Faults {
+            taker: Some(taker),
+            z_never_sends_zec: true,
+            ..Default::default()
+        });
+        sim.mine_until(40, |s| {
+            s.b_state() == BState::Refunded && s.z_state() == ZState::ZecReclaiming
+        });
+        assert!(sim.mined(&sim.txid(ferry_core::Spend::Refund)));
+        // Z believes it locked (its wallet lied), but there is no note: the sweep never confirms.
+        sim.mine(20);
+        assert_eq!(sim.z_state(), ZState::ZecReclaiming);
+        // The daemon finds no note and no lock that could still land: the swap ends as refunded.
+        sim.deliver(Role::Z, Event::ZecLockLapsed).unwrap();
+        assert_eq!(sim.z_state(), ZState::Refunded);
+        assert!(sim.z.is_final());
+    }
 }
 
 #[test]
@@ -563,25 +594,28 @@ fn lapse_is_refused_once_the_lock_counted() {
 
 #[test]
 fn refund_when_z_wallet_refuses_the_lock() {
-    let mut sim = Sim::new(Faults {
-        z_wallet_refuses_zec: true,
-        ..Default::default()
-    });
-    sim.mine_until(10, |s| s.z_state() == ZState::ZecLockRefused);
-    let Swap::Z(z) = &sim.z else { unreachable!() };
-    assert!(!z.zec_locked(), "a refused lock is not a lock");
-    sim.mine_until(40, |s| {
-        s.b_state() == BState::Refunded && s.z_state() == ZState::Refunded
-    });
-    assert!(sim.mined(&sim.txid(ferry_core::Spend::Refund)));
-    // Nothing reached the joint address, so nobody tries to sweep it.
-    assert!(sim.sweeps.is_empty());
-    // Both parties broadcast tx_cancel at T1; the second copy is merely a duplicate.
-    assert!(
-        sim.rejected.iter().all(|r| r.ends_with("already known")),
-        "{:?}",
-        sim.rejected
-    );
+    for taker in TAKERS {
+        let mut sim = Sim::new(Faults {
+            taker: Some(taker),
+            z_wallet_refuses_zec: true,
+            ..Default::default()
+        });
+        sim.mine_until(10, |s| s.z_state() == ZState::ZecLockRefused);
+        let Swap::Z(z) = &sim.z else { unreachable!() };
+        assert!(!z.zec_locked(), "a refused lock is not a lock");
+        sim.mine_until(40, |s| {
+            s.b_state() == BState::Refunded && s.z_state() == ZState::Refunded
+        });
+        assert!(sim.mined(&sim.txid(ferry_core::Spend::Refund)));
+        // Nothing reached the joint address, so nobody tries to sweep it.
+        assert!(sim.sweeps.is_empty());
+        // Both parties broadcast tx_cancel at T1; the second copy is merely a duplicate.
+        assert!(
+            sim.rejected.iter().all(|r| r.ends_with("already known")),
+            "{:?}",
+            sim.rejected
+        );
+    }
 }
 
 #[test]
@@ -635,49 +669,62 @@ fn redeem_adaptor_is_accepted_after_a_refused_lock_lands() {
         ..Default::default()
     });
     sim.mine_until(40, |s| s.z_state() == ZState::BtcRedeemed);
-    assert!(sim.rejected.iter().all(|r| r.ends_with("already known")), "{:?}", sim.rejected);
+    assert!(
+        sim.rejected.iter().all(|r| r.ends_with("already known")),
+        "{:?}",
+        sim.rejected
+    );
 }
 
 #[test]
 fn punish_when_b_disappears_after_lock() {
-    let mut sim = Sim::new(Faults {
-        b_offline_after_lock: true,
-        ..Default::default()
-    });
-    sim.mine_until(60, |s| s.z_state() == ZState::Punished);
-    assert!(sim.mined(&sim.txid(ferry_core::Spend::Punish)));
-    // Z cancelled exactly at T1 and punished exactly at T2; nothing was rejected.
-    assert!(sim.rejected.is_empty(), "{:?}", sim.rejected);
+    for taker in TAKERS {
+        let mut sim = Sim::new(Faults {
+            taker: Some(taker),
+            b_offline_after_lock: true,
+            ..Default::default()
+        });
+        sim.mine_until(60, |s| s.z_state() == ZState::Punished);
+        assert!(sim.mined(&sim.txid(ferry_core::Spend::Punish)));
+        // Z cancelled exactly at T1 and punished exactly at T2; nothing was rejected.
+        assert!(sim.rejected.is_empty(), "{:?}", sim.rejected);
+    }
 }
 
 #[test]
 fn z_never_redeems_after_t1_minus_delta() {
-    let p = params();
-    let late = u32::from(p.t1 - p.redeem_margin);
-    let mut sim = Sim::new(Faults {
-        delay_redeem_adaptor_until: Some(late),
-        ..Default::default()
-    });
-    sim.mine_until(40, |s| {
-        s.b_state() == BState::Refunded && s.z_state() == ZState::ZecReclaimed
-    });
-    assert!(!sim.chain.contains_key(&sim.txid(ferry_core::Spend::Redeem)));
+    for taker in TAKERS {
+        let p = params();
+        let late = u32::from(p.t1 - p.redeem_margin);
+        let mut sim = Sim::new(Faults {
+            taker: Some(taker),
+            delay_redeem_adaptor_until: Some(late),
+            ..Default::default()
+        });
+        sim.mine_until(40, |s| {
+            s.b_state() == BState::Refunded && s.z_state() == ZState::ZecReclaimed
+        });
+        assert!(!sim.chain.contains_key(&sim.txid(ferry_core::Spend::Redeem)));
+    }
 }
 
 #[test]
 fn b_never_refunds_after_t2_minus_delta() {
-    let p = params();
-    let wake = u32::from(p.t2 - p.refund_margin);
-    let mut sim = Sim::new(Faults {
-        drop_redeem_adaptor: true,
-        b_asleep_until_cancel_confs: Some(wake),
-        ..Default::default()
-    });
-    sim.mine_until(60, |s| {
-        s.b_state() == BState::Punished && s.z_state() == ZState::Punished
-    });
-    assert!(!sim.chain.contains_key(&sim.txid(ferry_core::Spend::Refund)));
-    assert!(sim.sweeps.is_empty());
+    for taker in TAKERS {
+        let p = params();
+        let wake = u32::from(p.t2 - p.refund_margin);
+        let mut sim = Sim::new(Faults {
+            taker: Some(taker),
+            drop_redeem_adaptor: true,
+            b_asleep_until_cancel_confs: Some(wake),
+            ..Default::default()
+        });
+        sim.mine_until(60, |s| {
+            s.b_state() == BState::Punished && s.z_state() == ZState::Punished
+        });
+        assert!(!sim.chain.contains_key(&sim.txid(ferry_core::Spend::Refund)));
+        assert!(sim.sweeps.is_empty());
+    }
 }
 
 #[test]

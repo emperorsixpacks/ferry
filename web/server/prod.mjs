@@ -1,8 +1,9 @@
 // Production server for the Ferry UI: `node web/server/prod.mjs` (plain Node, no dependencies).
 //
 // - Serves web/dist with an SPA fallback and cache headers.
-// - Proxies /daemon/z and /daemon/b to the two ferryd control APIs, adding each daemon's bearer
-//   token server-side (the browser never sees a token), like the Vite dev proxy does.
+// - Proxies /daemon/z and /daemon/b to the user's two ferryd control APIs (Z sells shielded ZEC,
+//   B buys it), and any per-pair ones, adding each daemon's bearer token server-side (the browser
+//   never sees a token), like the Vite dev proxy does.
 // - Guards the public demo: the UI is on the open internet with real (testnet) wallets behind it,
 //   so only the calls the UI needs get through, and swap starts are limited.
 //
@@ -26,6 +27,15 @@
 //                           on BASE, ETHEREUM, ARBITRUM or OPTIMISM), with FERRY_<PAIR>_TOKEN /
 //                           FERRY_<PAIR>_TOKEN_FILE; proxied at /daemon/<pair> (usdc-base, ...)
 //                           and listed by GET /api/pairs, so the swap page offers them (pairs.mjs)
+//   FERRY_BTC_B_URL, FERRY_USDC_BASE_B_URL, ... [unset]
+//                           B's daemons for other pairs (buying ZEC), with FERRY_<PAIR>_B_TOKEN /
+//                           FERRY_<PAIR>_B_TOKEN_FILE; proxied at /daemon/b-<pair>
+//   FERRY_Z_SELLS [auto]    0: visitors can't start swaps on FERRY_Z_URL's daemon (selling ZEC on the
+//                           main pair), e.g. when it is the demo's maker
+//   FERRY_B_BUYS [auto]     0: visitors can't start swaps on FERRY_B_URL's daemon (buying ZEC on the
+//                           main pair), e.g. when it is the demo's maker. Buy starts take the same
+//                           guards as sell starts: the caps, both rate limits, the maker allowlist and
+//                           one live swap per pair
 //   PUBLIC_ORIGIN [unset]   e.g. https://ferry.example: POSTs whose Origin is something else get 403
 //   TRUST_PROXY [0]         1 behind a reverse proxy: the client IP is the last X-Forwarded-For hop
 //   DEMO_MAX_ZAT [50000000] largest swap a visitor may start (0.5 ZEC)
@@ -49,7 +59,7 @@ import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makerDirectory, parseMakers } from "./makers.mjs";
 import { quoteDesk, rateLimit } from "./quotes.mjs";
-import { envName, pairDaemons } from "./pairs.mjs";
+import { extraDaemons, mainSide, pairsBody, samePair } from "./pairs.mjs";
 
 const env = process.env;
 const PORT = Number(env.PORT ?? 5300);
@@ -93,14 +103,18 @@ function tokenSource(name) {
   };
 }
 
-const PAIRS = pairDaemons(env);
+const EXTRA = extraDaemons(env);
+const MAIN_SELL = mainSide(env.FERRY_Z_SELLS);
+const MAIN_BUY = mainSide(env.FERRY_B_BUYS);
+const PAIRS_BODY = pairsBody(EXTRA, { mainSell: MAIN_SELL, mainBuy: MAIN_BUY });
 const DAEMONS = {
   z: { url: new URL(env.FERRY_Z_URL ?? "http://127.0.0.1:7101"), token: tokenSource("Z") },
   b: { url: new URL(env.FERRY_B_URL ?? "http://127.0.0.1:7102"), token: tokenSource("B") },
-  ...Object.fromEntries(PAIRS.map((p) => [p.id, { url: new URL(p.url), token: tokenSource(envName(p.id)) }])),
+  ...Object.fromEntries(EXTRA.map((d) => [d.key, { url: new URL(d.url), token: tokenSource(d.tokenName) }])),
 };
-// the daemons a visitor starts swaps on: Z's, and Z's for each other pair
-const TAKERS = new Set(["z", ...PAIRS.map((p) => p.id)]);
+// the daemons a visitor starts swaps on: Z's (selling ZEC) and B's (buying it), for every pair
+// "auto" stays a taker here: a start naming a maker of the daemon's own role is refused by ferryd
+const TAKERS = new Set([...(MAIN_SELL !== false ? ["z"] : []), ...(MAIN_BUY !== false ? ["b"] : []), ...EXTRA.map((d) => d.key)]);
 
 // one request to a daemon from this server, for the guard's own checks
 function daemonJson(key, path) {
@@ -266,11 +280,11 @@ async function guard(key, path, req, res) {
       json(res, 400, { error: "The amount is outside that firm price's range. Get a new one." });
       return false;
     }
-    // the maker (B) finishes a moment after Z, and refuses a new swap until it has; another pair's
-    // maker isn't behind this server, so only its Z is asked
+    // one live swap per pair, whichever way: a start waits for every swap on the pair's daemons
+    // (in a local demo one is the other's maker, which finishes a moment after the taker)
     let lists;
     try {
-      lists = await Promise.all((key === "z" ? ["z", "b"] : [key]).map((k) => daemonJson(k, "/api/swaps")));
+      lists = await Promise.all(samePair(key, EXTRA).map((k) => daemonJson(k, "/api/swaps")));
     } catch {
       json(res, 502, { error: "Can't reach the daemon. Is it running?" });
       return false;
@@ -559,7 +573,7 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === "/healthz") return json(res, 200, { ok: true });
-  if (url.pathname === "/api/pairs") return json(res, 200, { pairs: PAIRS.map((p) => p.id) });
+  if (url.pathname === "/api/pairs") return json(res, 200, PAIRS_BODY);
   if (url.pathname === "/api/quotes") {
     serveQuotes(req, res).catch((e) => {
       console.error("ferry-ui quotes:", e?.message ?? "failed");
@@ -579,7 +593,7 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`ferry-ui on http://${HOST}:${PORT}  dist ${DIST}`);
-  console.log(`  Z ${DAEMONS.z.url.origin}  B ${DAEMONS.b.url.origin}${PAIRS.map((p) => `  ${p.id.toUpperCase()} ${p.url}`).join("")}  makers ${MAKERS.makers.map((m) => `${m.name} (${m.pair})`).join(", ") || "none"}`);
+  console.log(`  Z ${DAEMONS.z.url.origin}${MAIN_SELL === false ? " (no sell starts)" : ""}  B ${DAEMONS.b.url.origin}${MAIN_BUY === false ? " (no buy starts)" : ""}${EXTRA.map((d) => `  ${d.key.toUpperCase()} ${d.url}`).join("")}  makers ${MAKERS.makers.map((m) => `${m.name} (${m.pair})`).join(", ") || "none"}`);
   console.log(`  demo: max ${zec(DEMO_MAX_ZAT)} ZEC, ${RATE_PER_HOUR} swaps/IP/hour, ${SWAPS_PER_HOUR} swaps/hour in all, ${SSE_PER_IP} streams/IP, ${SSE_TOTAL} streams in all, faults ${FAULTS ? "on" : "off"}${PUBLIC_ORIGIN ? `, origin ${PUBLIC_ORIGIN}` : ""}`);
 });
 

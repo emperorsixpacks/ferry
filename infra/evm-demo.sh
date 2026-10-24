@@ -34,7 +34,18 @@ Z_PORT="${Z_PORT:-7901}"           # control API (/api/*, loopback)
 B_PORT="${B_PORT:-7902}"
 Z_PEER_PORT="${Z_PEER_PORT:-7911}" # peer protocol (/peer/*)
 B_PEER_PORT="${B_PEER_PORT:-7912}"
-MAKER_URL="http://127.0.0.1:$B_PEER_PORT"
+# Who makes offers: MAKER=b (default), B makes and Z takes (selling ZEC); MAKER=z, Z makes (sells
+# its shielded ZEC) and B takes (buys ZEC with the token). Like TOKEN, `up` and `test` take it.
+if [ "${1:-help}" = up ] || [ "${1:-help}" = test ]; then
+  MAKER="${MAKER:-b}"
+else
+  MAKER="${MAKER:-$(cat "$STATE/maker" 2>/dev/null || echo b)}"
+fi
+case "$MAKER" in
+  b) TAKER=z MAKER_URL="http://127.0.0.1:$B_PEER_PORT" ;;
+  z) TAKER=b MAKER_URL="http://127.0.0.1:$Z_PEER_PORT" ;;
+  *) die "MAKER must be b or z, not '$MAKER'" ;;
+esac
 UI_ORIGINS="${UI_ORIGINS:-http://localhost:7990 http://127.0.0.1:7990}"
 Z_NAME="${Z_NAME:-zoe}"
 B_NAME="${B_NAME:-bram}"
@@ -64,11 +75,11 @@ FerryLock on anvil. TOKEN=usdc (default) or TOKEN=weth picks the token at up/tes
 
   infra/evm-demo.sh up       anvil on 127.0.0.1:$ANVIL_PORT (1s blocks), deploy FerryLock + the token
                              mock, fund B (USDC: minted; WETH: B wraps $B_WRAP_ETH ETH), build ferryd,
-                             start Z ($Z_NAME :$Z_PORT) and B ($B_NAME :$B_PORT, maker at RATE token
-                             units/ZEC: USDC 40000000 = 40/ZEC, WETH 12000000000000000 = 0.012/ZEC).
-                             Starts from scratch.
-  infra/evm-demo.sh happy    one swap: B locks the token, Z locks ZEC, B signs Ready, Z claims
-                             (revealing z), B reads z and sweeps the ZEC
+                             start Z ($Z_NAME :$Z_PORT) and B ($B_NAME :$B_PORT), the maker (MAKER=b:
+                             B, MAKER=z: Z) at RATE token units/ZEC: USDC 40000000 = 40/ZEC, WETH
+                             12000000000000000 = 0.012/ZEC. Starts from scratch.
+  infra/evm-demo.sh happy    one swap, proposed by the taker ($TAKER now): B locks the token, Z locks
+                             ZEC, B signs Ready, Z claims (revealing z), B reads z and sweeps the ZEC
   infra/evm-demo.sh refund   Z stalls after locking ZEC; at t1 (anvil time is jumped there) B refunds,
                              revealing b; Z wakes and reclaims its ZEC
   infra/evm-demo.sh punish   B stalls after locking; Z locks ZEC, never gets Ready; at t2 Z punishes
@@ -78,7 +89,8 @@ FerryLock on anvil. TOKEN=usdc (default) or TOKEN=weth picks the token at up/tes
 
 Ports: anvil $ANVIL_PORT, Z API $Z_PORT / peer $Z_PEER_PORT, B API $B_PORT / peer $B_PEER_PORT.
 UI: cd web && source $STATE/env && PORT=7990 pnpm dev:ui   (screenshots: pnpm shoot:evm)
-Environment: TOKEN [$TOKEN] RATE [$RATE] SWAP_ZAT [$SWAP_ZAT] T1_SECS [$T1_SECS]
+Buying ZEC: MAKER=z infra/evm-demo.sh test runs the same stories with B taking from a Z maker.
+Environment: TOKEN [$TOKEN] MAKER [$MAKER] RATE [$RATE] SWAP_ZAT [$SWAP_ZAT] T1_SECS [$T1_SECS]
   REFUND_SECS [$REFUND_SECS] DELTA_SECS [$DELTA_SECS] ZEC_CONFS [$ZEC_CONFS]
   ZEC_BLOCK_SECS [$ZEC_BLOCK_SECS] FERRY_EVM_DEMO_DIR [$STATE]
   ANVIL_PORT Z_PORT B_PORT Z_PEER_PORT B_PEER_PORT (as above)
@@ -156,7 +168,7 @@ from decimal import Decimal
 u, d, s = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
 print("%s %s" % (format((Decimal(u) / Decimal(10) ** d).normalize(), "f"), s))' "$1" "$DECIMALS" "$SYMBOL"
 }
-maker_rate() { api b /api/status | python3 -c 'import json, sys; print(json.load(sys.stdin)["offer"]["rate_sat_per_zec"])'; }
+maker_rate() { api "$MAKER" /api/status | python3 -c 'import json, sys; print(json.load(sys.stdin)["offer"]["rate_sat_per_zec"])'; }
 
 deploy() { # deploy <contract path:name> -> address
   "$FORGE" create --root "$ROOT/contracts" "$1" --rpc-url "$RPC" --private-key "$KEY_DEPLOYER" --broadcast 2>&1 |
@@ -236,16 +248,24 @@ cmd_up() {
       ;;
   esac
 
-  log "starting B ($B_NAME, maker at $(show "$RATE")/ZEC): API :$B_PORT, peer :$B_PEER_PORT"
-  start_ferryd b b "$B_NAME" "$B_PORT" "$B_PEER_PORT" "$STATE/b.key" --maker-offer "$RATE"
-  log "starting Z ($Z_NAME): API :$Z_PORT, peer :$Z_PEER_PORT"
-  start_ferryd z z "$Z_NAME" "$Z_PORT" "$Z_PEER_PORT" "$STATE/z.key" --zec-mock-balance "$ZEC_BALANCE_ZAT"
+  # the maker's offer: B pays RATE per ZEC it buys (MAKER=b), or Z asks RATE per ZEC it sells (z)
+  local b_offer=() z_offer=()
+  if [ "$MAKER" = b ]; then b_offer=(--maker-offer "$RATE"); else z_offer=(--maker-offer "$RATE"); fi
+  echo "$MAKER" >"$STATE/maker"
+  log "starting B ($B_NAME, $([ "$MAKER" = b ] && echo "maker at $(show "$RATE")/ZEC: buys ZEC" || echo "taker: buys ZEC")): API :$B_PORT, peer :$B_PEER_PORT"
+  start_ferryd b b "$B_NAME" "$B_PORT" "$B_PEER_PORT" "$STATE/b.key" ${b_offer[@]+"${b_offer[@]}"}
+  log "starting Z ($Z_NAME, $([ "$MAKER" = z ] && echo "maker at $(show "$RATE")/ZEC: sells ZEC" || echo "taker: sells ZEC")): API :$Z_PORT, peer :$Z_PEER_PORT"
+  start_ferryd z z "$Z_NAME" "$Z_PORT" "$Z_PEER_PORT" "$STATE/z.key" --zec-mock-balance "$ZEC_BALANCE_ZAT" ${z_offer[@]+"${z_offer[@]}"}
+  # The UI: the maker's daemon takes no swaps from the page, so it opens on the other side.
   cat >"$STATE/env" <<ENV
 export FERRY_Z_URL=http://127.0.0.1:$Z_PORT
 export FERRY_B_URL=http://127.0.0.1:$B_PORT
 export FERRY_MAKER_URL=$MAKER_URL
 export FERRY_Z_TOKEN=$(cat "$STATE/z/api-token")
 export FERRY_B_TOKEN=$(cat "$STATE/b/api-token")
+export FERRY_LOCAL=$TAKER
+export FERRY_Z_SELLS=$([ "$MAKER" = z ] && echo 0 || echo 1)
+export FERRY_B_BUYS=$([ "$MAKER" = b ] && echo 0 || echo 1)
 ENV
   log "ready. API tokens and UI settings: $STATE/env"
 }
@@ -312,8 +332,9 @@ check_token_guard() {
   done
 }
 
+# The taker's POST /api/swaps: one call, whichever role takes.
 new_swap() {
-  api z /api/swaps -X POST -H 'content-type: application/json' \
+  api "$TAKER" /api/swaps -X POST -H 'content-type: application/json' \
     -d "{\"maker\":\"$MAKER_URL\",\"zec_zat\":$SWAP_ZAT}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])'
 }
 
@@ -322,7 +343,7 @@ fault() { # fault <z|b> <id>
 }
 
 story_happy() {
-  log "--- happy: Z swaps $(python3 -c "print($SWAP_ZAT / 1e8)") ZEC for $SYMBOL"
+  log "--- happy: $([ "$TAKER" = z ] && echo "Z sells" || echo "B buys") $(python3 -c "print($SWAP_ZAT / 1e8)") ZEC for $SYMBOL (maker: $MAKER)"
   local z_addr before id want got
   z_addr=$("$CAST" wallet address "$KEY_Z")
   before=$(token_balance "$z_addr")
@@ -381,7 +402,7 @@ cmd_test() {
   story_happy
   story_refund
   story_punish
-  log "all three stories passed ($SYMBOL)"
+  log "all three stories passed ($SYMBOL, MAKER=$MAKER: $TAKER took from $MAKER)"
 }
 
 case "${1:-help}" in

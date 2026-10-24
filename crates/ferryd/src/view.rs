@@ -70,6 +70,9 @@ pub struct OfferView {
     pub liquidity_zat: Option<u64>,
     /// As maker: the live rate went stale and we take no proposals.
     pub paused: bool,
+    /// Started with --maker-offer: it answers proposals, paused or not. A UI need not offer a
+    /// maker as one of the user's own daemons to start swaps on.
+    pub maker: bool,
 }
 
 impl OfferView {
@@ -88,6 +91,7 @@ impl OfferView {
             rate_updated_at: o.rate_updated_at,
             liquidity_zat: o.liquidity.map(|l| l.zec_zat),
             paused: o.paused,
+            maker: o.making || o.paused,
         }
     }
 }
@@ -98,6 +102,8 @@ pub struct SwapView {
     /// The coin swapped against ZEC: "btc" or "ltc".
     pub coin: Coin,
     pub role: Role,
+    /// We started this swap (proposed to a maker); false: we are the maker.
+    pub taker: bool,
     pub counterparty: String,
     pub state: String,
     pub outcome: Option<&'static str>,
@@ -163,6 +169,7 @@ pub fn swap_view(rec: &SwapRecord) -> SwapView {
         id: rec.id.clone(),
         coin,
         role: rec.role(),
+        taker: rec.taker,
         counterparty: rec.counterparty.clone(),
         state: rec.state(),
         outcome: rec.outcome(),

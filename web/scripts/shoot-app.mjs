@@ -4,13 +4,15 @@
 //
 //   landing, how-it-works, help, inspect, app (empty, validation error), activity, offline
 //   Z: swap in progress, done; refund (cancelling, refunded); settled (the other side stalls)
-//   B (screenshots/app/b/): in progress, done, lost (B stalls and is punished)
+//   B (screenshots/app/b/), buying ZEC from the mock Z maker: in progress, done, lost (B stalls
+//   and is punished)
 //
 // `pnpm shoot:app:real` runs the Z happy and refund stories against running ferryd daemons
 // (FERRY_Z_URL, FERRY_B_URL, FERRY_MAKER_URL and tokens from the demo env) into screenshots/app/real/.
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { chromium } from "playwright";
+import { mockMakersEnv } from "../mock/makers.mjs";
 
 const REAL = process.argv.includes("--real");
 const PORT = process.env.PORT ?? "5191";
@@ -19,7 +21,7 @@ mkdirSync(ROOT + "b", { recursive: true });
 
 const env = REAL
   ? { ...process.env, PORT }
-  : { ...process.env, MOCK_SPEED: process.env.MOCK_SPEED ?? "2", MOCK_Z_PORT: "7151", MOCK_B_PORT: "7152", FERRY_Z_URL: "http://127.0.0.1:7151", FERRY_B_URL: "http://127.0.0.1:7152", PORT };
+  : { ...process.env, MOCK_SPEED: process.env.MOCK_SPEED ?? "2", MOCK_Z_PORT: "7151", MOCK_B_PORT: "7152", FERRY_Z_URL: "http://127.0.0.1:7151", FERRY_B_URL: "http://127.0.0.1:7152", FERRY_MAKERS: mockMakersEnv(7152, 7151), PORT };
 const deadEnv = { ...process.env, FERRY_Z_URL: "http://127.0.0.1:7159", FERRY_B_URL: "http://127.0.0.1:7158", FERRY_Z_TOKEN: "", FERRY_B_TOKEN: "", PORT: String(Number(PORT) + 1) };
 const procs = [spawn("pnpm", ["exec", "vite"], { env, stdio: "ignore" })];
 if (!REAL) {
@@ -91,7 +93,8 @@ async function shoot(name, { full = false, settle = 1800 } = {}) {
   }
   console.log("shot", (as === "b" ? "b/" : "") + name);
 }
-const start = async () => (await api("z", "/api/swaps", { zec_zat: 100000000 })).id;
+// Z sells to the first maker (Bram); B buys from Zoe, the mock's Z party as maker
+const start = async (who = "z") => (await api(who, "/api/swaps", who === "b" ? { maker: "Zoe", zec_zat: 100000000 } : { zec_zat: 100000000 })).id;
 const stall = (who, id) => api(who, `/api/swaps/${id}/fault`, { fault: "stall" });
 
 // --- static pages
@@ -182,11 +185,11 @@ if (!REAL) {
   await each((p) => p.goto(DEAD + "/app"));
   await shoot("13-app-offline", { settle: 3500 });
 
-  // --- B's view of the same three stories
+  // --- buying ZEC: B takes from the mock Z maker, in progress, done and lost
   as = "b";
   await goto("/app");
   await reset();
-  const b1 = await start();
+  const b1 = await start("b");
   await goto(`/app/swap/${b1}`);
   await until(b1, (s) => has(s, "zec_confirmed"), "B saw ZEC");
   await shoot("05-swap-in-progress");
@@ -195,7 +198,7 @@ if (!REAL) {
   await goto("/app/activity");
   await shoot("08-app-with-swap");
   await reset();
-  const b3 = await start();
+  const b3 = await start("b");
   await goto(`/app/swap/${b3}`);
   await until(b3, (s) => s.state === "BtcLocked", "B locked");
   await stall("b", b3);

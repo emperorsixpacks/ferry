@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ferry_core::evm::{EvmAction, EvmEnvelope, EvmSwap, LockTerms};
+use ferry_core::evm::{EvmAction, EvmEnvelope, EvmMessage, EvmSwap, LockTerms};
 use ferry_core::{Role, Secret32};
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,12 @@ pub enum EvmPending {
 }
 
 impl EvmPending {
+    /// Needs no chain, node or wallet: a message to the peer, or signing Ready(id) with our key.
+    /// The only kinds a peer or API handler runs itself (see `EvmDaemon::drive_local`).
+    pub fn is_local(&self) -> bool {
+        matches!(self, EvmPending::Send { .. } | EvmPending::SignReady { .. })
+    }
+
     pub fn is_zec(&self) -> bool {
         matches!(
             self,
@@ -234,6 +240,22 @@ impl EvmRecord {
         self.timeline.iter().any(|e| e.kind == kind)
     }
 
+    /// How many of our outbox messages may reach the peer now: all, except that B's Ready(id)
+    /// signature (its last message) is handed over only while B waits for Z's claim and nobody
+    /// has spent the lock note (see the Bitcoin record's `deliverable`).
+    pub fn deliverable(&self) -> usize {
+        let may = |env: &EvmEnvelope| match env.message {
+            EvmMessage::ReadySig { .. } => {
+                self.state() == "ReadySent" && self.zec_spent_by.is_none()
+            }
+            _ => true,
+        };
+        self.outbox
+            .iter()
+            .position(|e| !may(e))
+            .unwrap_or(self.outbox.len())
+    }
+
     pub fn evm_tx(&self, key: &str) -> Option<&EvmTx> {
         self.evm_txs.iter().find(|(k, _)| k == key).map(|(_, t)| t)
     }
@@ -320,5 +342,110 @@ impl EvmStore {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferry_core::evm::{
+        evm_accept, EvmChainEvent, EvmEvent, EvmObservation, EvmParams, EvmProposal, ObservedLock,
+        ANVIL_CHAIN_ID,
+    };
+    use ferry_evm::{PrivateKeySigner, B256};
+
+    fn observed(now: u64, terms: &LockTerms) -> EvmEvent {
+        EvmEvent::Chain(EvmChainEvent::Observed(EvmObservation {
+            now,
+            lock: Some(ObservedLock {
+                terms: terms.clone(),
+                confs: 1,
+            }),
+            ..Default::default()
+        }))
+    }
+
+    /// B as the taker (buying ZEC from a Z maker), driven to ReadySent: its outbox holds the
+    /// Ready(id) signature.
+    fn b_taker_with_ready() -> EvmRecord {
+        let params = EvmParams {
+            chain_id: ANVIL_CHAIN_ID,
+            contract: [0x11; 20],
+            token: [0x22; 20],
+            token_amount: 40_000_000,
+            token_symbol: "USDC".into(),
+            token_decimals: 6,
+            zec_amount: 100_000_000,
+            t1: 10_000,
+            t2: 20_000,
+            claim_margin: 600,
+            refund_margin: 600,
+            lock_confirmations: 1,
+            zec_confirmations: 1,
+            max_tip: 0,
+        };
+        let b_key = PrivateKeySigner::random();
+        let z_addr = PrivateKeySigner::random().address().0 .0;
+        let mut rng = rand_core::OsRng;
+        let (proposal, propose) =
+            EvmProposal::new(&mut rng, [6; 32], Role::B, params, b_key.address().0 .0).unwrap();
+        let (_z, z_actions) = evm_accept(&mut rng, &propose, z_addr).unwrap();
+        let EvmAction::SendMessage(acc) = &z_actions[0] else {
+            panic!("expected Accept")
+        };
+        let (mut b, b_actions) = proposal.on_accept(&mut rng, acc).unwrap();
+        let Some(EvmAction::Lock { terms, .. }) = b_actions.first().cloned() else {
+            panic!("expected Lock")
+        };
+        b.handle(observed(1_000, &terms)).unwrap();
+        let actions = b
+            .handle(EvmEvent::Chain(EvmChainEvent::ZecNoteSeen {
+                value: 100_000_000,
+                confs: 1,
+                spent: false,
+            }))
+            .unwrap();
+        let Some(EvmAction::SignReady { digest }) = actions.first().cloned() else {
+            panic!("expected SignReady")
+        };
+        let sig = ferry_evm::sign_ready_digest(&b_key, &B256::from(digest));
+        let mut outbox = vec![];
+        for a in b.handle(EvmEvent::ReadySigned { sig }).unwrap() {
+            if let EvmAction::SendMessage(env) = a {
+                outbox.push(env);
+            }
+        }
+        assert_eq!(b.state_name(), "ReadySent");
+        let mut rec = EvmRecord::new(
+            "06".repeat(32),
+            b,
+            "http://maker".into(),
+            true,
+            "u1".into(),
+            1,
+        );
+        rec.outbox = outbox;
+        rec
+    }
+
+    /// B hands over Ready(id) only while it waits for Z's claim with the lock note unspent,
+    /// whichever side took the swap.
+    #[test]
+    fn ready_leaves_only_while_b_waits_for_the_claim() {
+        let rec = b_taker_with_ready();
+        assert_eq!(rec.outbox.len(), 1);
+        assert!(matches!(rec.outbox[0].message, EvmMessage::ReadySig { .. }));
+        assert_eq!(rec.deliverable(), 1);
+
+        let mut spent = rec.clone();
+        spent.zec_spent_by = Some("someone-else".into());
+        assert_eq!(spent.deliverable(), 0, "a spent lock note keeps it back");
+
+        // t1 passes without a claim: B refunds, and Ready stays back.
+        let mut late = rec.clone();
+        let terms = late.swap.session().lock_terms().unwrap();
+        late.swap.handle(observed(10_001, &terms)).unwrap();
+        assert_eq!(late.state(), "Refunding");
+        assert_eq!(late.deliverable(), 0);
     }
 }

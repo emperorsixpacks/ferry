@@ -852,6 +852,43 @@ mod tests {
         verify(&sq, &sq.maker_key.clone()).unwrap();
     }
 
+    /// A Z maker (selling ZEC) quotes B takers (buying it), and only them; its quote is claimed
+    /// by a B taker's proposal at the quoted rate.
+    #[test]
+    fn a_z_maker_quotes_b_takers() {
+        let b = book();
+        let now = Instant::now();
+        let z = MakerState {
+            role: Role::Z,
+            rate: 415_000,
+            // its shielded ZEC, less the lock's fee (offer liquidity)
+            liquidity_zat: Some(499_950_000),
+            ..maker()
+        };
+        let buy = QuoteRequest {
+            taker_role: Role::B,
+            ..ask(100_000_000)
+        };
+        let sq = b.issue(&buy, &z, PEER, now, 1).unwrap();
+        assert_eq!(
+            (sq.quote.maker_role, sq.quote.taker_role),
+            (Role::Z, Role::B)
+        );
+        assert_eq!(sq.quote.rate_sat_per_zec, 415_000);
+        assert_eq!(
+            b.issue(&ask(100_000_000), &z, PEER, now, 1).unwrap_err(),
+            QuoteError::WrongRole("B")
+        );
+        // the B taker's proposal takes it; a Z one can't
+        let id = sq.quote.quote_id.clone();
+        assert!(b
+            .claim(&id, "s1", Role::Z, 100_000_000, 415_000, now)
+            .is_err());
+        b.claim(&id, "s1", Role::B, 100_000_000, 415_000, now)
+            .unwrap()
+            .commit();
+    }
+
     #[test]
     fn quotes_cover_the_bucket_within_the_offer() {
         let b = book();
