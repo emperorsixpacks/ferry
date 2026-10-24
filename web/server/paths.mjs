@@ -78,7 +78,7 @@ export function swapNet(counterNetwork, zecNetwork) {
 // One Ferry swap, start to done on both sides, in minutes [usually from, usually to], by coin and
 // network. Confirmations are most of it: the counter-chain lock's, then 10 Zcash blocks on a main
 // network (75 s each, so about 12.5 min, often 8-20) or 3 on a test one, then on Bitcoin and
-// Litecoin the redeem's own. Measured and projected (docs/EVM.md, docs/MAINNET-DEMO.md):
+// Litecoin the redeem's own. Measured and projected (docs/EVM.md):
 //   Base mainnet   about 1 min of lock confirmations + the 10 Zcash blocks: 15-20 min (projected;
 //                  a fork rehearsal with 3 s mock Zcash blocks took under 2 min)
 //   Ethereum       64 blocks (about 13 min) for the lock, then the same: 25-35 min (projected)

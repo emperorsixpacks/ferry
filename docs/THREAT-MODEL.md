@@ -90,7 +90,7 @@ leave coins locked that the node doesn't track.
   pool, with no transparent, Sapling or Orchard part, and Ferry enforces this. Before locking it
   refuses unless your shielded [Ironwood] balance alone covers the swap, and it refuses to sign any
   transaction with a non-shielded part. The end-to-end test checks every transaction as mined:
-  0 transparent in, 0 out, 0 Sapling, 0 Orchard ([evidence](evidence/e2e-real-regtest-2026-10-19.txt)).
+  0 transparent in, 0 out, 0 Sapling, 0 Orchard (`infra/e2e-real.sh`).
 - **On Bitcoin: an ordinary payment** when the swap goes to plan. The lock and the claim look like a
   normal single-key wallet sending and spending [MuSig2 key path]. When a swap is called off, the
   refund or penalty does show the swap's shape [script-path spends].
@@ -149,11 +149,13 @@ Every trustless swap needs someone who holds the other coin and is there to answ
 
 Each side waits until the other's lock is confirmed deeply enough.
 
-- **Measured.** The live Base Sepolia swap: the ZEC seller had its USDC about 2 minutes after the
-  start, and the buyer's ZEC arrived at about 7 minutes. Test networks ask for 3 Zcash
-  confirmations ([log](evidence/evm-base-sepolia-live-2026-10-20.txt)).
+- **Measured.** The first live Base Sepolia swap: the ZEC seller had its USDC about 2 minutes after
+  the start, and the buyer's ZEC arrived at about 7 minutes. On Bitcoin signet (2026-10-23): BTC in
+  the seller's wallet at 14.5 minutes, and a buyer's ZEC at 11; on Litecoin testnet, a buyer's ZEC
+  at 25, mostly two Litecoin confirmations. Test networks ask for 3 Zcash confirmations
+  ([WHAT-IS-REAL.md](WHAT-IS-REAL.md#what-has-run-and-where)).
 - **Expected.** Base mainnet: about 15-20 minutes, mostly the 10 Zcash confirmations (75-second
-  blocks) ([MAINNET-DEMO.md](MAINNET-DEMO.md#expected-timeline-and-costs)). Bitcoin signet: about
+  blocks; [EVM.md](EVM.md#timing-rules-the-daemon-enforces-these-not-the-chain)). Bitcoin signet: about
   half an hour ([RUN-A-NODE.md](RUN-A-NODE.md)). <!-- update after many-swaps / safer-settings merge -->
 - **What is still open.** Minutes, not seconds. Zcash's planned NU7 upgrade would cut blocks to
   25 seconds ([ZIP 218](https://zips.z.cash/zip-0218), a draft), which would shorten the wait.
@@ -167,7 +169,7 @@ and a sweep on Zcash.
   ([ZIP 317](https://zips.z.cash/zip-0317)): 0.0001 ZEC for a sweep, more for a lock that spends
   several notes (0.00025 ZEC for a five-action lock in our regtest run).
 - **Base mainnet:** about $0.25 per swap in all at 2026-10-20 prices, mostly the two Zcash fees
-  ([MAINNET-DEMO.md](MAINNET-DEMO.md#expected-timeline-and-costs)).
+  (gas use in [EVM.md](EVM.md#code)).
 - **Bitcoin and Litecoin:** each prepared transaction pays one fixed fee (2,000 sat by default,
   1,500 on the signet demo). A called-off swap costs B two of them (call-off and refund). A fee may
   be at most 5% of the amount, so at 2,000 sat the smallest Bitcoin swap is 40,000 sat.
@@ -248,8 +250,9 @@ This is a known critique of this design, so here it is exactly:
   the data directory, stops all bumping at once. And ferryd **refuses to start** with `--bump on`
   (or `FERRY_BUMP=on`) on a Bitcoin or Litecoin mainnet, and never bumps there, until the review
   below is done.
-- **What was checked.** On regtest Bitcoin Core 28.1
-  ([evidence](evidence/btc-fee-bump-regtest-2026-10-22.txt)): a claim, a refund and a penalty that a
+- **What was checked.** On regtest Bitcoin Core 28.1 (the bump tests in
+  `crates/ferryd/tests/two_daemons.rs` and `crates/ferry-btc/tests/regtest_rpc.rs`, each naming
+  the node flags it needs): a claim, a refund and a penalty that a
   rising mempool floor kept out were put back with a child as a package and confirmed; a child was
   replaced twice as the deadline neared, with a restart in between; the call-off could not displace
   a bumped claim at the first deadline, also after the pair was evicted and put back; a reorg
@@ -284,15 +287,15 @@ This is a known critique of this design, so here it is exactly:
 - **Not quantum-recoverable.** The shared shielded address uses a key built in a way that Zcash's
   quantum-recovery plan doesn't cover [ZIP 2005]. The address is single-use and short-lived, and
   today's FROST multisig setups use the same method.
-- **Test networks so far.** Fifteen live swaps on public test networks (ZEC ⇄ USDC and ZEC ⇄ WETH
-  on Base Sepolia, 2026-10-20 to 2026-10-22; ZEC → BTC on Bitcoin signet, 2026-10-23) and a full
-  local test with real shielded notes. Nothing has run on mainnet, and
+- **Test networks so far.** Seventeen live swaps on public test networks (ZEC ⇄ USDC and ZEC ⇄ WETH
+  on Base Sepolia, 2026-10-20 to 2026-10-22; ZEC ⇄ BTC on Bitcoin signet and LTC → ZEC on Litecoin
+  testnet, 2026-10-23) and a full local test with real shielded notes. Nothing has run on mainnet, and
   nobody outside the project has reviewed Ferry ([WHAT-IS-REAL.md](WHAT-IS-REAL.md)).
 
 ## USDC on Base
 
 Ferry can also swap shielded ZEC for USDC on Base ([details](EVM.md)); it has run locally and on
-Base Sepolia with real Zcash testnet notes ([log](evidence/evm-base-sepolia-live-2026-10-20.txt)). The same protections apply. It differs from the Bitcoin version in
+Base Sepolia with real Zcash testnet notes ([WHAT-IS-REAL.md](WHAT-IS-REAL.md#what-has-run-and-where)). The same protections apply. It differs from the Bitcoin version in
 these ways:
 
 - **Every step on Base is visible as a swap**, not only the abort paths. The lock and the claim
@@ -569,13 +572,12 @@ identity to go on, and adding one would cost privacy.
 - `infra/e2e-real.sh`: a fresh local Bitcoin + Zebra + Zaino network, five stories run with real
   shielded notes (happy with stray notes arriving mid-swap, refund, punish, refused lock, and the
   privacy control), and a pool check on every ZEC transaction. It exits 0 only if every check passes.
-- `infra/route-demo.sh test`: routes BTC → shielded ZEC → USDC on regtest Bitcoin and anvil with a
-  stand-in Zcash chain: one to the end (the router restarted twice midway, and exactly one swap 2),
-  one whose swap 2 pays a third address (`payout_to`), one whose swap 2 is refunded so the route
-  holds the ZEC until "try again" finishes it, and one stopped during swap 1 that ends holding the
-  ZEC. The waits between the swaps with real notes are covered by unit tests and
-  `infra/e2e-real.sh`, not by this script.
+- `cargo test -p ferry-route`: routes through their whole life against fake daemons: one to the
+  end (with restarts midway, and exactly one swap 2), one whose swap 2 pays a third address
+  (`payout_to`), one whose swap 2 is refunded so the route holds the ZEC until "try again" finishes
+  it, and one stopped mid-route that ends holding the ZEC. The waits between the swaps with real
+  notes are covered by unit tests and `infra/e2e-real.sh`.
 - Payout addresses: simulation tests (the redeem pays it on the key path and the script path, the
   penalty doesn't, a partner that drops it or locks to another payee gets no ZEC),
-  `infra/demo.sh test` (a regtest swap whose redeem pays a segwit address of a third wallet), and
+  `infra/regtest.sh test` (a regtest swap whose redeem pays a segwit address of a third wallet), and
   an anvil test whose claim lands at a third account.

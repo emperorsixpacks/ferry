@@ -260,10 +260,8 @@ from ferryd: each part is an ordinary route leg with its own label.
   the router sends `payout_to` only to such a daemon.
 - `GET /api/addresses` returns the wallet's own shielded address as `zec.address`.
 
-`infra/route-demo.sh test` runs six routes end to end (BTC → ZEC → USDC on regtest Bitcoin and
-anvil, one mock Zcash chain). Four ask for one swap each way: one to `done` with two router
-restarts midway, one whose leg 2 pays a third address (`payout_to`, standing in for a 1Click
-deposit address), one whose leg 2 is refunded and then finished with `continue`, and one stopped
-during leg 1. Two run in standard amounts: 0.85 ZEC bought and sold as 0.5 + 0.25 + 0.1 with a
-router restart midway, and one where a leg-2 part is refunded, the other parts go through, the
-route ends holding that part's ZEC, and `continue` sells it.
+`cargo test -p ferry-route` drives routes through their whole life: the state machine step by
+step (`src/route.rs`) and whole routes through the driver against fake daemons (`src/hub.rs`,
+`src/fake.rs`): a route to `done`, a leg 2 that pays a third address (`payout_to`), a refunded
+sell that holds its ZEC until `continue` sells it, a stop mid-route, and routes in standard parts
+that survive restarts and lost answers.

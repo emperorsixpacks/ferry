@@ -1,6 +1,6 @@
 //! BTC leg of a full swap against a real bitcoind (regtest), with a mock [`ZecLeg`].
 //!
-//! Needs `spikes/btc/scripts/regtest.sh start` (RPC 127.0.0.1:18543, ferry/ferry; override
+//! Needs `infra/btc/regtest.sh start` (RPC 127.0.0.1:18543, ferry/ferry; override
 //! with FERRY_BTC_RPC). Run: `cargo test -p ferry-core --test regtest -- --ignored --test-threads=1`
 //!
 //! The same tests run against litecoind with `FERRY_CHAIN=ltc` (after
@@ -197,7 +197,7 @@ impl World {
             .with_coin(coin);
         rpc.ensure_wallet()
             .await
-            .expect("bitcoind up? (spikes/btc/scripts/regtest.sh start)");
+            .expect("bitcoind up? (infra/btc/regtest.sh start)");
         let miner = rpc.new_address(Network::Regtest).await.unwrap();
         if rpc.balance().await.unwrap() < Amount::from_btc(2.0).unwrap() {
             rpc.generate_to_address(101, &miner).await.unwrap();
@@ -413,13 +413,13 @@ impl World {
 }
 
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn regtest_happy_path() {
     happy(Faults::default(), 1).await;
 }
 
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn regtest_happy_path_script_path() {
     happy(
         Faults {
@@ -465,7 +465,7 @@ async fn happy(faults: Faults, witness_items: usize) {
 }
 
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn regtest_refund_path() {
     // ZEC gets locked but B's redeem adaptor never reaches Z: cancel at T1, refund, and Z
     // sweeps its ZEC back with the b extracted from the refund witness.
@@ -501,7 +501,7 @@ async fn regtest_refund_path() {
 }
 
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn regtest_punish_path() {
     let mut w = World::new(Faults {
         b_offline_after_lock: true,

@@ -2,7 +2,7 @@
 //! mock Zcash chain. The test plays block producer. The three stories (happy, refund, punish) run
 //! both ways: selling ZEC (Z takes from a B maker) and buying ZEC (B takes from a Z maker).
 //!
-//! Needs `spikes/btc/scripts/regtest.sh start` (override the RPC with FERRY_BTC_RPC).
+//! Needs `infra/btc/regtest.sh start` (override the RPC with FERRY_BTC_RPC).
 //! Run: `cargo test -p ferryd --test two_daemons -- --ignored --test-threads=1 --nocapture`
 
 use std::net::TcpListener;
@@ -203,7 +203,7 @@ impl World {
         let rpc = BitcoinRpc::new(rpc_url(), "ferry", "ferry").with_wallet("ferryd-it");
         rpc.ensure_wallet()
             .await
-            .expect("bitcoind up? (spikes/btc/scripts/regtest.sh start)");
+            .expect("bitcoind up? (infra/btc/regtest.sh start)");
         let miner = rpc.new_address(Network::Regtest).await.unwrap();
         if rpc.balance().await.unwrap() < Amount::from_btc(5.0).unwrap() {
             rpc.generate_to_address(101, &miner).await.unwrap();
@@ -511,14 +511,14 @@ async fn check_api_guard(w: &World) {
 }
 
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn happy_swap_over_http_with_restart() {
     happy_swap(Role::B).await;
 }
 
 /// Buying ZEC: B proposes to a Z maker, locks BTC, receives the ZEC and sweeps it.
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn buy_zec_happy_swap_with_a_z_maker() {
     happy_swap(Role::Z).await;
 }
@@ -678,13 +678,13 @@ async fn happy_swap(maker: Role) {
 }
 
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn refund_swap_when_z_stalls() {
     refund_swap(Role::B).await;
 }
 
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn buy_zec_refund_when_the_z_maker_stalls() {
     refund_swap(Role::Z).await;
 }
@@ -759,13 +759,13 @@ async fn refund_swap(maker: Role) {
 }
 
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn punish_swap_when_b_stalls() {
     punish_swap(Role::B).await;
 }
 
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn buy_zec_punish_when_the_b_taker_stalls() {
     punish_swap(Role::Z).await;
 }
@@ -836,7 +836,7 @@ async fn punish_swap(maker: Role) {
 
 /// A maker whose offer is outside the taker's policy (zero fee, zero margins).
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn taker_refuses_out_of_policy_terms() {
     let w = World::start(2).await;
     let offer = json!({
@@ -906,7 +906,7 @@ fn propose(sid: [u8; 32]) -> (ferry_core::Proposal, Value) {
 /// A taker that proposes and goes silent must not hold the maker's only slot forever, and
 /// neither proposals nor garbage envelopes are unbounded.
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn silent_taker_times_out_and_peer_input_is_bounded() {
     let w = World::start_with(2, &["--negotiation-timeout-secs", "3", "--max-swaps", "1"]).await;
     let peer = w.b.peer_url();
@@ -985,7 +985,7 @@ async fn silent_taker_times_out_and_peer_input_is_bounded() {
 /// while both run is refused as busy (409, "code": "busy"), the maker's offer says it takes no
 /// more right now, and once both are done it takes swaps again.
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn two_swaps_at_once_and_a_third_is_busy() {
     use std::collections::HashSet;
     let mut w = World::start_full(2, Role::B, &["--max-swaps", "2"], &[]).await;
@@ -1091,7 +1091,7 @@ async fn two_swaps_at_once_and_a_third_is_busy() {
 /// describe transactions, as a devtool wallet without a node RPC can't (the deploy, the node
 /// installer): it never waits for a sweep line that never comes. Z runs such a mock; B's can.
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn finished_swaps_settle_without_tx_descriptions() {
     let w = World::start_full(2, Role::B, &[], &["--zec-mock-describe", "false"]).await;
     let id = w.start_swap(100_000_000).await;
@@ -1132,7 +1132,7 @@ async fn finished_swaps_settle_without_tx_descriptions() {
 
 /// A 1-zat note at the joint address before Z locks must not make Z skip its own ZEC lock.
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn dust_note_does_not_stop_z_locking() {
     let w = World::start(2).await;
     let id = w.start_swap(100_000_000).await;
@@ -1185,7 +1185,7 @@ fn mock_wallet(owner: &str) -> String {
 /// a bad `sweep_to` and a reused label, sweeps to the address it was given, and refuses a swap
 /// whose record it can't save, leaving nothing to resume.
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn route_leg_buys_zec_into_another_wallet() {
     let w = World::start_as(1, Role::Z, &[]).await;
     let (user, maker) = (w.taker().url.clone(), w.maker().peer_url());
@@ -1339,7 +1339,7 @@ async fn refused(w: &World, url: &str, body: Value, code: u16, needle: &str) {
 /// broadcast, never sends twice: an unsent ZEC withdrawal is marked failed, a BTC one goes out
 /// once after the restart.
 #[tokio::test]
-#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+#[ignore = "needs regtest bitcoind (infra/btc/regtest.sh start)"]
 async fn withdraw_to_own_wallet() {
     let mut w = World::start(1).await;
     let (z, b) = (w.z.url.clone(), w.b.url.clone());
@@ -1558,8 +1558,7 @@ async fn withdraw_to_own_wallet() {
 // ---------------------------------------------------------------------------------------------
 // Fee bumping (`--bump on`). These need a node whose mempool is small and whose miner leaves
 // cheap packages out, so a presigned fee can fall below the mempool floor and a bumped package
-// can stay unmined for a while (start it with the docker command in docs/evidence/
-// btc-fee-bump-regtest-2026-10-22.txt, or any bitcoind with these flags):
+// can stay unmined for a while. Any bitcoind with these flags will do:
 //
 //   bitcoind -regtest -server -rpcuser=ferry -rpcpassword=ferry -fallbackfee=0.0002 -txindex=1 \
 //     -maxmempool=5 -blockmintxfee=0.0010 -mintxfee=0.0011

@@ -101,8 +101,7 @@ sync_repo() {
     --filter=':- .gitignore' \
     --exclude .git --exclude target --exclude node_modules --exclude vendor \
     --exclude .demo --exclude .e2e-real --exclude .film-real --exclude .testnet \
-    --exclude web/dist --exclude web/film --exclude web/screenshots --exclude spikes \
-    --exclude docs/evidence \
+    --exclude web/dist --exclude web/film --exclude web/screenshots \
     --exclude infra/deploy/.env --exclude infra/deploy/secrets \
     "$ROOT/" "$HOST:$REMOTE_DIR/"
 }

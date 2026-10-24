@@ -13,14 +13,14 @@ import { READ_MS, ROUTER_TIMEOUT_TEXT, START_MS, TIMEOUT_TEXT, deadline, limitFo
 
 // The UI talks to the user's ferryd daemons: Z sells ZEC, B buys it. In dev and preview the main
 // two are proxied under /daemon/z and /daemon/b: the proxy adds each daemon's API token
-// (FERRY_Z_TOKEN, FERRY_B_TOKEN; infra/demo.sh writes them to .demo/env), so the token never
+// (FERRY_Z_TOKEN, FERRY_B_TOKEN; infra/regtest.sh writes them to .demo/env), so the token never
 // reaches the browser and EventSource, which can't set headers, still authenticates. The
 // browser's Origin header is passed through unchanged, so ferryd's --ui-origin allowlist keeps
 // applying.
 // The daemons for other pairs (FERRY_LTC_URL, FERRY_USDC_BASE_URL, ... for selling ZEC,
 // FERRY_LTC_B_URL, ... for buying it, with FERRY_<PAIR>_TOKEN / FERRY_<PAIR>_B_TOKEN) are
 // proxied under /daemon/<pair> and /daemon/b-<pair>; see server/pairs.mjs. The page leaves out
-// a main daemon that is a maker (the usual demo's B); FERRY_B_BUYS / FERRY_Z_SELLS = 0 or 1 say
+// a main daemon that is a maker (the regtest stack's B); FERRY_B_BUYS / FERRY_Z_SELLS = 0 or 1 say
 // so explicitly.
 const Z_URL = process.env.FERRY_Z_URL ?? "http://127.0.0.1:7101";
 const B_URL = process.env.FERRY_B_URL ?? "http://127.0.0.1:7102";

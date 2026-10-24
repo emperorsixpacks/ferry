@@ -21,11 +21,15 @@ ferry/
     ferry-route/             routes (privacy hub): coin A -> shielded ZEC -> coin C, two swaps over the
                              user's own two ferryd APIs; no keys, no funds; HTTP API /api/routes
   contracts/                 Foundry: FerryLock (EVM counter-chain lock), MockUSDC, tests (docs/EVM.md)
-  web/                       demo UI (two parties side by side + "what each chain sees")
-  infra/                     docker: bitcoind regtest, litecoind regtest (infra/ltc), Zebra regtest (NU6.3 at 1), Zaino
-  docs/                      PROTOCOL.md, ARCHITECTURE.md, THREAT-MODEL.md, LITECOIN.md, DEMO.md
+  web/                       the app (swap card, wallet, safety and privacy pages) and its server
+  infra/                     the server deploy (infra/deploy), the node installer (infra/node), the local
+                             regtest stack (regtest.sh; bitcoind or litecoind, Zebra NU6.3 at 1, Zaino)
+                             and the test-network scripts (testnet.sh, evm-testnet.sh, e2e-real.sh)
+  tools/                     ferry-zec-signer (Ironwood-only signing), jointkey (a split Ironwood key,
+                             for the end-to-end test)
+  docs/                      PROTOCOL.md, ARCHITECTURE.md, THREAT-MODEL.md, API.md, EVM.md, LITECOIN.md,
+                             WATCHTOWER.md, DEPLOY.md, RUN-A-NODE.md, WHAT-IS-REAL.md
   vendor/                    (gitignored) zcash-devtool, frost-tools checkouts
-  spikes/                    day-0 go/no-go spikes, kept as evidence
 ```
 
 ## Roles
@@ -77,7 +81,7 @@ locally; the web UI talks to both daemons' HTTP APIs.
 in `ferry_core::evm`): B locks USDC, Z locks ZEC once every lock term checks out, B sends an
 EIP-712 `Ready(id)` signature after N ZEC confirmations, Z claims (publishing z), B sweeps. From
 t1 B refunds (publishing b) and Z reclaims; from t2 Z punishes. See [EVM.md](EVM.md);
-`infra/evm-demo.sh` runs all three stories on anvil.
+`crates/ferry-evm/tests/anvil.rs` runs all three stories on anvil.
 
 ## Routes (privacy hub)
 
@@ -90,8 +94,7 @@ own random pause, so neither outer chain sees the route's exact amounts
 is `POST /api/swaps`, once per part, each with a route label so it starts at most once
 (`crates/ferryd/src/route.rs` on the ferryd side). The route's state machine is a pure
 `step(route, observation)`, persisted one JSON file per route. See
-[PROTOCOL.md](PROTOCOL.md#routes); `infra/route-demo.sh` runs six routes on regtest Bitcoin and
-anvil with one mock Zcash chain.
+[PROTOCOL.md](PROTOCOL.md#routes) and the crate's [README](../crates/ferry-route/README.md).
 
 ## Cross-chain settlement with NEAR Intents
 

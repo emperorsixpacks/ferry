@@ -1,5 +1,5 @@
 // A mock ferry-route (crates/ferry-route) for the node mock (mock/server.mjs): the same HTTP API
-// and RouteView, over the mock's own swaps, so the private-swap UI can be built and filmed without
+// and RouteView, over the mock's own swaps, so the private-swap UI can be built and tested without
 // real daemons.
 //
 // A route (coin A → shielded ZEC → coin C) runs two of the mock world's swaps one after the other.

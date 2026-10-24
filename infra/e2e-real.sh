@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test with REAL shielded ZEC: brings up the ZEC_BACKEND=devtool demo stack from a
+# End-to-end test with REAL shielded ZEC: brings up the ZEC_BACKEND=devtool regtest stack from a
 # fresh chain (bitcoind + Zebra + Zaino regtest, two ferryd) on its own ports and containers,
 # then runs three swaps through the control API and checks outcomes and balances:
 #
@@ -35,14 +35,14 @@ export BTC_RPC_PORT="${BTC_RPC_PORT:-18843}" ZEC_RPC_PORT="${ZEC_RPC_PORT:-18332
 export Z_PORT="${Z_PORT:-7501}" B_PORT="${B_PORT:-7502}" Z_PEER_PORT="${Z_PEER_PORT:-7511}" B_PEER_PORT="${B_PEER_PORT:-7512}"
 export ZEC_BALANCE_ZAT="${ZEC_BALANCE_ZAT:-500000000}"
 
-cleanup() { [ -n "${KEEP:-}" ] || "$ROOT/infra/demo.sh" down >/dev/null 2>&1 || true; }
+cleanup() { [ -n "${KEEP:-}" ] || "$ROOT/infra/regtest.sh" down >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-JOINTKEY="$ROOT/spikes/zec/jointkey/target/release/jointkey"
-[ -x "$JOINTKEY" ] || (cd "$ROOT/spikes/zec/jointkey" && cargo build -q --release)
+JOINTKEY="$ROOT/tools/jointkey/target/release/jointkey"
+[ -x "$JOINTKEY" ] || (cd "$ROOT/tools/jointkey" && cargo build -q --release)
 
-"$ROOT/infra/demo.sh" down >/dev/null 2>&1 || true
-"$ROOT/infra/demo.sh" up
+"$ROOT/infra/regtest.sh" down >/dev/null 2>&1 || true
+"$ROOT/infra/regtest.sh" up
 
 ZEC_DEVTOOL="${ZEC_DEVTOOL:-$ROOT/vendor/zcash-devtool/target/release/zcash-devtool}" \
 ZEC_SIGNER="${ZEC_SIGNER:-$ROOT/tools/ferry-zec-signer/target/release/ferry-zec-signer}" \
@@ -151,7 +151,7 @@ def wallet_ua(path, receiver="unified"):
 miner_lock = threading.Lock()
 
 def miner_send(address, zat):
-    """Pays `zat` from the demo's miner wallet (a third party to the swaps)."""
+    """Pays `zat` from the regtest stack's miner wallet (a third party to the swaps)."""
     w, ident = f"{STATE}/zec/miner", f"{STATE}/zec/miner.age"
     with miner_lock:
         dt("wallet", "-w", w, "sync", "-s", ZAINO)

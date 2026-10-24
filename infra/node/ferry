@@ -130,8 +130,8 @@ if [ "$NET" = testnet ]; then
   MAX_ZAT=100000000
 else
   # Mainnet: Zcash mainnet and Base mainnet (chain 8453) only, with ferryd's Base mainnet policy
-  # (2 h margins, 30 lock confirmations, 10 Zcash confirmations, a claim window over 2 h; as
-  # infra/mainnet-demo.sh) and every swap capped at 0.02 ZEC.
+  # (2 h margins, 30 lock confirmations, 10 Zcash confirmations, a claim window over 2 h) and
+  # every swap capped at 0.02 ZEC.
   ZEC_NETWORK=main
   ZEC_SERVER="${ZEC_SERVER:-zec.rocks:443}"
   EVM_CHAIN_ID=8453
@@ -472,7 +472,7 @@ ask_ferrylock() { # mainnet: there is no published FerryLock on Base mainnet yet
     say ""
     say "${B}FerryLock on Base mainnet.${OFF} Both sides of a swap must use the same FerryLock contract."
     say "  Ferry has no published mainnet deployment yet: paste the address you deploy"
-    say "  (infra/mainnet-demo.sh deploy) or the one your counterparty uses."
+    say "  (contracts/script/Deploy.s.sol, see docs/EVM.md) or the one your counterparty uses."
     printf '  FerryLock address (0x...): '
     read -r a || a=
     cur=$(printf '%s' "$a" | tr -d '[:space:][:cntrl:]')
@@ -687,7 +687,7 @@ write_env() {
     printf 'EVM_RPC_REV=%s\n' "$(openssl dgst -sha256 <"$(rpc_file)" 2>/dev/null | sed 's/^.*= *//' | cut -c1-16)"
     if [ "$NET" = mainnet ]; then
       printf 'BASE_FERRYLOCK=%s\n' "$(cfg_get FERRYLOCK)"
-      # ferryd's Base mainnet policy (infra/mainnet-demo.sh): it refuses anything less. From the
+      # ferryd's Base mainnet policy: it refuses anything less. From the
       # proposal: claims until 2 h 15 min, B refunds from 4 h 15 min and has 24 h to (until
       # 28 h 15 min), Z punishes from 30 h 15 min (ferry-core's shipped_base_mainnet_terms test)
       printf 'EVM_T1_SECS=15300\nEVM_REFUND_SECS=93600\nEVM_DELTA_SECS=7200\nEVM_LOCK_CONFS=30\nZEC_CONFS=10\n'

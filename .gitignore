@@ -4,13 +4,12 @@ target/
 .env
 *.sqlite
 node_modules/
-spikes/zec/data/
 web/node_modules/
 web/dist/
 .demo/
-spikes/zec/jointkey/target/
 .testnet/
-web/film/*.mp4
+web/film/
+web/screenshots/
 .e2e-real/
 .film-real/
 infra/deploy/secrets/

@@ -921,7 +921,7 @@ function handler(role, coin = null) {
       return send(res, code, body);
     }
 
-    // mock only, for screenshot and film scripts: forget every swap and restore the starting
+    // mock only, for scripted UI runs: forget every swap and restore the starting
     // balances, so each story starts from the same wallet. Chains keep their heights.
     if (req.method === "POST" && path === "/api/_mock/refuse-next-lock") {
       refuseNextLock = true;

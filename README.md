@@ -3,7 +3,7 @@
 **Shielded ZEC ⇄ BTC, LTC or USDC. No bridge. No custodian. Nothing unshielded.**
 
 > **For judges:** start with [what is real and what is a mock](docs/WHAT-IS-REAL.md), with the
-> evidence for each run. Then [why not NEAR Intents, Maya or THORChain for the ZEC side](docs/WHAT-IS-REAL.md#why-not-near-maya-or-thorchain-for-the-zec-side)
+> public transactions of each live swap. Then [why not NEAR Intents, Maya or THORChain for the ZEC side](docs/WHAT-IS-REAL.md#why-not-near-maya-or-thorchain-for-the-zec-side)
 > and the [known limits](docs/THREAT-MODEL.md#known-limits) of this design.
 
 Ferry is a trustless atomic swap between shielded Zcash and native Bitcoin. The ZEC moves from
@@ -91,50 +91,52 @@ and swap 2 sells it, never below the price you set. Both are split into parts of
 amounts everyone uses rather than one pair in a telling ratio. If swap 2 can't finish, you keep the
 shielded ZEC. The number of parts, timing, your parts sharing an EVM account or bitcoin inputs,
 and colluding partners can still link the sides ([crates/ferry-route](crates/ferry-route/README.md),
-[docs/PROTOCOL.md](docs/PROTOCOL.md#standard-amounts), `infra/route-demo.sh test`).
+[docs/PROTOCOL.md](docs/PROTOCOL.md#standard-amounts)).
 
 ## What each chain sees
 
 | | Bitcoin observer | Zcash observer |
 |---|---|---|
 | Lock | a Taproot output | an Ironwood bundle: amount, sender, receiver, memo encrypted |
-| Settle | a script-path spend with two Schnorr signatures | an Ironwood spend: a nullifier and a fresh randomized key |
+| Settle | a key-path spend with one Schnorr signature, like any single-key Taproot payment (a call-off's refund or penalty is a script-path spend) | an Ironwood spend: a nullifier and a fresh randomized key |
 | Link between them | none: no shared hash, no shared key, no shared amount | |
 
 Unlike an HTLC swap, there is no hash that appears on both chains. The scalar revealed on Bitcoin
 derives `ak`, but finding the Zcash note needs `nk` and `rivk`, which only the two parties hold, and
 every Ironwood spend shows only `rk = ak + α·G` with a fresh `α`.
 
-## Run it
+## Development
 
-Which Zcash each command uses:
-
-- **The stand-in Zcash chain** (ferryd's `--zec mock`, a file both daemons share: no real notes,
-  no encryption, no real blocks). It is the default in `infra/demo.sh` and `infra/demo-ltc.sh`,
-  and always used by `infra/evm-demo.sh`, `infra/demo-watchtower.sh`, `infra/route-demo.sh` and
-  the two `fork` rehearsals. The other chain is real: Bitcoin or Litecoin regtest, or anvil.
-- **Real shielded ZEC:** `ZEC_BACKEND=devtool infra/demo.sh up` (Zebra + Zaino regtest in
-  Docker), `infra/e2e-real.sh` (the swap, refund and penalty, every ZEC transaction checked),
-  `infra/evm-testnet.sh` without `fork` (Zcash testnet), and `infra/mainnet-demo.sh` without
-  `fork` (Zcash mainnet; not run yet).
+The local regtest stack runs both daemons on one machine: a Bitcoin regtest node in Docker, the
+stand-in Zcash chain (ferryd's `--zec mock`: a file both daemons share, no real notes, no
+encryption) and a block producer. `ZEC_BACKEND=devtool` runs real shielded ZEC instead (Zebra +
+Zaino regtest in Docker), `CHAIN=ltc` runs Litecoin instead of Bitcoin, and `MAKER=z` the buy side
+(Z makes, B takes).
 
 ```bash
-infra/demo.sh up                # bitcoind regtest + stand-in Zcash + two ferryd + block producer
-cd web && pnpm install && source ../.demo/env && pnpm dev:ui   # the crossing, live, at http://localhost:5180
-infra/demo.sh help              # the three demo stories (swap, refund, punish) and curl examples
-infra/demo.sh down
-infra/e2e-real.sh               # real shielded ZEC: swap, refund and penalty on regtest (~10 min)
-MAKER=z infra/demo.sh test      # buying ZEC: Z makes, B takes; happy, refund and punish on regtest
-MAKER=z infra/evm-demo.sh test  # the same with USDC on anvil (TOKEN=weth for WETH)
-infra/demo-watchtower.sh run    # a party is killed mid-swap; its watchtower refunds or punishes
-CHAIN=ltc infra/demo-watchtower.sh run   # the same on Litecoin (CHAIN=evm: USDC in FerryLock on anvil)
-infra/demo-ltc.sh up            # the same demo against litecoind regtest (ZEC/LTC)
-infra/evm-demo.sh test          # ZEC/USDC on anvil: happy, refund and punish
-infra/evm-testnet.sh fork test  # ZEC/USDC rehearsal on a Base Sepolia fork; without `fork`, the
-                                # real Base Sepolia + Zcash testnet run (docs/EVM.md)
-infra/mainnet-demo.sh fork test # the small Ferry + NEAR Intents mainnet demo, rehearsed on a fork
-                                # of Base mainnet; without `fork`, the real run (docs/MAINNET-DEMO.md)
+infra/regtest.sh up             # bitcoind regtest + stand-in Zcash + two ferryd + block producer
+cd web && pnpm install && source ../.demo/env && pnpm dev:ui   # the app against it, at http://localhost:5180
+infra/regtest.sh test           # swap, payout, refund and punish through the API, then down
+infra/regtest.sh help           # every command, with curl examples
+infra/regtest.sh down
+cd web && pnpm dev              # the app against mock daemons, no chain needed
 ```
+
+Tests:
+
+```bash
+cargo test                      # unit and simulation tests; the anvil tests run when anvil is installed
+cargo test -- --ignored         # tests that need a node: each names it (infra/btc/regtest.sh start,
+                                # infra/ltc/regtest.sh start with FERRY_CHAIN=ltc)
+infra/e2e-real.sh               # real shielded ZEC on regtest: swap, refund, penalty, and every ZEC
+                                # transaction checked for transparent, Sapling or Orchard parts (~10 min)
+cd contracts && forge test      # FerryLock (Foundry)
+cd web && pnpm test:server      # the web server
+```
+
+On public test networks, from your own machine: `infra/testnet.sh` (Bitcoin signet and Zcash
+testnet) and `infra/evm-testnet.sh` (Base Sepolia and Zcash testnet; `fork test` rehearses on a
+fork of Base Sepolia first, see [docs/EVM.md](docs/EVM.md)). Each has a `help` command.
 
 ## Deploying
 
@@ -154,9 +156,9 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
 | `contracts/` | `FerryLock.sol` (Foundry): the EVM lock, claim with `z`, refund with `b`, punish |
 | `crates/ferry-watchtower` | watchtower: broadcasts an offline party's presigned cancel/refund/punish on time (Bitcoin, Litecoin), or calls FerryLock's refund/punish for it (EVM) ([docs](docs/WATCHTOWER.md)) |
 | `crates/ferry-route` | routes: coin A → shielded ZEC → coin C as two swaps over your own two daemons ([docs](crates/ferry-route/README.md)) |
-| `web/` | the demo UI |
-| `infra/` | one-command local environment |
-| `spikes/` | day-0 go/no-go experiments, kept as evidence |
+| `web/` | the app (swap card, wallet, safety and privacy pages) and its server |
+| `infra/` | the server deploy, the node installer, the local regtest stack and the test-network scripts |
+| `tools/` | `ferry-zec-signer` (signs Ironwood-only transactions) and `jointkey` (a split Ironwood key, for the end-to-end test) |
 
 ## Status
 
@@ -167,18 +169,21 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
 - Two daemons swap end to end over HTTP (happy, refund, punish) against regtest Bitcoin, and
   against regtest Litecoin (`--chain ltc`), with the stand-in Zcash chain (`--zec mock`). With
   Bitcoin, the same three stories also run on real Zcash regtest notes (`infra/e2e-real.sh`,
-  below); Litecoin has run only with the stand-in chain. On public test networks, one ZEC → BTC
-  swap on Bitcoin signet and the Zcash testnet, with real shielded notes, through the public swap
-  card on 2026-10-23 ([log](docs/evidence/btc-sell-signet-2026-10-23.txt)).
+  below). On public test networks, with real shielded notes and through the public swap card on
+  2026-10-23: a ZEC → BTC sell ([redeem](https://mempool.space/signet/tx/472b3d9389133612e644438d5ebfb6326ed747e843034c2dd2c70f4fcd1ef12b))
+  and a BTC → ZEC buy ([redeem](https://mempool.space/signet/tx/a9a288f6113e6050295e15b2033d7fc3f14863f31e782756fbb10da864e969cf))
+  on Bitcoin signet, and an LTC → ZEC buy on Litecoin testnet
+  ([redeem](https://litecoinspace.org/testnet/tx/c7e52a8e36fc4b3549034c9256d35bf5210a74d19065d6b15b7fbda3b22403c8)).
 - ZEC ⇄ USDC: FerryLock has 34 Foundry tests (5 fuzz, including the scalar check against an
   independent secp256k1 implementation); two daemons with `--counter evm` run happy, refund and
   punish against anvil and on a fork of Base Sepolia, with the stand-in Zcash chain. Fourteen
   live swaps on public test networks (Base Sepolia and Zcash testnet), with real shielded notes:
-  0.05 test ZEC for 2 test USDC on 2026-10-20 ([log](docs/evidence/evm-base-sepolia-live-2026-10-20.txt)),
+  0.05 test ZEC for 2 test USDC on 2026-10-20 ([claim](https://sepolia.basescan.org/tx/0xde25c161c7e9b978de9aed580d12b0530813a460dd543124fbfc345978996aad)),
   then twelve through the public swap card of the server deploy on 2026-10-21: ZEC → USDC twice,
-  USDC → ZEC twice, ZEC → WETH eight times, up to three at once
-  ([log](docs/evidence/local-stack-base-sepolia-2026-10-21.txt)), and the first WETH → ZEC buy on
-  2026-10-22 ([log](docs/evidence/weth-buy-base-sepolia-2026-10-22.txt)). B's
+  USDC → ZEC twice, ZEC → WETH eight times, up to three at once (each a call to
+  [FerryLock](https://sepolia.basescan.org/address/0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef)), and
+  the first WETH → ZEC buy on 2026-10-22
+  ([claim](https://sepolia.basescan.org/tx/0xdb0b11bd8b7178862bbb015514ff2aebe9ac1b437862474fd8ddade5668029a3)). B's
   go-ahead is an off-chain EIP-712 signature, so nothing on chain dates the ZEC lock.
 - Watchtower: with the owner offline, it broadcasts cancel then refund (B) or cancel then punish (Z)
   on Bitcoin and Litecoin regtest, with the stand-in Zcash chain; it holds no keys, and every
@@ -201,8 +206,7 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
   sends small notes to the joint address while B waits to sweep. A fourth story checks that a wallet
   with too little shielded ZEC (only transparent coins on top) is turned away before anything is locked. It also checks the balances, and
   that the counterparty, who holds the joint viewing key, can't see where a sweep went. A control run
-  without that protection shows the same check does catch the leak. It exits 0 only if every check passes. Every ZEC transaction it made, as mined
-  ([full log](docs/evidence/e2e-real-regtest-2026-10-19.txt)):
+  without that protection shows the same check does catch the leak. It exits 0 only if every check passes. Every ZEC transaction of its 2026-10-19 run, as mined:
 
   | swap | tx | txid | transparent in/out | Sapling | Orchard | Ironwood actions |
   |---|---|---|---|---|---|---|

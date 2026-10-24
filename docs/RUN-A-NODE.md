@@ -250,7 +250,8 @@ running or start it again within a day), and needs:
 - a **Base mainnet RPC** that allows `eth_getLogs` (the default is `https://base-rpc.publicnode.com`;
   `mainnet.base.org` refuses it);
 - the **FerryLock** contract address both sides use. Ferry has no published mainnet deployment yet:
-  deploy one with `infra/mainnet-demo.sh deploy` or use your counterparty's.
+  deploy one with Foundry (`contracts/script/Deploy.s.sol`, see [EVM.md](EVM.md)) or use your
+  counterparty's.
 
 NEAR Intents swaps (reaching coins beyond Ferry's own chains) stay off on mainnet unless you add
 `--near` (`./infra/node/ferry --mainnet --near up`; `--no-near` turns them off again): that path

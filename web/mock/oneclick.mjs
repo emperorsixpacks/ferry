@@ -1,5 +1,5 @@
 // A mock of NEAR Intents' 1Click Swap API (https://1click.chaindefuser.com), so the NEAR Intents
-// part of the swap card can be built and filmed without mainnet. The same paths and shapes:
+// part of the swap card can be built and tested without mainnet. The same paths and shapes:
 //   GET  /v0/tokens                 a subset of the real list (real asset ids, fixed prices)
 //   POST /v0/quote                  dry and real quotes, priced from those prices less a fee,
 //                                   signed with the mock's own ed25519 key (MOCK_ONE_CLICK_PUBKEY;

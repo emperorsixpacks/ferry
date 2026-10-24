@@ -14,10 +14,10 @@ All responses are JSON. Amounts: `zat` (ZEC zatoshis) and `sat` (BTC satoshis), 
 
 Every `/api/*` request needs `Authorization: Bearer <token>`. The token is `--api-token`, or a
 random one generated at startup. Either way it is written to `<data-dir>/api-token` (mode 0600).
-`infra/demo.sh up` exports both tokens in `.demo/env` as `FERRY_Z_TOKEN` / `FERRY_B_TOKEN`, and the
+`infra/regtest.sh up` exports both tokens in `.demo/env` as `FERRY_Z_TOKEN` / `FERRY_B_TOKEN`, and the
 Vite proxy should inject them as the `Authorization` header. There is no CORS. A request that
 carries an `Origin` header is refused (`403`) unless that origin was allowed with `--ui-origin`
-(repeatable; demo.sh allows `http://localhost:5180` and `http://127.0.0.1:5180`). A missing or wrong
+(repeatable; `infra/regtest.sh` allows `http://localhost:5180` and `http://127.0.0.1:5180`). A missing or wrong
 token gets `401`.
 
 The `maker` URL in `POST /api/swaps` is the maker's **peer** listener (demo: `http://127.0.0.1:7112`,
@@ -796,9 +796,9 @@ Every non-2xx response has a JSON body `{ "error": "Human-readable sentence" }`.
 A body may carry a machine-readable `code` next to `error` where a caller must tell errors apart
 (`busy`, `route_label_in_use`).
 
-## POST /api/swaps/:id/fault (demo only)
+## POST /api/swaps/:id/fault (tests only)
 
-Only exists when `ferryd` runs with `--demo-faults` (demo.sh passes it). Otherwise it is `404`.
+Only exists when `ferryd` runs with `--demo-faults` (`infra/regtest.sh` passes it). Otherwise it is `404`.
 
 `{ "fault": "stall" }` → `200 { "ok": true }` makes this party stop acting, to demonstrate the
 cancel/refund/punish paths. While stalled, a party sends no messages and broadcasts nothing. Its

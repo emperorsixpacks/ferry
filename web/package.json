@@ -10,16 +10,7 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
     "preview": "vite preview",
-    "shoot": "node scripts/shoot.mjs",
-    "shoot:real": "node scripts/shoot.mjs --real",
-    "film": "node scripts/film.mjs",
-    "shoot:app": "node scripts/shoot-app.mjs",
-    "shoot:app:real": "node scripts/shoot-app.mjs --real",
-    "shoot:watchtower": "node scripts/shoot-watchtower.mjs",
     "start": "node server/prod.mjs",
-    "shoot:evm": "node scripts/shoot-evm.mjs",
-    "shoot:hang": "node scripts/shoot-hang.mjs",
-    "shoot:near": "node scripts/shoot-near.mjs",
     "test:server": "node --test server/*.test.mjs"
   },
   "dependencies": {

@@ -9,6 +9,5 @@ vendor
 .testnet
 web/dist
 web/screenshots
-docs/evidence
 web/film
 .ferry-node*

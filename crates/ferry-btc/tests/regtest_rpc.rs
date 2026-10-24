@@ -1,5 +1,5 @@
 //! The RPC client against a real node: wallet addresses, lock funding and the watch-only
-//! wallet. Bitcoin by default (`spikes/btc/scripts/regtest.sh start`, 127.0.0.1:18543);
+//! wallet. Bitcoin by default (`infra/btc/regtest.sh start`, 127.0.0.1:18543);
 //! `FERRY_CHAIN=ltc` runs it against litecoind (`infra/ltc/regtest.sh start`, 127.0.0.1:19443).
 //! Override the URL with FERRY_BTC_RPC.
 //!
@@ -28,7 +28,7 @@ fn url(coin: Coin) -> String {
 }
 
 #[tokio::test]
-#[ignore = "needs a regtest node (spikes/btc/scripts/regtest.sh or infra/ltc/regtest.sh)"]
+#[ignore = "needs a regtest node (infra/btc/regtest.sh or infra/ltc/regtest.sh)"]
 async fn wallet_lock_and_watch_wallet() {
     let coin = coin();
     let chain = Chain::new(coin, Network::Regtest).unwrap();
@@ -100,7 +100,7 @@ async fn wallet_lock_and_watch_wallet() {
 /// each one picked, the spendable balance leaves those coins out, a lock lost across a node
 /// restart can be locked again, and an unlocked coin is spendable again.
 #[tokio::test]
-#[ignore = "needs a regtest node (spikes/btc/scripts/regtest.sh or infra/ltc/regtest.sh)"]
+#[ignore = "needs a regtest node (infra/btc/regtest.sh or infra/ltc/regtest.sh)"]
 async fn unbroadcast_locks_never_share_coins() {
     use std::collections::HashSet;
     let coin = coin();
@@ -176,7 +176,7 @@ async fn unbroadcast_locks_never_share_coins() {
 /// the exact incremental fee a replacement needs, the node's own `maxfeerate` guard, a locked
 /// coin, and (Bitcoin only) a parent the mempool does not hold, sent with its child as a package.
 #[tokio::test]
-#[ignore = "needs a regtest node (spikes/btc/scripts/regtest.sh or infra/ltc/regtest.sh)"]
+#[ignore = "needs a regtest node (infra/btc/regtest.sh or infra/ltc/regtest.sh)"]
 async fn child_bump_primitives() {
     use ferry_btc::child::{build_child, fee_for, vsize_bound, ChildError, ChildLimits};
 
@@ -1159,7 +1159,7 @@ async fn package_with_a_parent_that_is_already_confirmed() {
 /// A locked wallet refuses to sign a child with the node's own error (-13). The bumper takes
 /// that as a refusal to wait out until the next block, not as a node it could not reach.
 #[tokio::test]
-#[ignore = "needs a regtest node (spikes/btc/scripts/regtest.sh or infra/ltc/regtest.sh)"]
+#[ignore = "needs a regtest node (infra/btc/regtest.sh or infra/ltc/regtest.sh)"]
 async fn a_locked_wallet_refuses_to_sign_a_child() {
     use ferry_btc::child::{build_child, ChildError, ChildLimits};
     use ferry_btc::rpc::RpcError;

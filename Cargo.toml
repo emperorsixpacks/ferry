@@ -10,7 +10,7 @@ members = [
     "crates/ferry-evm",
     "crates/ferry-route",
 ]
-exclude = ["spikes", "third_party", "vendor"]
+exclude = ["third_party", "vendor"]
 
 [workspace.package]
 version = "0.1.0"

@@ -137,13 +137,11 @@ armed**, and the timeline gets a `watchtower_armed` entry. The same flags work w
   swap runs into cancel and refund. ferryd reports the note as spent only for a mined or still-live
   transaction. (Sim test `no_redeem_adaptor_once_the_lock_note_is_spent`.)
 
-`infra/demo-watchtower.sh run` plays this end to end on regtest with mock ZEC. B arms its own tower,
-locks BTC and is killed; its tower calls the swap off and refunds it, and Z reclaims its ZEC. Then B
-runs without `--watchtower-own` and refuses to arm. B is killed after locking and Z after
-locking ZEC; Z's tower calls the swap off and punishes. Each party comes back to a finished swap.
-`CHAIN=ltc` plays the same against litecoind regtest (MWEB active, no `-txindex`), and
-`CHAIN=evm` against FerryLock on anvil: B's tower refunds at t1 (anvil's clock is jumped to the
-deadlines) and Z's tower punishes at t2, after checking nothing went out before.
+The tower's tests play this with the owners offline ([Tests](#tests)): on regtest, B's package
+calls the swap off and refunds it, Z's calls it off and punishes, and both stand down once the
+redeem confirms (`FERRY_CHAIN=ltc`: the same on litecoind regtest, MWEB active, no `-txindex`);
+on FerryLock on anvil, B's tower refunds at t1 (anvil's clock is jumped to the deadlines) and Z's
+punishes at t2, after checking nothing went out before.
 
 ## Running it
 
@@ -332,5 +330,3 @@ For EVM swaps, see [USDC on EVM](#usdc-on-evm-ferrylock). On Bitcoin and Litecoi
 
   `FERRY_CHAIN=ltc` runs the same three against litecoind (`infra/ltc/regtest.sh start`, or set
   `FERRY_WT_BTC_RPC`), through the legacy watch-only wallet.
-- `infra/demo-watchtower.sh run` plays both stories end to end (below) with ferryd and mock ZEC;
-  `CHAIN=ltc` and `CHAIN=evm` play them on Litecoin and on FerryLock, and `run-all` plays all three.

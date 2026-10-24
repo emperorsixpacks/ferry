@@ -10,10 +10,11 @@ testnet is Base Sepolia, and local runs use anvil.
 | **Z** | shielded ZEC | USDC |
 | **B** | USDC | shielded ZEC |
 
-To run it: `ferryd --counter evm` with the `--evm-*` flags (below). `infra/evm-demo.sh test`
-runs a happy swap, a refund and a punish against anvil with the mock ZEC leg (`TOKEN=weth` for
-WETH; `MAKER=z` for buying ZEC, a B taker with a Z maker: either role can make, B still locks
-first). `infra/evm-testnet.sh` sets up the public run on Base Sepolia and Zcash testnet
+To run it: `ferryd --counter evm` with the `--evm-*` flags (below). On a local anvil,
+`crates/ferry-evm/tests/anvil.rs` runs the claim, the refund and the punish (and WETH above 2^64
+base units), and `crates/ferryd/tests/evm_daemons.rs` runs the daemons with the mock ZEC leg,
+including buying ZEC (a B taker with a Z maker: either role can make, B still locks first).
+`infra/evm-testnet.sh` sets up the public run on Base Sepolia and Zcash testnet
 ([Running on Base Sepolia](#running-on-base-sepolia)).
 
 ## Contract
@@ -118,8 +119,8 @@ gas from its own account. FerryLock pays the swap's own `refunder` or `claimer`,
   (public once locked) and B's `b` (public once refunded), nothing about the ZEC side. On Base, it
   depends on the sequencer like any sender, which is what the Δ margins are for.
 
-`CHAIN=evm infra/demo-watchtower.sh run` plays it on anvil: B is killed after locking and its tower
-refunds at t1; then Z is killed after locking ZEC and its tower punishes at t2.
+The watchtower's anvil test (`crates/ferry-watchtower/tests/anvil.rs`) plays it with the owners
+offline: B's tower refunds inside [t1, t2 − Δ), and Z's punishes from t2.
 
 ## Design review: what changed from the first proposal, and why
 
@@ -214,8 +215,7 @@ margins; the claim window is the time from the proposal to t1 − Δ.
   test-network minimums; ferryd refuses that flag for a listed chain, so it can't loosen a
   mainnet.
 
-**What Ferry runs on Base mainnet.** `infra/node/ferry --mainnet` and `infra/mainnet-demo.sh`
-use the same terms: t1 = 4 h 15 min after the proposal (the 2 h claim window, Δ and 15 minutes of
+**What Ferry runs on Base mainnet.** `infra/node/ferry --mainnet` uses these terms: t1 = 4 h 15 min after the proposal (the 2 h claim window, Δ and 15 minutes of
 slack), Δ = 2 h, and t2 − t1 = 26 h. From the proposal:
 
 | | when |
@@ -330,9 +330,8 @@ Only the token changes.
   | Arbitrum Sepolia | 421614 | `0x980B62Da83eFf3D4576C647993b0c1D7faf17c73` |
 
   ZEC → WETH has run live on Base Sepolia: eight swaps through the public card of the server
-  deploy, up to three at once ([log](evidence/local-stack-base-sepolia-2026-10-21.txt)). Before
-  that WETH ran only on anvil, against `MockWETH`. WETH → ZEC ran live once, on 2026-10-22
-  ([log](evidence/weth-buy-base-sepolia-2026-10-22.txt)).
+  deploy, up to three at once. Before that WETH ran only on anvil, against `MockWETH`. WETH → ZEC
+  ran live once, on 2026-10-22 ([WHAT-IS-REAL.md](WHAT-IS-REAL.md#what-has-run-and-where)).
 
 ## Code
 
@@ -396,15 +395,11 @@ Only the token changes.
     token, swap id and commitments. Timeline kinds reuse the Bitcoin names where the step is the
     same (`btc_lock_broadcast`, `redeem_adaptor_received` for Ready, `btc_redeem_broadcast` for
     the claim, `cancel_seen` when t1 passes), so the UI's steps work for both.
-- **`infra/evm-demo.sh`.** anvil on 18545, ferryd on 7901/7902 (peers on 7911/7912), and
-  `happy`, `refund`, `punish`, `test`. `TOKEN=weth` deploys MockWETH, has B wrap 100 ETH and
-  quotes 0.012 WETH per ZEC; `test` also checks that ferryd refuses a mislabeled token.
 - **`infra/evm-testnet.sh`.** Base Sepolia and Zcash testnet: `keys`, `status`, `deploy`, `up`,
   `swap`, `down`, and `fork` for a rehearsal on a local fork (below).
 - **Web.** The coin table has a `usdc` entry (6 decimals, `kind: "evm"`, the chain named from
   the network). Deadlines are drawn in block time, the crossing has no cancel output, and the
-  maker list labels EVM makers `ZEC/<token>`. `pnpm shoot:evm` takes the screenshots against a
-  running EVM demo.
+  maker list labels EVM makers `ZEC/<token>`.
 
 Gas (forge gas report): lock about 273k; claim about 75k, or up to 109k with a tip; refund about
 57k; punish about 68k. Ready costs nothing. Deploying FerryLock costs about 1.79M.
@@ -496,9 +491,7 @@ ferryd applies the Base Sepolia policy, not the anvil one). It creates separate 
 `.evm-testnet-fork/` and gives them the amounts above: the ETH with `anvil_setBalance`, and 10 of
 Circle's real test USDC, moved from a real holder by impersonation. Then it deploys FerryLock,
 starts both daemons with the mock ZEC leg, and runs a swap, a refund and a punish, jumping the
-fork's clock to t1 and t2. Nothing is sent to the real network. The last run is in
-`docs/evidence/evm-base-sepolia-fork-2026-10-20.txt`, together with a start against the real
-Zcash testnet. `fork up`, `fork fund` and `fork down` do the steps one at a time; point the other
+fork's clock to t1 and t2. Nothing is sent to the real network. `fork up`, `fork fund` and `fork down` do the steps one at a time; point the other
 commands at the fork with
 `FERRY_EVM_TESTNET_DIR=.evm-testnet-fork EVM_RPC=http://127.0.0.1:18547 ZEC_BACKEND=mock FAULTS=1`.
 
@@ -506,9 +499,6 @@ commands at the fork with
 
 - **Test networks only.** Test ETH, test USDC and TAZ have no value. Base mainnet has a much
   stricter policy (2 h margins, 30 confirmations), and nothing here has been run there.
-  `infra/mainnet-demo.sh` is the tooling for one small owner-funded run on Base mainnet and Zcash
-  mainnet (at most 0.02 ZEC, paid on through NEAR Intents), rehearsed on a fork of Base mainnet
-  under that policy ([MAINNET-DEMO.md](MAINNET-DEMO.md)).
 - **RPC rate limits.** https://sepolia.base.org is shared and throttled, and it answers
   `eth_getLogs` for at most 200 blocks at a time. The script and ferryd retry throttled requests
   with a backoff and time requests out, ferryd scans logs in 200-block chunks and re-reads only
@@ -526,7 +516,7 @@ commands at the fork with
 
 - **Base Sepolia.** Done: a live swap on 2026-10-20, 0.05 TAZ for 2 USDC with real Zcash
   testnet notes and Circle's test USDC, settled in about 7 minutes
-  ([log](evidence/evm-base-sepolia-live-2026-10-20.txt); FerryLock
+  (FerryLock
   [0x74b7…65Ef](https://sepolia.basescan.org/address/0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef),
   [lock](https://sepolia.basescan.org/tx/0xeac4a050a97702fbca0fb1cf8ad8d4f965549e0612c62e0d85d233182fa926bb),
   [claim](https://sepolia.basescan.org/tx/0xde25c161c7e9b978de9aed580d12b0530813a460dd543124fbfc345978996aad)).

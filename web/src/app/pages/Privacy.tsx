@@ -17,7 +17,7 @@ import "../privacy.css";
 // Sources (keep in step): docs/THREAT-MODEL.md ("What the other side learns", "What everyone else
 // sees", "Routes", "Paying out to another address"), docs/PROTOCOL.md (Privacy), docs/EVM.md (What
 // the public sees on Base), docs/ARCHITECTURE.md (Cross-chain settlement with NEAR Intents), and
-// docs/evidence/ (the live Base Sepolia swap; the regtest run's pool check). The bridge column is
+// docs/WHAT-IS-REAL.md (the live swaps) and infra/e2e-real.sh (the pool check). The bridge column is
 // the common case of bridges in general, not a Ferry document.
 
 const DOCS = `${REPO_URL}/blob/master/docs`;
@@ -29,10 +29,10 @@ const SRC = {
   nearWhy: `${DOCS}/ARCHITECTURE.md#cross-chain-settlement-with-near-intents`,
   protocol: `${DOCS}/PROTOCOL.md#privacy`,
   base: `${DOCS}/EVM.md#what-the-public-sees-on-base`,
-  e2e: `${DOCS}/evidence/e2e-real-regtest-2026-10-19.txt`,
-  sepolia: `${DOCS}/evidence/evm-base-sepolia-live-2026-10-20.txt`,
+  e2e: `${REPO_URL}/blob/master/infra/e2e-real.sh`,
+  live: `${DOCS}/WHAT-IS-REAL.md#what-has-run-and-where`,
 };
-// the live Base Sepolia swap of 2026-10-20 (docs/evidence/evm-base-sepolia-live-2026-10-20.txt)
+// the live Base Sepolia swap of 2026-10-20 (docs/WHAT-IS-REAL.md, "What has run, and where")
 const SEPOLIA = {
   contract: "https://sepolia.basescan.org/address/0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef",
   lock: "https://sepolia.basescan.org/tx/0xeac4a050a97702fbca0fb1cf8ad8d4f965549e0612c62e0d85d233182fa926bb",
@@ -642,7 +642,7 @@ const LIMITS: [string, string][] = [
   ],
   ["On Base, a swap looks like a swap", "Every step there is a public call to Ferry's contract, with the amount. Your node uses one account for its swaps there, so they link to each other."],
   ["A called-off swap shows its shape", "On Bitcoin, only a swap that completes looks ordinary. A refund or a penalty is visibly a swap."],
-  ["Early software", "Ferry has run on test networks only: 15 live swaps on public test networks, and local tests. Nothing on mainnet, and no independent review."],
+  ["Early software", "Ferry has run on test networks only: 17 live swaps on public test networks, and local tests. Nothing on mainnet, and no independent review."],
 ];
 
 function Limits() {
@@ -679,7 +679,7 @@ function Limits() {
 // ------------------------------------------------------------------------------------------------
 // The real transactions
 
-// every ZEC transaction of the regtest run, as mined (docs/evidence/e2e-real-regtest-2026-10-19.txt)
+// every ZEC transaction of the 2026-10-19 regtest run, as mined (infra/e2e-real.sh checks each one)
 const POOL: [string, string, string, number][] = [
   ["Normal swap", "lock", "ad59673a", 5],
   ["Normal swap", "collect", "4d4914e4", 2],
@@ -725,7 +725,7 @@ function Evidence() {
                 <CopyText value={SEPOLIA.zecSweep} head={8} tail={4} />
               </ProofRow>
             </ul>
-            <Foot href={SRC.sepolia}>The full log</Foot>
+            <Foot href={SRC.live}>Every live swap</Foot>
           </Proof>
 
           <Proof title="Every ZEC transaction, checked as mined" date="2026-10-19">
@@ -775,7 +775,7 @@ function Evidence() {
               The same run checks the other side: it downloads the transaction that collects the ZEC and recovers no recipient or amount. With that protection switched
               off, the same check finds both.
             </p>
-            <Foot href={SRC.e2e}>The full log</Foot>
+            <Foot href={SRC.e2e}>The test that checks it</Foot>
           </Proof>
 
           <Proof title="NEAR Intents, in the open" date="2026-10-20">

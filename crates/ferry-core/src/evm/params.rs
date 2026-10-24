@@ -433,28 +433,19 @@ mod tests {
             .unwrap_or_else(|| panic!("{script}: no number for {name}"))
     }
 
-    /// The Base mainnet terms `infra/node/ferry --mainnet` and `infra/mainnet-demo.sh` ship, read
-    /// from the scripts, so neither can drift below the policy or away from the times in the docs
-    /// (docs/EVM.md, "Timing rules").
+    /// The Base mainnet terms `infra/node/ferry --mainnet` ships, read from the script, so they
+    /// can't drift below the policy or away from the times in the docs (docs/EVM.md, "Timing
+    /// rules").
     #[test]
     fn shipped_base_mainnet_terms() {
         let base = EvmPolicy::for_chain(BASE_CHAIN_ID, PolicyOptIn::Listed).unwrap();
-        let shipped = [
-            (
-                script_value("infra/node/ferry", "EVM_T1_SECS"),
-                script_value("infra/node/ferry", "EVM_REFUND_SECS"),
-                script_value("infra/node/ferry", "EVM_DELTA_SECS"),
-                script_value("infra/node/ferry", "EVM_LOCK_CONFS"),
-                script_value("infra/node/ferry", "ZEC_CONFS"),
-            ),
-            (
-                script_value("infra/mainnet-demo.sh", "T1_SECS"),
-                script_value("infra/mainnet-demo.sh", "REFUND_SECS"),
-                script_value("infra/mainnet-demo.sh", "DELTA_SECS"),
-                script_value("infra/mainnet-demo.sh", "LOCK_CONFS"),
-                script_value("infra/mainnet-demo.sh", "ZEC_CONFS"),
-            ),
-        ];
+        let shipped = [(
+            script_value("infra/node/ferry", "EVM_T1_SECS"),
+            script_value("infra/node/ferry", "EVM_REFUND_SECS"),
+            script_value("infra/node/ferry", "EVM_DELTA_SECS"),
+            script_value("infra/node/ferry", "EVM_LOCK_CONFS"),
+            script_value("infra/node/ferry", "ZEC_CONFS"),
+        )];
         let (h, m) = (3_600, 60);
         for (t1_secs, refund_secs, delta, lock, zec) in shipped {
             let now = 1_800_000_000;

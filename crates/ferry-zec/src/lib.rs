@@ -25,7 +25,7 @@
 //!   - `pczt create-max --discard-ovk` (`OvkPolicy::Discard`). devtool builds outputs with the
 //!     sending account's OVK; for the joint account that OVK belongs to both parties, so the
 //!     counterparty could decrypt the sweep's outCiphertext and learn where the ZEC went, how
-//!     much and the memo (audit H4, shown by `spikes/zec/h4_ovk.sh`).
+//!     much and the memo (audit H4).
 //!   - `pczt create|create-max --ironwood-only`: select notes from the Ironwood pool alone. A
 //!     lock is never funded from another pool, and a sweep ignores foreign Sapling/Orchard notes
 //!     that anyone can send to the joint receivers, instead of failing on them (audit H1).

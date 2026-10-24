@@ -87,8 +87,8 @@ infra/deploy/deploy.sh <ssh-host>
 The first run:
 
 1. copies the repository to `~/ferry` on the server with rsync. Everything git ignores stays on
-   your machine (`--filter=':- .gitignore'`), and so do `.git`, build outputs, screenshots, spikes
-   and the film.
+   your machine (`--filter=':- .gitignore'`), and so do `.git`, build outputs, screenshots and
+   the film.
 2. creates `~/ferry/infra/deploy/.env` from `infra/deploy/.env.example`, and random bitcoind and
    litecoind RPC passwords in `~/ferry/infra/deploy/secrets/` (only `.env` gets their hashes).
    This is `infra/deploy/ctl secrets` on the server. Everything stays on the server, private to
@@ -150,18 +150,7 @@ the same for every enabled pair (section 7).
 
 The balances show up in `status`, and in the UI once they confirm.
 
-## 6. Smoke test
-
-```sh
-curl -fsS https://<DOMAIN>/healthz                  # {"ok":true}: Caddy, TLS and the web server
-infra/deploy/deploy.sh <ssh-host> status            # both daemons answer; balances
-```
-
-Open `https://<DOMAIN>`: both parties' panels should be online with their balances. Once the node
-is synced and both parties are funded, start a small swap (0.1 ZEC) from the UI. It takes about
-an hour on signet (blocks every ~10 minutes). The default timelocks are T1 = 6 blocks and
-T2 = 6 blocks after the cancel. If something stalls, the swap refunds by itself, which is the
-protocol working.
+## 6. Limits, and swaps at once
 
 The public UI is guarded by `web/server/prod.mjs`: visitors can only read status and start a swap
 on a Z (selling ZEC), or on a B for the pairs `BUY_ZEC` names (buying it, section 7.6). Starts
@@ -313,9 +302,8 @@ Same as ZEC/USDC (same RPC, same FerryLock, its own two accounts in
    ```
 4. **Limits.** A fixed demo rate (`WETH_RATE`, 0.012 WETH per ZEC; `WETH_PRICE_FEED` follows
    ZEC/ETH instead), swaps of 0.01 to 0.25 ZEC, the same deadlines as ZEC/USDC. ZEC → WETH has run
-   live on Base Sepolia through this deploy, eight swaps, up to three at once
-   (`docs/evidence/local-stack-base-sepolia-2026-10-21.txt`); WETH → ZEC (`BUY_ZEC=weth-base`) ran
-   once, on 2026-10-22 (`docs/evidence/weth-buy-base-sepolia-2026-10-22.txt`).
+   live on Base Sepolia through this deploy, eight swaps, up to three at once; WETH → ZEC
+   (`BUY_ZEC=weth-base`) ran once, on 2026-10-22 ([WHAT-IS-REAL.md](WHAT-IS-REAL.md#what-has-run-and-where)).
 
 ### 7.4 Verify
 
