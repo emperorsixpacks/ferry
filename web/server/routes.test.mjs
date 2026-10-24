@@ -3,7 +3,7 @@
 // (routes.mjs).
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildRoute, canRoute, publicRoute, routeLegs, routerLink, samePartner } from "./routes.mjs";
+import { buildRoute, canRoute, publicRoute, routeBlocks, routeLegs, routerLink, samePartner } from "./routes.mjs";
 
 const LEGS = { from: ["btc", "usdc-base"], to: ["btc", "usdc-base", "ltc"] };
 
@@ -129,4 +129,18 @@ test("the router link caches its legs and asks every time whether a route is mov
   const down = routerLink({ url: "http://127.0.0.1:1", request: async () => Promise.reject(new Error("refused")) });
   assert.equal(await down.legs(), null);
   assert.equal(await down.busy(), null);
+});
+
+test("a moving route keeps out sells on its pair, and buys there when its seller is also a partner", () => {
+  const moving = [{ state: "leg2", from: "btc", to: "usdc-base" }, { state: "done", to: "ltc" }];
+  const sell = (pair) => routeBlocks(moving, { pair, side: "sell" });
+  const buy = (pair, sellerMakes) => routeBlocks(moving, { pair, side: "buy", sellerMakes });
+  assert.match(sell("usdc-base"), /selling ZEC on this pair/);
+  assert.equal(sell("btc"), null, "the pair it buys on is not held");
+  assert.equal(sell("ltc"), null, "a finished route holds nothing");
+  assert.equal(buy("usdc-base", false), null, "the seller isn't a partner: no buy can reach its ZEC");
+  assert.match(buy("usdc-base", true), /using this pair's ZEC/);
+  assert.equal(buy("btc", true), null);
+  for (const state of ["leg1", "settling", "pausing", "leg2"]) assert.ok(routeBlocks([{ state, to: "btc" }], { pair: "btc", side: "sell" }), state);
+  for (const routes of [[], null, [{ state: "holding", to: "btc" }], [{ state: "failed", to: "btc" }]]) assert.equal(routeBlocks(routes, { pair: "btc", side: "sell" }), null);
 });

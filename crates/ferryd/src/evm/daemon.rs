@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -73,7 +74,17 @@ pub struct EvmDaemon<L> {
     pub withdrawals: crate::withdraw::Withdrawals,
     /// `--max-swaps`, or the network's default (crate::capacity).
     pub max_swaps: u32,
+    /// Set by the tick for its second pass only: slow work runs then ([`Self::tick`]).
+    slow_ok: AtomicBool,
+    /// A Zcash call this tick took [`ZEC_STUCK`] or longer: the rest of this tick's Zcash work
+    /// waits for the next tick.
+    zec_paused: AtomicBool,
 }
+
+/// A Zcash call this slow pauses the tick's other Zcash work until the next tick.
+const ZEC_STUCK: Duration = Duration::from_secs(60);
+/// While the tick's slow pass runs, every swap's deadline calls run again this often.
+const DEADLINES_EVERY: Duration = Duration::from_secs(20);
 
 /// How long a taker waits for the maker's Accept (crate::daemon has the reason).
 const PROPOSE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -317,6 +328,8 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             logs: std::sync::Mutex::new(HashMap::new()),
             quotes,
             starts: crate::route::Starts::default(),
+            slow_ok: AtomicBool::new(false),
+            zec_paused: AtomicBool::new(false),
             max_swaps: crate::capacity::max_swaps(
                 cli.max_swaps,
                 mainnet_chain(chain_id) || cli.zec_network == "main",
@@ -1142,7 +1155,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 needs.push(need);
                 let largest = self
                     .leg
-                    .largest_notes(needs.len() - 1)
+                    .notes(needs.len() - 1)
                     .await
                     .map_err(|e| unavailable(e.to_string()))?;
                 if !crate::capacity::zec_locks_fit(have, &largest, &needs) {
@@ -1292,11 +1305,13 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 self.count(&st),
             )
         };
-        let zec = if needs.is_empty() {
-            balances.zec_shielded_zat
+        // Z: what one more lock may use, its fee reserve included: next to the locks still to
+        // send, less the notes they may take and the fee every note costs to spend.
+        let zec = if self.role == Role::Z {
+            let notes = self.leg.notes(needs.len()).await?;
+            crate::capacity::zec_room(balances.zec_shielded_zat, &notes, &needs, 0)
         } else {
-            let largest = self.leg.largest_notes(needs.len()).await?;
-            crate::capacity::zec_room(balances.zec_shielded_zat, &largest, &needs, 0)
+            balances.zec_shielded_zat
         };
         let tokens: u128 = balances.token_units.parse().unwrap_or(u128::MAX);
         let tokens = tokens.saturating_sub(token_held);
@@ -1713,6 +1728,21 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 break;
             }
             let zec = p.is_zec();
+            // Slow work waits for the tick's second pass, and Zcash work for the next tick
+            // while the wallet server is stuck: as if it had to retry.
+            match crate::record::now_for(
+                p.is_slow(),
+                zec,
+                self.slow_ok.load(Relaxed),
+                self.zec_paused.load(Relaxed),
+            ) {
+                crate::record::Now::Run => {}
+                crate::record::Now::Skip => {
+                    i += 1;
+                    continue;
+                }
+                crate::record::Now::Stop => break,
+            }
             match self.execute(rec, p).await {
                 Ok(ev) => follow.extend(ev),
                 // A Zcash action waiting on its chain never holds up the EVM deadline calls.
@@ -1874,11 +1904,13 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                     Role::B => rec.sweep_to.clone(),
                     Role::Z => None,
                 };
-                match self
+                let started = Instant::now();
+                let swept = self
                     .leg
                     .sweep(&fvk, ask.expose(), lock_value, to.as_deref())
-                    .await
-                {
+                    .await;
+                self.zec_slow(started);
+                match swept {
                     Ok(txid) => {
                         rec.zec_sweep_txid = Some(txid.clone());
                         let (kind, label) = match (rec.role(), &to) {
@@ -2035,7 +2067,10 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             rec.zec_send_intent = false;
             return Err(Retry);
         }
-        match self.leg.send(&fvk, amount).await {
+        let started = Instant::now();
+        let sent = self.leg.send(&fvk, amount).await;
+        self.zec_slow(started);
+        match sent {
             Ok(txid) => {
                 rec.zec_lock_txid = Some(txid.clone());
                 rec.log(
@@ -2329,8 +2364,74 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         }
     }
 
+    /// One round over every swap, with the state held: the account sends one transaction at a
+    /// time (its nonces follow each other) and the Zcash wallet builds one at a time. In two
+    /// passes, so one swap's slow work never delays another's deadline:
+    /// 1. every swap's EVM events, peer messages and deadline calls (claim, refund, punish),
+    ///    with slow work left queued; then every swap's look at the Zcash chain, so a slow
+    ///    wallet server holds up no deadline;
+    /// 2. the slow work (B's approve and lock, a ZEC lock or sweep), one swap at a time, with
+    ///    pass 1 run again whenever [`DEADLINES_EVERY`] has gone by.
+    ///
+    /// A Zcash call that takes [`ZEC_STUCK`] or longer pauses the tick's other Zcash work until
+    /// the next tick, so a hung wallet server costs one wait per tick, not one per swap.
     pub async fn tick(&self) {
         let mut st = self.state.lock().await;
+        self.zec_paused.store(false, Relaxed);
+        self.deadline_pass(&mut st).await;
+        self.slow_pass(&mut st).await;
+        self.publish(&mut st);
+    }
+
+    /// The tick's second pass: the slow work, swap by swap.
+    async fn slow_pass(&self, st: &mut EvmState) {
+        let slow: Vec<String> = st
+            .swaps
+            .iter()
+            .filter(|(_, r)| {
+                !r.settled() && !r.stalled && r.pending.iter().any(EvmPending::is_slow)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut deadlines = Instant::now();
+        for id in slow {
+            if deadlines.elapsed() >= DEADLINES_EVERY {
+                self.deadline_pass(st).await;
+                deadlines = Instant::now();
+            }
+            let Some(rec) = st.swaps.get_mut(&id) else {
+                continue;
+            };
+            if rec.settled() || rec.stalled {
+                continue;
+            }
+            self.slow_ok.store(true, Relaxed);
+            let done = AssertUnwindSafe(self.drive_pending(rec))
+                .catch_unwind()
+                .await;
+            self.slow_ok.store(false, Relaxed);
+            if done.is_err() {
+                tracing::error!(%id, "slow work panicked; the swap is kept and retried");
+            }
+            self.save(rec);
+        }
+    }
+
+    /// A Zcash call that started at `started` is over: if it took [`ZEC_STUCK`] or longer, the
+    /// rest of this tick's Zcash work waits for the next tick.
+    fn zec_slow(&self, started: Instant) {
+        if started.elapsed() >= ZEC_STUCK {
+            tracing::warn!(
+                "a Zcash call took {:?}; the rest of this round's Zcash work waits for the next",
+                started.elapsed()
+            );
+            self.zec_paused.store(true, Relaxed);
+        }
+    }
+
+    /// The tick's first pass: every swap's events and deadline calls, no slow work.
+    async fn deadline_pass(&self, st: &mut EvmState) {
+        self.slow_ok.store(false, Relaxed);
         let ids: Vec<String> = st.swaps.keys().cloned().collect();
         for id in ids {
             let Some(rec) = st.swaps.get_mut(&id) else {
@@ -2347,7 +2448,40 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             }
             self.save(rec);
         }
-        self.publish(&mut st);
+        // Then every swap's Zcash look, after all the deadline steps above: a slow wallet server
+        // (the first look at a joint address waits for the wallet) holds up none of them.
+        for id in st.swaps.keys().cloned().collect::<Vec<_>>() {
+            let Some(rec) = st.swaps.get_mut(&id) else {
+                continue;
+            };
+            if rec.settled() {
+                continue;
+            }
+            match AssertUnwindSafe(self.zec_round(rec)).catch_unwind().await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(%id, "tick: {e}"),
+                Err(_) => tracing::error!(%id, "zcash look panicked; the swap is kept"),
+            }
+            self.save(rec);
+        }
+    }
+
+    /// One swap's Zcash look: the joint address's notes and the public view of its ZEC
+    /// transactions, and the events they make.
+    async fn zec_round(&self, rec: &mut EvmRecord) -> anyhow::Result<()> {
+        let mut out = vec![];
+        if let Err(e) = self.zec_events(rec, &mut out).await {
+            tracing::warn!(id = %rec.id, "zcash watch (skipped this tick): {e}");
+        }
+        self.zec_observer(rec).await;
+        for ev in out {
+            if rec.stalled {
+                self.observe(rec, ev);
+            } else if let Err(e) = self.process(rec, ev).await {
+                tracing::warn!(id = %rec.id, "chain event rejected: {e}");
+            }
+        }
+        Ok(())
     }
 
     async fn tick_swap(&self, rec: &mut EvmRecord) -> anyhow::Result<()> {
@@ -2462,10 +2596,6 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             Ok(o) => out.push(EvmEvent::Chain(EvmChainEvent::Observed(o))),
             Err(e) => tracing::warn!(id = %rec.id, "EVM watch: {e}"),
         }
-        if let Err(e) = self.zec_events(rec, &mut out).await {
-            tracing::warn!(id = %rec.id, "zcash watch (skipped this tick): {e}");
-        }
-        self.zec_observer(rec).await;
         out
     }
 
@@ -2595,12 +2725,15 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
     }
 
     async fn zec_events(&self, rec: &mut EvmRecord, out: &mut Vec<EvmEvent>) -> anyhow::Result<()> {
-        if !rec.swap.lock_seen() {
+        if !rec.swap.lock_seen() || self.zec_paused.load(Relaxed) {
             return Ok(());
         }
         let fvk = rec.swap.session().joint_fvk()?;
         let amount = rec.swap.session().params.zec_amount;
-        let notes = self.leg.watch(&fvk).await?;
+        let started = Instant::now();
+        let notes = self.leg.watch(&fvk).await;
+        self.zec_slow(started);
+        let notes = notes?;
         let lock = notes
             .iter()
             .filter(|n| n.value >= amount)
@@ -2644,7 +2777,11 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             }
         }
         // Timeline heights of ZEC transactions, from their confirmations.
-        let zec_tip = self.leg.status().await.ok().map(|s| s.height);
+        let zec_tip = if self.zec_paused.load(Relaxed) {
+            None
+        } else {
+            self.leg.status().await.ok().map(|s| s.height)
+        };
         for i in 0..rec.timeline.len() {
             let e = &rec.timeline[i];
             if e.chain != "zec" || e.height.is_some() {
@@ -2661,6 +2798,9 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
     }
 
     async fn zec_observer(&self, rec: &mut EvmRecord) {
+        if self.zec_paused.load(Relaxed) {
+            return;
+        }
         let sweep = rec.zec_spent_by.clone().or(rec.zec_sweep_txid.clone());
         for (key, txid) in [("lock", rec.zec_lock_txid.clone()), ("sweep", sweep)] {
             let Some(txid) = txid else { continue };

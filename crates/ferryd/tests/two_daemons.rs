@@ -988,7 +988,7 @@ async fn silent_taker_times_out_and_peer_input_is_bounded() {
 #[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
 async fn two_swaps_at_once_and_a_third_is_busy() {
     use std::collections::HashSet;
-    let w = World::start_full(2, Role::B, &["--max-swaps", "2"], &[]).await;
+    let mut w = World::start_full(2, Role::B, &["--max-swaps", "2"], &[]).await;
     // B's wallet gets three more coins, each enough for one lock.
     let b_rpc = BitcoinRpc::new(rpc_url(), "ferry", "ferry").with_wallet(w.b.wallet.clone());
     for _ in 0..3 {
@@ -1000,6 +1000,22 @@ async fn two_swaps_at_once_and_a_third_is_busy() {
             .unwrap();
     }
     w.mine().await;
+    // A coin left locked with no swap to show for it (a funding interrupted before it was
+    // recorded) goes back to the wallet when B restarts.
+    let coins: Vec<Value> = b_rpc.wallet_call("listunspent", json!([1])).await.unwrap();
+    let stray = json!([{"txid": coins[0]["txid"], "vout": coins[0]["vout"]}]);
+    let _: Value = b_rpc
+        .wallet_call("lockunspent", json!([false, stray]))
+        .await
+        .unwrap();
+    assert_eq!(b_rpc.locked_coins().await.unwrap().len(), 1);
+    w.b.kill();
+    w.b.spawn();
+    w.wait_ready(&w.b.url).await;
+    assert!(
+        b_rpc.locked_coins().await.unwrap().is_empty(),
+        "a restarted B releases coins no swap lock needs"
+    );
     let status = w.get(&w.b.url, "/api/status").await;
     assert_eq!(status["capacity"]["max_swaps"], 2, "{status}");
 

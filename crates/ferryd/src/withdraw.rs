@@ -631,7 +631,7 @@ pub async fn send_zec<L: ZecLeg>(
         .map(|h| u64::try_from(h.units).unwrap_or(u64::MAX))
         .collect();
     let largest = leg
-        .largest_notes(needs.len().saturating_sub(1))
+        .notes(needs.len().saturating_sub(1))
         .await
         .map_err(|e| ApiError(503, format!("the Zcash wallet is unavailable: {e}")))?;
     let mut saved: Option<Withdrawal> = None;

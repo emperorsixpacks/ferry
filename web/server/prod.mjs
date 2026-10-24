@@ -76,8 +76,9 @@
 //                           Routes and ordinary swaps don't wait for each other (the daemons' free
 //                           funds and caps decide), with one exception: while a route is moving, no
 //                           direct sell starts on the pair it sells ZEC on, because the ZEC it bought
-//                           waits in that daemon's wallet, which the daemon counts as free. The views
-//                           lose the partners' URLs on the way out
+//                           waits in that daemon's wallet, which the daemon counts as free (nor a buy
+//                           there when that daemon is also a partner, --maker-offer, a buy could
+//                           reach). The views lose the partners' URLs on the way out
 //
 // NEAR Intents (its 1Click Swap API; near.mjs): sell shielded ZEC for any of its assets, or buy
 // shielded ZEC with them. Ferry swaps ZEC for a coin it supports, and NEAR Intents carries that coin
@@ -118,7 +119,7 @@ import { fileURLToPath } from "node:url";
 import { makerDirectory, parseMakers } from "./makers.mjs";
 import { quoteDesk, rateLimit } from "./quotes.mjs";
 import { extraDaemons, mainSide, pairsBody } from "./pairs.mjs";
-import { buildRoute, publicRoute, routerLink, running } from "./routes.mjs";
+import { buildRoute, publicRoute, routeBlocks, routerLink } from "./routes.mjs";
 import { ONE_CLICK_PUBKEY, ONE_CLICK_URL, nearDesk, nearRoutes, oneClick, ownDaemons, pairOfStatus, requestJson } from "./near.mjs";
 import { originAllowed, ownProblem, receiveFields, withdrawBody } from "./own.mjs";
 import { sseTransform } from "./sse.mjs";
@@ -386,22 +387,58 @@ async function pairOf(key) {
   return pair;
 }
 
+// The daemon that sells ZEC on `pair` here: that pair's own sell daemon, or the main one when it
+// swaps that pair. null when this server fronts none.
+async function sellerOf(pair) {
+  const d = EXTRA.find((x) => x.side === "sell" && x.id === pair);
+  if (d) return d.key;
+  return (await pairOf("z")) === pair ? "z" : null;
+}
+
+// Whether that daemon is also a partner others buy ZEC from (started with --maker-offer, so the
+// operator may list it in FERRY_MAKERS), asked once a minute at most. One this server doesn't front
+// counts as one, to be safe.
+const makerCache = new Map();
+async function sellerMakes(pair) {
+  const key = await sellerOf(pair);
+  if (!key) return true;
+  const c = makerCache.get(key);
+  if (c && Date.now() - c.at < 60_000) return c.makes;
+  const s = await daemonJson(key, "/api/status");
+  if (s.status !== 200) throw new Error(`status ${s.status}`);
+  const makes = s.body?.offer?.maker === true;
+  makerCache.set(key, { at: Date.now(), makes });
+  return makes;
+}
+
 // A private swap that is selling ZEC on `key`'s pair: the ZEC its first swap bought waits in that
-// daemon's wallet, which the daemon counts as free, so no direct sell may start there until the
-// route is done. Everything else runs side by side (the daemons' free funds and caps decide). null
-// when nothing is in the way (or `key` doesn't sell ZEC), else the 409 (or 502) to answer.
+// pair's sell daemon, which counts it as free, so no direct sell may start there until the route is
+// done, nor a buy when that daemon is also a partner a buy could reach (routes.mjs, routeBlocks).
+// Everything else runs side by side (the daemons' free funds and caps decide). null when nothing is
+// in the way, else the 409 (or 502) to answer.
 async function routeConflict(key) {
-  if (!ROUTER || !sells(key)) return null;
+  if (!ROUTER) return null;
+  const side = sells(key) ? "sell" : "buy";
+  const unreachable = { status: 502, body: { error: "Can't reach the private swap service or the daemon. Try again in a moment." } };
   let routes;
   let pair;
   try {
     [routes, pair] = await Promise.all([ROUTER.call("GET", "/api/routes"), pairOf(key)]);
   } catch {
-    return { status: 502, body: { error: "Can't reach the private swap service or the daemon. Try again in a moment." } };
+    return unreachable;
   }
   if (routes.status !== 200 || !Array.isArray(routes.body)) return { status: 502, body: { error: "Can't reach the private swap service. Try again in a moment." } };
-  if (routes.body.some((v) => running(v) && v.to === pair)) return { status: 409, body: { error: "A private swap is selling ZEC on this pair right now. Try again when it finishes." } };
-  return null;
+  // the seller is asked only when a route sells on this pair and this is a buy
+  let makes = false;
+  if (side === "buy" && routeBlocks(routes.body, { pair, side: "sell" })) {
+    try {
+      makes = await sellerMakes(pair);
+    } catch {
+      return unreachable;
+    }
+  }
+  const why = routeBlocks(routes.body, { pair, side, sellerMakes: makes });
+  return why ? { status: 409, body: { error: why } } : null;
 }
 
 // Routes run one at a time: null when none is moving, else the 409 (or 502, 503) to answer. Ordinary
