@@ -173,6 +173,13 @@ Each daemon runs several swaps at once, as many as its free funds cover, up to `
 when its funds are tied up in swaps in progress, a start is refused as busy and the swap card
 says that every partner is busy. Lower it to 1 to go back to one swap at a time per daemon.
 
+On the Zcash side, "free funds" means notes: a ZEC lock spends whole notes, oldest first, until
+they cover it, so a Z holding one large note runs one swap at a time whatever `MAX_SWAPS` says
+(on the local rehearsal a 0.03 ZEC lock took both of Z's notes, 0.024 and 0.10, and the next start
+was busy). To let a pair run several swaps at once, fund its Z with several separate payments,
+one per swap you want running together, each a little more than the largest swap. Each swap's
+change comes back as one new note.
+
 ## 7. More pairs: ZEC/LTC, ZEC/USDC, ZEC/WETH (optional)
 
 Each extra pair is a Docker Compose **profile**, off until you enable it:
