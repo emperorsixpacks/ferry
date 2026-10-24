@@ -47,15 +47,24 @@ case "$MAKER" in
   *) die "MAKER must be b or z, not '$MAKER'" ;;
 esac
 UI_ORIGINS="${UI_ORIGINS:-http://localhost:7990 http://127.0.0.1:7990}"
-Z_NAME="${Z_NAME:-zoe}"
-B_NAME="${B_NAME:-bram}"
+# Not infra/demo.sh's zoe/bram: the name is the wallet on a mock Zcash chain the two can share.
+Z_NAME="${Z_NAME:-zoe-evm}"
+B_NAME="${B_NAME:-bram-evm}"
 # Token base units per ZEC (USDC: 10^-6, WETH: 10^-18 = wei).
 RATE="${RATE:-$DEFAULT_RATE}"
 B_FUND_USDC="${B_FUND_USDC:-1000000000}" # USDC: 1000 USDC minted to B
 B_WRAP_ETH="${B_WRAP_ETH:-100}"          # WETH: B wraps 100 of its ETH (1e20 wei, above u64)
 ZEC_BALANCE_ZAT="${ZEC_BALANCE_ZAT:-500000000}"
-ZEC_BLOCK_SECS="${ZEC_BLOCK_SECS:-2}"
+ZEC_BLOCK_SECS="${ZEC_BLOCK_SECS:-2}" # infra/demo.sh's too: a shared mock chain needs one block time
 ZEC_CONFS="${ZEC_CONFS:-2}"
+# ZEC_MOCK_FILE: a mock Zcash chain shared with another demo (infra/route-demo.sh). A file given
+# here belongs to the caller, so `up` never deletes it; the default one is this demo's own.
+if [ -n "${ZEC_MOCK_FILE:-}" ]; then
+  ZEC_MOCK_OWNED=
+else
+  ZEC_MOCK_FILE="$STATE/zec-mock.json"
+  ZEC_MOCK_OWNED=1
+fi
 SWAP_ZAT="${SWAP_ZAT:-100000000}"
 T1_SECS="${T1_SECS:-120}"
 REFUND_SECS="${REFUND_SECS:-120}"
@@ -92,7 +101,10 @@ UI: cd web && source $STATE/env && PORT=7990 pnpm dev:ui   (screenshots: pnpm sh
 Buying ZEC: MAKER=z infra/evm-demo.sh test runs the same stories with B taking from a Z maker.
 Environment: TOKEN [$TOKEN] MAKER [$MAKER] RATE [$RATE] SWAP_ZAT [$SWAP_ZAT] T1_SECS [$T1_SECS]
   REFUND_SECS [$REFUND_SECS] DELTA_SECS [$DELTA_SECS] ZEC_CONFS [$ZEC_CONFS]
-  ZEC_BLOCK_SECS [$ZEC_BLOCK_SECS] FERRY_EVM_DEMO_DIR [$STATE]
+  ZEC_BLOCK_SECS [$ZEC_BLOCK_SECS] FERRY_EVM_DEMO_DIR [$STATE] Z_NAME [$Z_NAME] B_NAME [$B_NAME]
+  ZEC_BALANCE_ZAT [$ZEC_BALANCE_ZAT] (Z's starting shielded balance)
+  ZEC_MOCK_FILE [$ZEC_MOCK_FILE] (a file you name is shared, e.g. with infra/demo.sh, and never
+    deleted by this script)  FERRYD_ARGS (extra flags for both daemons)
   ANVIL_PORT Z_PORT B_PORT Z_PEER_PORT B_PEER_PORT (as above)
 EOF
 }
@@ -180,6 +192,8 @@ start_ferryd() { # start_ferryd <key> <role> <name> <api port> <peer port> <key 
   shift 6
   local origins=()
   for o in $UI_ORIGINS; do origins+=(--ui-origin "$o"); done
+  # shellcheck disable=SC2206
+  local extra=(${FERRYD_ARGS:-})
   "$FERRYD" --counter evm --role "$role" --name "$name" --api-listen "127.0.0.1:$port" \
     --listen "127.0.0.1:$peer_port" --data-dir "$STATE/$key" --demo-faults --dev-policy \
     ${origins[@]+"${origins[@]}"} \
@@ -187,8 +201,8 @@ start_ferryd() { # start_ferryd <key> <role> <name> <api port> <peer port> <key 
     --evm-token-symbol "$SYMBOL" --evm-token-decimals "$DECIMALS" \
     --evm-key-file "$keyfile" --evm-t1-secs "$T1_SECS" --evm-refund-secs "$REFUND_SECS" \
     --evm-delta-secs "$DELTA_SECS" --evm-lock-confs "$LOCK_CONFS" --zec-confs "$ZEC_CONFS" \
-    --zec mock --zec-mock-file "$STATE/zec-mock.json" --zec-mock-block-secs "$ZEC_BLOCK_SECS" \
-    --sweep-delay-secs 1:3 --poll-ms "$POLL_MS" "$@" >>"$STATE/logs/$key.log" 2>&1 &
+    --zec mock --zec-mock-file "$ZEC_MOCK_FILE" --zec-mock-block-secs "$ZEC_BLOCK_SECS" \
+    --sweep-delay-secs 1:3 --poll-ms "$POLL_MS" "$@" ${extra[@]+"${extra[@]}"} >>"$STATE/logs/$key.log" 2>&1 &
   echo $! >"$STATE/$key.pid"
   disown
   for _ in $(seq 1 60); do
@@ -206,7 +220,9 @@ cmd_up() {
   fi
   [ -x "$ANVIL" ] && [ -x "$FORGE" ] && [ -x "$CAST" ] || die "foundry is required (curl -L https://foundry.paradigm.xyz | bash; foundryup)"
   command -v python3 >/dev/null || die "python3 is required"
-  rm -rf "$STATE/z" "$STATE/b" "$STATE/guard" "$STATE/zec-mock.json" "$STATE/guard-zec.json"
+  rm -rf "$STATE/z" "$STATE/b" "$STATE/guard" "$STATE/guard-zec.json"
+  # A shared chain (ZEC_MOCK_FILE given) is its owner's to reset.
+  if [ -n "$ZEC_MOCK_OWNED" ]; then rm -f "$ZEC_MOCK_FILE"; fi
   mkdir -p "$STATE/logs"
   if [ -z "${FERRYD_SKIP_BUILD:-}" ]; then
     log "building ferryd"
