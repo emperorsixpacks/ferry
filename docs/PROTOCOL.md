@@ -131,3 +131,47 @@ counter-asset (`ferryd --counter evm`). The `FerryLock` contract replaces the Ta
 EIP-712 `Ready(id)` signature takes the place of the redeem adaptor signature, and the shares are
 revealed in claim and refund calldata, which the contract checks with the ecrecover
 scalar-multiplication trick.
+
+## Routes
+
+A route moves value between two non-ZEC assets, **coin A → shielded ZEC → coin C** (BTC → USDC,
+say), as two ordinary Ferry swaps run one after the other and joined in the shielded pool. The swap
+protocol is unchanged: each leg is a complete swap with its own maker, terms, deadlines and abort
+paths, and no key, hash or secret is shared between the legs. `ferry-route`
+([crates/ferry-route](../crates/ferry-route/README.md)) runs it over the user's own two daemons,
+holding no keys and no funds:
+
+- **L1**, the user's B daemon on pair A. Leg 1 buys X ZEC from a Z maker with coin A.
+- **L2**, the user's Z daemon on pair C. Leg 2 sells that ZEC to a B maker for coin C.
+
+1. **Start leg 1.** The router reads L2's own shielded address (`GET /api/addresses`) and starts
+   leg 1 on L1 with `sweep_to` set to it, the label `<route>/1` and `max_counter`, its most coin A
+   for X ([API.md](API.md#route-legs)).
+2. **Leg 1** runs as any buy-ZEC swap, except that at step 7 B sweeps the joint note straight into
+   L2's wallet: one Ironwood transaction, built like every sweep with the outgoing viewing key
+   discarded, so leg 1's maker can't see where it went. `sweep_to` is fixed when the swap is created
+   and never sent to the maker. Once the maker's redeem (EVM: claim) is on chain, the ZEC is the
+   user's.
+3. **Settle.** The router waits until leg 1 is swapped, the sweep has 10 confirmations (a note from
+   outside the wallet is spendable only then), and L2 can spend leg 2's amount plus its lock fee
+   reserve. Leg 2 sells X less a sweep-fee allowance and that reserve (X − 60 000 zat by default).
+4. **Pause.** A random privacy pause, drawn once and persisted (default 5 to 30 minutes).
+5. **Leg 2** starts on L2 with the label `<route>/2` and `min_counter`, the least coin C for its
+   amount (kept as a rate, so a smaller amount scales it down), and runs as any sell-ZEC swap. A
+   refusal is retried, through the listed makers, for up to 2 hours; then the route holds the ZEC.
+
+**Each leg starts at most once.** The router saves the start as in flight before it sends it.
+ferryd stores the label in the swap record before its first save, refuses a label already in use
+(by a swap, or by a start still being handled: `409 route_label_in_use`), and runs one start at a
+time, so after a lost answer or a restart the router finds the swap by its label instead of
+starting another. Every other error status means no swap was created, including a record that
+could not be saved.
+
+**Deadlines.** Each leg runs on its own maker's terms. The legs never overlap (leg 2 is not
+negotiated before leg 1's ZEC can be spent: that would lock maker 2's coin before the user's ZEC
+exists), so no timelock of one leg depends on the other.
+
+**Failure.** Once leg 1's redeem is on chain, every later failure leaves the user holding shielded
+ZEC in L2's wallet, which has no deadline. During leg 1 the user carries the ordinary B risk, so
+L1 needs its own watchtower. What links the two legs (timing, the amount ratio, colluding makers)
+and the full failure table are in [THREAT-MODEL.md](THREAT-MODEL.md#routes-coin-a--shielded-zec--coin-c).

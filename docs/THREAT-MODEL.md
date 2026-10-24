@@ -136,6 +136,81 @@ four ways:
   once the shared ZEC has been moved by someone else. A tower with no fee money left can't act,
   which is the same as being offline.
 
+## Routes (coin A → shielded ZEC → coin C)
+
+A route swaps, say, bitcoin for USDC by running two ordinary Ferry swaps one after the other with
+shielded ZEC in between ([how it runs](PROTOCOL.md#routes)): swap 1 buys ZEC with your bitcoin and
+pays it straight into your other Ferry's shielded wallet; after a random pause, swap 2 sells that
+ZEC for USDC. Each swap keeps every protection above. A route adds two things to think about:
+what links the two swaps, and where your money is if swap 2 can't finish.
+
+### What the ZEC hides, and what still links the two swaps
+
+**Hidden.** All four Zcash transactions (swap 1's lock, its sweep into your second wallet, swap 2's
+lock and the other side's sweep) are fully shielded: no amount, address or memo appears on chain.
+Swap 1's partner can't see where its sweep went [the outgoing viewing key is discarded], and no
+key or hash is shared between the two swaps.
+
+**Not hidden:**
+
+- **Timing.** Swap 1 ends on chain A and swap 2 begins on chain C about 25 minutes apart on test
+  networks (the sweep's 10 confirmations, then your wallet's), plus the pause. Without a pause that
+  gap is a fingerprint.
+- **The amount ratio.** Both amounts come from the same ZEC amount at public prices, so the amount
+  in and the amount out sit in a ratio close to the two coins' price ratio. An observer can test
+  candidate pairs to within a percent or two. On a busy chain like Bitcoin mainnet there are many
+  candidates; on test networks, and on any EVM leg (where only Ferry contract calls qualify), there
+  are few. Two EVM legs are close to trivially linkable.
+- **Colluding partners.** Swap 1's partner knows the ZEC amount and when its note was spent; swap
+  2's partner knows a slightly smaller amount and when your lock arrived. Both see your IP address.
+  If they are the same operator, or share notes, they can link your two swaps almost certainly.
+- **Your EVM account.** Every EVM swap uses the daemon's one account, and the ETH it needs for gas
+  came from somewhere.
+- **Your bitcoin inputs** keep their usual history.
+- **The route record** on your machine links both swaps. It is stored privately (mode 0600), like
+  swap records.
+- **The public demo** runs every daemon on one server, so its operator sees both swaps.
+
+**What helps, and is built in:**
+
+- **A random privacy pause** before swap 2 (Standard: 5 to 30 minutes; Long: 1 to 6 hours), drawn
+  once and kept across restarts. Skipping it is allowed and says that it makes the swaps easier to
+  link.
+- **A different partner for each swap.** The router refuses the same partner, by name or by host,
+  on both swaps. It can't prove that two names aren't one operator; nobody can.
+- **ZEC jitter** (`keep_bps`): keep a random sliver of the ZEC back, so the two ZEC amounts differ
+  and the ratio test widens.
+- **No same-asset routes.** USDC to USDC is refused: the amount in would match the amount out.
+- **Fresh bitcoin addresses** for every swap, as always.
+
+**Not covered:** Tor, and a separate EVM account per swap. A determined observer of a quiet chain
+can still link the swaps by timing and amount, and colluding partners can link them directly.
+
+### Where your money is if something goes wrong
+
+| Where it goes wrong | What happens | You end with | Route |
+|---|---|---|---|
+| Before anything moves: your second wallet unreachable, swap 1's partner refuses, amount out of range, price past your limit | Nothing is locked | Everything you had | `failed` |
+| Swap 1: the partner never locks ZEC, or locks the wrong amount | You call swap 1 off after its deadline and take the refund | Coin A, less network fees | `failed` (refunded) |
+| Swap 1: you are offline after locking | Your own watchtower refunds before the second deadline. **Without one, the partner takes coin A** | Coin A, **or nothing** | `failed` (refunded or punished) |
+| Swap 1: the partner claimed, you are offline | Your share of the key is public on chain, only you hold the other part, and the sweep has no deadline | ZEC, swept into your second wallet when you are back | resumes |
+| Between the swaps: the router or your second Ferry is down | Nothing happens; nothing has a deadline | Shielded ZEC in your second wallet | resumes |
+| Swap 2 can't start (partner offline, busy, paused, below your minimum price) | Retried, through your listed partners, for 2 hours | Shielded ZEC | `holding` (try again or keep the ZEC) |
+| Swap 2: the partner never locks, or never sends the go-ahead, or you miss the claim | Swap 2 is called off and refunded; you reclaim your ZEC | Shielded ZEC, less two Zcash fees | `holding` |
+| Swap 2: your lock is refused (the balance dropped) | Nothing is sent from your wallet | Shielded ZEC | `holding` |
+| Swap 2: the partner locks, then vanishes | You (or a watchtower) take its coin C after the deadline; your ZEC stays locked as its penalty | Coin C | `done` |
+| Swap 2: you are offline after the partner's refund | The ZEC waits in the shared note; only you can spend it, with no deadline | Shielded ZEC when you are back | `holding` |
+
+**The worst case is "you hold shielded ZEC"** from the moment swap 1's partner has claimed your
+coin A, and for every way swap 2 can fail: the price limits make sure a late swap 2 never fills
+below the rate you accepted, and if it can't fill, you keep the ZEC. That is **not** true during
+swap 1: there you are an ordinary ZEC buyer, and if you go offline past the second deadline with no
+watchtower, you lose coin A, exactly as in a single swap.
+
+**Watchtowers.** Run your swap-1 Ferry (the buyer) with its own watchtower (`--watchtower …
+--watchtower-own`). Your swap-2 Ferry (the seller) can use any tower. Towers never touch the ZEC
+side, which has no deadlines. The router changes nothing about either swap's tower.
+
 ## How we checked
 
 - `cargo test --workspace`: unit tests, a two-daemon simulation of every outcome above, and
@@ -143,3 +218,8 @@ four ways:
 - `infra/e2e-real.sh`: a fresh local Bitcoin + Zebra + Zaino network, five stories run with real
   shielded notes (happy with stray notes arriving mid-swap, refund, punish, refused lock, and the
   privacy control), and a pool check on every ZEC transaction. It exits 0 only if every check passes.
+- `infra/route-demo.sh test`: routes BTC → shielded ZEC → USDC on regtest Bitcoin and anvil with a
+  stand-in Zcash chain: one to the end (the router restarted twice midway, and exactly one swap 2),
+  one whose swap 2 is refunded so the route holds the ZEC until "try again" finishes it, and one
+  stopped during swap 1 that ends holding the ZEC. The waits between the swaps with real notes are
+  covered by unit tests and `infra/e2e-real.sh`, not by this script.

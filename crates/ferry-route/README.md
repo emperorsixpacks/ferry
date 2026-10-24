@@ -156,17 +156,25 @@ leg1_starting → leg1 → settling → pausing → leg2_starting → leg2 → d
 - **Your route records** link both legs. They are stored privately, like swap records.
 - **Not covered:** Tor, and separate EVM accounts per swap.
 
-## What ferryd must provide
+## What ferryd provides
 
-This is step 1 of the hub spec. All of it is in `src/legs.rs`:
+The contract is in `src/legs.rs`; ferryd implements it in `crates/ferryd/src/route.rs` (both
+daemon types; [docs/API.md](../../docs/API.md#route-legs)):
 
-- `POST /api/swaps` must accept these extra fields:
+- `POST /api/swaps` accepts these extra fields:
   - `route`: a label of at most 80 characters (`[a-z0-9/-]`), stored before the first save;
-  - `sweep_to`: role B only, validated;
+  - `sweep_to`: role B only, checked by the Zcash backend (our network, an Orchard receiver) and
+    never sent to the maker;
   - `max_counter` for role B and `min_counter` for role Z, which refuse a maker rate past the limit.
 
-  An error status must mean that no swap was created.
-- `SwapView` must show `route` and `sweep_to`.
-- `GET /api/status` must list `"route"` in `features`. Without it the router won't start a leg:
-  today's ferryd silently ignores unknown fields.
-- `GET /api/addresses` must return the wallet's own shielded address as `zec.address`.
+  An error status means that no swap was created, with one exception the router relies on: a 409
+  with `"code": "route_label_in_use"` says a swap with that label exists, or a start with it is
+  still being handled. The router treats it like a lost answer and looks the swap up by label.
+- `SwapView` shows `route` and `sweep_to`.
+- `GET /api/status` lists `"route"` in `features`. Without it the router won't start a leg: an
+  older ferryd silently ignores unknown fields.
+- `GET /api/addresses` returns the wallet's own shielded address as `zec.address`.
+
+`infra/route-demo.sh test` runs three routes end to end (BTC → ZEC → USDC on regtest Bitcoin and
+anvil, one mock Zcash chain): one to `done` with two router restarts midway, one whose leg 2 is
+refunded and then finished with `continue`, and one stopped during leg 1.

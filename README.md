@@ -58,6 +58,13 @@ on your B node, `POST /api/swaps {"maker": <Z maker's peer URL>, "zec_zat": ...}
 safety rules hold either way round. When you buy, your coins are locked first: if the partner never
 locks its ZEC, they come back after the deadline.
 
+**Coin to coin through the shielded pool (routes).** `ferry-route` chains a buy and a sell: BTC →
+shielded ZEC → USDC, say. Swap 1's ZEC is swept straight into your other node's shielded wallet,
+and after a random pause swap 2 sells it, never below the price you set. If swap 2 can't finish, you
+keep the shielded ZEC. Timing and the amount ratio can still link the two swaps, and colluding
+partners can link them directly ([crates/ferry-route](crates/ferry-route/README.md),
+[docs/PROTOCOL.md](docs/PROTOCOL.md#routes), `infra/route-demo.sh test`).
+
 ## What each chain sees
 
 | | Bitcoin observer | Zcash observer |
@@ -104,6 +111,7 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
 | `crates/ferry-evm` | FerryLock client (lock, claim, refund, punish), event watching, share extraction |
 | `contracts/` | `FerryLock.sol` (Foundry): the EVM lock, claim with `z`, refund with `b`, punish |
 | `crates/ferry-watchtower` | watchtower: broadcasts an offline party's presigned cancel/refund/punish on time (Bitcoin, Litecoin), or calls FerryLock's refund/punish for it (EVM) ([docs](docs/WATCHTOWER.md)) |
+| `crates/ferry-route` | routes: coin A → shielded ZEC → coin C as two swaps over your own two daemons ([docs](crates/ferry-route/README.md)) |
 | `web/` | the demo UI |
 | `infra/` | one-command local environment |
 | `spikes/` | day-0 go/no-go experiments, kept as evidence |

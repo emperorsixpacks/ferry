@@ -18,6 +18,8 @@ ferry/
     ferry-watchtower/        watchtower: broadcasts an offline party's presigned cancel/refund/punish
                              on time (bitcoind or litecoind polling), or calls FerryLock's
                              refund/punish for it (--counter evm); HTTP upload; docs/WATCHTOWER.md
+    ferry-route/             routes (privacy hub): coin A -> shielded ZEC -> coin C, two swaps over the
+                             user's own two ferryd APIs; no keys, no funds; HTTP API /api/routes
   contracts/                 Foundry: FerryLock (EVM counter-chain lock), MockUSDC, tests (docs/EVM.md)
   web/                       demo UI (two parties side by side + "what each chain sees")
   infra/                     docker: bitcoind regtest, litecoind regtest (infra/ltc), Zebra regtest (NU6.3 at 1), Zaino
@@ -76,6 +78,17 @@ in `ferry_core::evm`): B locks USDC, Z locks ZEC once every lock term checks out
 EIP-712 `Ready(id)` signature after N ZEC confirmations, Z claims (publishing z), B sweeps. From
 t1 B refunds (publishing b) and Z reclaims; from t2 Z punishes. See [EVM.md](EVM.md);
 `infra/evm-demo.sh` runs all three stories on anvil.
+
+## Routes (privacy hub)
+
+`ferry-route` (`crates/ferry-route`) chains two swaps through the shielded pool, coin A → ZEC →
+coin C, over the user's own two daemons: a B daemon on pair A buys the ZEC and sweeps it straight
+into the wallet of a Z daemon on pair C, which sells it after the note can be spent and a random
+pause. It holds no keys and no funds; its only actions are two `POST /api/swaps`, each with a route
+label so it starts at most once (`crates/ferryd/src/route.rs` on the ferryd side). The route's
+state machine is a pure `step(route, observation)`, persisted one JSON file per route. See
+[PROTOCOL.md](PROTOCOL.md#routes); `infra/route-demo.sh` runs three routes on regtest Bitcoin and
+anvil with one mock Zcash chain.
 
 ## Firm quotes
 
