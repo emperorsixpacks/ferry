@@ -35,6 +35,47 @@ export function useOnScreen(ref: RefObject<Element>, rootMargin = "0px"): boolea
   return inView && shown;
 }
 
+// Elements marked `data-parallax="0.12"` under `ref` drift against the scroll by that share of
+// their distance from the middle of the screen (written to --lp-py; the CSS moves them). Off with
+// reduced motion.
+export function useParallax(ref: RefObject<HTMLElement>) {
+  useEffect(() => {
+    const root = ref.current;
+    if (!root || window.matchMedia(REDUCE).matches) return;
+    const els = [...root.querySelectorAll<HTMLElement>("[data-parallax]")];
+    let queued = false;
+    const update = () => {
+      queued = false;
+      const mid = window.innerHeight / 2;
+      // on a phone things are stacked, and drifting would make them overlap
+      const still = window.innerWidth < 768;
+      for (const el of els) {
+        if (still) {
+          el.style.removeProperty("--lp-py");
+          continue;
+        }
+        // measured on the parent, which the drift doesn't move
+        const r = (el.parentElement ?? el).getBoundingClientRect();
+        if (r.bottom < -200 || r.top > window.innerHeight + 200) continue;
+        const f = Number(el.dataset.parallax) || 0;
+        el.style.setProperty("--lp-py", `${((r.top + r.height / 2 - mid) * -f).toFixed(1)}px`);
+      }
+    };
+    const on = () => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(update);
+    };
+    update();
+    window.addEventListener("scroll", on, { passive: true });
+    window.addEventListener("resize", on);
+    return () => {
+      window.removeEventListener("scroll", on);
+      window.removeEventListener("resize", on);
+    };
+  }, [ref]);
+}
+
 // Text marked `data-reveal` under `ref` eases from blurred to sharp the first time it scrolls into
 // view. The hidden state only applies once this has run (the root gets `lp-reveal`), so nothing
 // stays hidden without it; reduced motion shows everything at once (landing.css).

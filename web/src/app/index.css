@@ -39,13 +39,6 @@
   --color-slate-800: #27272a;
   --color-slate-900: #18181b;
 
-  /* the shielded pool: the one dark thing, used only where something is shielded (the landing's
-     crossing, its chain orbit's centre and its closing wordmark). Text on it: accent-100 to 300. */
-  --color-pool-700: #1f2448;
-  --color-pool-800: #161a36;
-  --color-pool-900: #0e1024;
-  --color-pool-950: #080914;
-
   --color-canvas: #ffffff;
   --color-cloud: #f7f7f8;
   --color-surface-soft: #f7f7f8;

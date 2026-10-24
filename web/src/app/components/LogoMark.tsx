@@ -18,11 +18,12 @@ export function LogoMark({ size = 36, dark = false, className }: { size?: number
   );
 }
 
-export function Wordmark({ size = 32 }: { size?: number }) {
+// `night`: white on a dark background (the landing's header)
+export function Wordmark({ size = 32, night = false }: { size?: number; night?: boolean }) {
   return (
     <span className="flex items-center gap-2.5">
-      <LogoMark size={size} />
-      <span className="text-[15px] font-semibold tracking-tight text-slate-900">Ferry</span>
+      <LogoMark size={size} dark={night} />
+      <span className={`text-[15px] font-semibold tracking-tight ${night ? "text-white" : "text-slate-900"}`}>Ferry</span>
     </span>
   );
 }
