@@ -10,7 +10,7 @@ use ferry_btc::bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
 use ferry_btc::bitcoin::{
     Address, Amount, Network, OutPoint, ScriptBuf, Transaction, Txid, XOnlyPublicKey,
 };
-use ferry_btc::{adaptor, Role, Spend, SwapScripts, SwapTxs};
+use ferry_btc::{adaptor, Chain, Coin, Role, Spend, SwapScripts, SwapTxs};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::Rules;
@@ -23,6 +23,11 @@ pub struct Package {
     pub version: u32,
     /// The owner's role: B delegates cancel + refund, Z delegates cancel + punish.
     pub role: Role,
+    /// The counter-chain: `btc` (the default, omitted) or `ltc`. Litecoin runs the same
+    /// transactions and scripts; only the node and the address encoding differ.
+    #[serde(default, skip_serializing_if = "Coin::is_btc")]
+    pub coin: Coin,
+    /// The network tier (`regtest`, `testnet`, `bitcoin` = mainnet), for either coin.
     pub network: Network,
     /// The swap's lock output (`txid:vout`).
     pub lock_outpoint: OutPoint,
@@ -46,7 +51,8 @@ pub struct Package {
     /// Z: fully signed tx_punish.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub punish_tx: Option<String>,
-    /// Addresses the owner accepts as payout of tx_refund / tx_punish.
+    /// Addresses the owner accepts as payout of tx_refund / tx_punish, in the coin's own
+    /// encoding (`bcrt1…` for Bitcoin, `rltc1…` for Litecoin).
     pub payout_addresses: Vec<String>,
     /// Free text for the owner (e.g. its swap id). Shown back by `GET /packages/:id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,7 +106,7 @@ impl Package {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         role: Role,
-        network: Network,
+        chain: Chain,
         txs: &SwapTxs,
         cancel_confirmations: u32,
         refund_margin: u16,
@@ -116,7 +122,8 @@ impl Package {
         Package {
             version: PACKAGE_VERSION,
             role,
-            network,
+            coin: chain.coin,
+            network: chain.network,
             lock_outpoint: txs.lock_outpoint,
             lock_amount_sat: txs.lock_txout.value.to_sat(),
             kb: s.kb,
@@ -129,8 +136,18 @@ impl Package {
             cancel_tx: serialize_hex(cancel_tx),
             refund_tx,
             punish_tx,
-            payout_addresses: payout_addresses.iter().map(|a| a.to_string()).collect(),
+            payout_addresses: payout_addresses
+                .iter()
+                .map(|a| chain.encode_address(a))
+                .collect(),
             label: None,
+        }
+    }
+
+    pub fn chain(&self) -> Chain {
+        Chain {
+            coin: self.coin,
+            network: self.network,
         }
     }
 
@@ -152,16 +169,20 @@ impl Package {
     ///   the fee), so the timelocks and the cancel script are the agreed ones;
     /// - every signature verifies, with the right leaf and control block;
     /// - tx_refund / tx_punish pays one of `payout_addresses`.
-    pub fn validate(&self, network: Network) -> Result<Armed, PackageError> {
+    pub fn validate(&self, chain: Chain) -> Result<Armed, PackageError> {
         if self.version != PACKAGE_VERSION {
             return bad(format!("unsupported version {}", self.version));
         }
-        if self.network != network {
+        if self.chain() != chain {
             return bad(format!(
-                "package is for {}, this tower watches {network}",
-                self.network
+                "package is for {} {}, this tower watches {} {}",
+                self.coin.name(),
+                self.network,
+                chain.coin.name(),
+                chain.network
             ));
         }
+        let network = chain.network;
         let rules = self.rules();
         if self.t1 == 0 || self.t2 == 0 {
             return bad("t1 and t2 must be positive");
@@ -178,7 +199,7 @@ impl Package {
             (Role::B, ..) => return bad("a B package carries refund_tx and no punish_tx"),
             (Role::Z, ..) => return bad("a Z package carries punish_tx and no refund_tx"),
         };
-        let payouts = self.payout_scripts(network)?;
+        let payouts = self.payout_scripts(chain)?;
         let cancel = parse_tx("cancel_tx", &self.cancel_tx)?;
         let final_tx = parse_tx(
             if self.role == Role::B {
@@ -214,9 +235,9 @@ impl Package {
             .filter(|f| *f > Amount::ZERO)
             .ok_or_else(|| PackageError("cancel_tx pays more than the lock holds".into()))?;
         let scripts = SwapScripts::new(self.kb, self.kz, self.t1, self.t2, self.keypath);
-        // The tower follows bitcoind only (ferryd refuses --watchtower with --chain ltc).
+        // Same templates on either coin; only the dust floor of its outputs differs.
         let txs = SwapTxs::new(
-            ferry_btc::Coin::Btc,
+            self.coin,
             scripts,
             self.lock_outpoint,
             lock_amount,
@@ -249,15 +270,15 @@ impl Package {
         })
     }
 
-    fn payout_scripts(&self, network: Network) -> Result<BTreeSet<ScriptBuf>, PackageError> {
+    fn payout_scripts(&self, chain: Chain) -> Result<BTreeSet<ScriptBuf>, PackageError> {
         if self.payout_addresses.is_empty() {
             return bad("payout_addresses is empty");
         }
         self.payout_addresses
             .iter()
             .map(|a| {
-                a.parse::<Address<_>>()
-                    .and_then(|a| a.require_network(network))
+                chain
+                    .parse_address(a)
                     .map(|a| a.script_pubkey())
                     .map_err(|e| PackageError(format!("payout address {a}: {e}")))
             })
@@ -324,6 +345,7 @@ pub mod testkit {
         pub txs: SwapTxs,
         pub b_payout: Address,
         pub z_payout: Address,
+        pub coin: Coin,
         pub network: Network,
     }
 
@@ -335,6 +357,11 @@ pub mod testkit {
         /// Fresh keys and payout addresses; the lock outpoint is a dummy until
         /// [`Swap::set_lock`] (fund [`Swap::lock_address`] first).
         pub fn offline(t1: u16, t2: u16) -> Swap {
+            Self::offline_on(Coin::Btc, t1, t2)
+        }
+
+        /// [`Swap::offline`] on `coin` (regtest).
+        pub fn offline_on(coin: Coin, t1: u16, t2: u16) -> Swap {
             let network = Network::Regtest;
             let (kb, kz) = (BtcKey::random(), BtcKey::random());
             let b_share = *BtcKey::random().secret_bytes();
@@ -347,6 +374,7 @@ pub mod testkit {
                 vout: 1,
             };
             let txs = Self::templates(
+                coin,
                 &kb,
                 &kz,
                 t1,
@@ -363,12 +391,21 @@ pub mod testkit {
                 txs,
                 b_payout,
                 z_payout,
+                coin,
                 network,
+            }
+        }
+
+        pub fn chain(&self) -> Chain {
+            Chain {
+                coin: self.coin,
+                network: self.network,
             }
         }
 
         #[allow(clippy::too_many_arguments)]
         fn templates(
+            coin: Coin,
             kb: &BtcKey,
             kz: &BtcKey,
             t1: u16,
@@ -379,7 +416,7 @@ pub mod testkit {
             z_payout: &Address,
         ) -> SwapTxs {
             SwapTxs::new(
-                ferry_btc::Coin::Btc,
+                coin,
                 SwapScripts::new(kb.xonly(), kz.xonly(), t1, t2, true),
                 lock,
                 amount,
@@ -399,6 +436,7 @@ pub mod testkit {
         pub fn set_lock(&mut self, lock: OutPoint, amount: Amount) {
             let s = &self.txs.scripts;
             self.txs = Self::templates(
+                self.coin,
                 &self.kb,
                 &self.kz,
                 s.t1,
@@ -444,7 +482,7 @@ pub mod testkit {
         pub fn b_package(&self, k: u32, delta: u16) -> Package {
             Package::new(
                 Role::B,
-                self.network,
+                self.chain(),
                 &self.txs,
                 k,
                 delta,
@@ -457,7 +495,7 @@ pub mod testkit {
         pub fn z_package(&self, k: u32, delta: u16) -> Package {
             Package::new(
                 Role::Z,
-                self.network,
+                self.chain(),
                 &self.txs,
                 k,
                 delta,
@@ -476,9 +514,13 @@ mod tests {
     use ferry_btc::bitcoin::Sequence;
     use ferry_btc::BtcKey;
 
+    const REGTEST: Chain = Chain {
+        coin: Coin::Btc,
+        network: Network::Regtest,
+    };
+
     fn reject(p: &Package, needle: &str) {
-        let err = p.validate(Network::Regtest).unwrap_err().0;
-        assert!(err.contains(needle), "{err:?} does not mention {needle:?}");
+        reject_on(REGTEST, p, needle);
     }
 
     #[test]
@@ -488,7 +530,7 @@ mod tests {
             let json = serde_json::to_string(&p).unwrap();
             let back: Package = serde_json::from_str(&json).unwrap();
             assert_eq!(back, p);
-            let armed = back.validate(Network::Regtest).unwrap();
+            let armed = back.validate(REGTEST).unwrap();
             assert_eq!(armed.cancel_txid(), s.txs.txid(Spend::Cancel));
             assert_eq!(
                 armed.lock_address,
@@ -496,9 +538,9 @@ mod tests {
             );
             assert_eq!(armed.cancel_outpoint.txid, s.txs.txid(Spend::Cancel));
         }
-        let b = s.b_package(2, 3).validate(Network::Regtest).unwrap();
+        let b = s.b_package(2, 3).validate(REGTEST).unwrap();
         assert_eq!(b.final_txid(), s.txs.txid(Spend::Refund));
-        let z = s.z_package(2, 3).validate(Network::Regtest).unwrap();
+        let z = s.z_package(2, 3).validate(REGTEST).unwrap();
         assert_eq!(z.final_txid(), s.txs.txid(Spend::Punish));
         let json = serde_json::to_value(s.b_package(2, 3)).unwrap();
         assert_eq!(json["network"], "regtest");
@@ -511,10 +553,10 @@ mod tests {
         let s = Swap::offline(6, 10);
         let p = s.b_package(2, 3);
         assert!(p
-            .validate(Network::Signet)
+            .validate(Chain::bitcoin(Network::Signet))
             .unwrap_err()
             .0
-            .contains("for regtest"));
+            .contains("for Bitcoin regtest"));
         reject(
             &Package {
                 version: 2,
@@ -536,6 +578,56 @@ mod tests {
             },
             "B package",
         );
+    }
+
+    #[test]
+    fn litecoin_packages() {
+        let ltc = Chain::new(Coin::Ltc, Network::Regtest).unwrap();
+        let s = Swap::offline_on(Coin::Ltc, 6, 10);
+        for p in [s.b_package(2, 3), s.z_package(2, 3)] {
+            let json = serde_json::to_value(&p).unwrap();
+            assert_eq!(json["coin"], "ltc");
+            assert!(json["payout_addresses"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("rltc1p"));
+            let back: Package = serde_json::from_value(json).unwrap();
+            let armed = back.validate(ltc).unwrap();
+            assert_eq!(armed.lock_address, s.lock_address());
+            let mut rec = crate::store::Record::new("l".into(), back.clone());
+            rec.outcome = Some(crate::Outcome::Refunded);
+            let advice = rec.view(&armed).advice.unwrap();
+            assert!(advice.contains("LTC") || advice.contains("ZEC"), "{advice}");
+            assert!(!advice.contains("BTC"), "{advice}");
+            // A Bitcoin tower refuses it, and a Litecoin tower refuses a Bitcoin package.
+            assert!(p
+                .validate(REGTEST)
+                .unwrap_err()
+                .0
+                .contains("package is for Litecoin regtest, this tower watches Bitcoin regtest"));
+        }
+        let btc = Swap::offline(6, 10).z_package(2, 3);
+        assert!(btc
+            .validate(ltc)
+            .unwrap_err()
+            .0
+            .contains("for Bitcoin regtest"));
+        // The coin is omitted for Bitcoin, so packages from before it existed still parse.
+        assert!(serde_json::to_value(&btc).unwrap().get("coin").is_none());
+        // A payout written as a Bitcoin address (same script) is refused on Litecoin.
+        reject_on(
+            ltc,
+            &Package {
+                payout_addresses: vec![s.z_payout.to_string()],
+                ..s.z_package(2, 3)
+            },
+            "payout address",
+        );
+    }
+
+    fn reject_on(chain: Chain, p: &Package, needle: &str) {
+        let err = p.validate(chain).unwrap_err().0;
+        assert!(err.contains(needle), "{err:?} does not mention {needle:?}");
     }
 
     #[test]
@@ -578,7 +670,7 @@ mod tests {
             payout_addresses: vec![other, s.z_payout.to_string()],
             ..s.z_package(2, 3)
         }
-        .validate(Network::Regtest)
+        .validate(REGTEST)
         .unwrap();
     }
 

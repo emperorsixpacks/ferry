@@ -52,7 +52,8 @@ Z has ZEC and wants bitcoin. B has bitcoin and wants ZEC. B always locks first.
   call-off, refund or penalty transactions, and it broadcasts them on time while you are
   offline. It holds no keys and can't redirect your coins; at worst it fails to act. B must pick
   a tower that won't pass the refund to the other side early, so Ferry arms one for B only when B
-  marks it as its own (`--watchtower-own`). Z can use any tower.
+  marks it as its own (`--watchtower-own`). Z can use any tower. It works the same on Bitcoin and
+  Litecoin. For USDC, see below.
 - **Keep your machine safe.** Ferry holds your keys like any wallet does.
 
 ## What the other side learns
@@ -99,7 +100,7 @@ Z has ZEC and wants bitcoin. B has bitcoin and wants ZEC. B always locks first.
 
 Ferry can also swap shielded ZEC for USDC on Base ([details](EVM.md)); it has run locally and is
 not yet on a public network. The same protections apply. It differs from the Bitcoin version in
-three ways:
+four ways:
 
 - **Every step on Base is visible as a swap**, not only the abort paths. The lock and the claim
   or refund are public calls to the Ferry contract, with the USDC amount and the deadlines. The
@@ -109,6 +110,15 @@ three ways:
   safe: one half opens nothing, and nobody else can find the shared ZEC note.
 - **You also trust USDC's issuer**, which can freeze transfers, and Base's sequencer to include
   transactions on time. Ferry leaves a margin for that before each deadline.
+- **A watchtower works differently.** There is nothing to sign in advance: the tower calls the
+  swap contract's refund or penalty itself and pays the fee from its own account. The contract
+  pays only the swap's own two parties, whoever calls. The ZEC side's package holds no secret. The
+  USDC side's package holds that side's half of the shared ZEC key, because the refund needs it,
+  so the same rule applies, only more strongly: use only a tower you run yourself
+  (`--watchtower-own`). A tower that leaked that half early could let the other side take its ZEC
+  back, and if you had already given the go-ahead, the USDC too. Ferry never gives the go-ahead
+  once the shared ZEC has been moved by someone else. A tower with no fee money left can't act,
+  which is the same as being offline.
 
 ## How we checked
 

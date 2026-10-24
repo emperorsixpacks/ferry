@@ -4,6 +4,9 @@
 //! Needs `crates/ferry-watchtower/scripts/regtest.sh start` (container ferry-wt-regtest, RPC
 //! 127.0.0.1:18943, ferry/ferry; override with FERRY_WT_BTC_RPC). Towers listen on 7701-7709.
 //! Run: `cargo test -p ferry-watchtower --test regtest -- --ignored --test-threads=1`
+//!
+//! `FERRY_CHAIN=ltc` runs the same tests against litecoind (`infra/ltc/regtest.sh start`, RPC
+//! 127.0.0.1:19443 unless FERRY_WT_BTC_RPC says otherwise), with the legacy watch-only wallet.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -11,7 +14,7 @@ use std::time::Duration;
 
 use ferry_btc::bitcoin::{Address, Amount, Network, OutPoint, Txid};
 use ferry_btc::rpc::BitcoinRpc;
-use ferry_btc::Spend;
+use ferry_btc::{Chain, Coin, Spend};
 use ferry_watchtower::package::testkit::Swap;
 use ferry_watchtower::{Client, ClientError, Outcome, PackageView, Status, Tower, TowerConfig};
 use tokio::sync::oneshot;
@@ -23,8 +26,26 @@ const K: u32 = 2;
 const DELTA: u16 = 3;
 const POLL: Duration = Duration::from_millis(100);
 
+fn coin() -> Coin {
+    std::env::var("FERRY_CHAIN")
+        .ok()
+        .map(|c| c.parse().expect("FERRY_CHAIN is btc or ltc"))
+        .unwrap_or_default()
+}
+
 fn url() -> String {
-    std::env::var("FERRY_WT_BTC_RPC").unwrap_or_else(|_| "http://127.0.0.1:18943".into())
+    std::env::var("FERRY_WT_BTC_RPC").unwrap_or_else(|_| match coin() {
+        Coin::Btc => "http://127.0.0.1:18943".into(),
+        Coin::Ltc => "http://127.0.0.1:19443".into(),
+    })
+}
+
+fn rpc() -> BitcoinRpc {
+    BitcoinRpc::new(url(), "ferry", "ferry").with_coin(coin())
+}
+
+fn offline_swap() -> Swap {
+    Swap::offline_on(coin(), T1, T2)
 }
 
 struct Node {
@@ -36,7 +57,7 @@ struct Node {
 
 impl Node {
     async fn new(watch_wallet: &str) -> Node {
-        let miner = BitcoinRpc::new(url(), "ferry", "ferry").with_wallet("ferry-wt-miner");
+        let miner = rpc().with_wallet("ferry-wt-miner");
         miner
             .ensure_wallet()
             .await
@@ -45,7 +66,7 @@ impl Node {
         if miner.balance().await.unwrap() < Amount::from_btc(3.0).unwrap() {
             miner.generate_to_address(101, &to).await.unwrap();
         }
-        let watch = BitcoinRpc::new(url(), "ferry", "ferry")
+        let watch = rpc()
             .with_wallet(watch_wallet)
             .with_watch_wallet(watch_wallet);
         Node { miner, watch, to }
@@ -89,11 +110,9 @@ struct Running {
 }
 
 async fn start_tower(port: u16, data_dir: &Path, wallet: &str, token: Option<&str>) -> Running {
-    let rpc = BitcoinRpc::new(url(), "ferry", "ferry")
-        .with_wallet(wallet)
-        .with_watch_wallet(wallet);
+    let rpc = rpc().with_wallet(wallet).with_watch_wallet(wallet);
     let cfg = TowerConfig {
-        network: Network::Regtest,
+        chain: Chain::new(coin(), Network::Regtest).unwrap(),
         data_dir: data_dir.to_path_buf(),
         token: token.map(String::from),
         poll: POLL,
@@ -164,7 +183,7 @@ fn sent(view: &PackageView, spend: Spend) -> Vec<&ferry_watchtower::store::Broad
 async fn b_offline_tower_cancels_and_refunds() {
     let wallet = "ferry-wt-watch-refund";
     let node = Node::new(wallet).await;
-    let mut swap = Swap::offline(T1, T2);
+    let mut swap = offline_swap();
     let lock_tx = node.fund(&mut swap).await;
     let dir = tempfile::tempdir().unwrap();
     let tower = start_tower(7701, dir.path(), wallet, Some("s3cret")).await;
@@ -268,7 +287,7 @@ async fn b_offline_tower_cancels_and_refunds() {
 async fn z_offline_tower_cancels_and_punishes_across_a_restart() {
     let wallet = "ferry-wt-watch-punish";
     let node = Node::new(wallet).await;
-    let mut swap = Swap::offline(T1, T2);
+    let mut swap = offline_swap();
     let lock_tx = node.fund(&mut swap).await;
     let dir = tempfile::tempdir().unwrap();
     let tower = start_tower(7702, dir.path(), wallet, None).await;
@@ -323,7 +342,7 @@ async fn z_offline_tower_cancels_and_punishes_across_a_restart() {
 async fn redeem_stops_both_towers() {
     let wallet = "ferry-wt-watch-redeem";
     let node = Node::new(wallet).await;
-    let mut swap = Swap::offline(T1, T2);
+    let mut swap = offline_swap();
     let lock_tx = node.fund(&mut swap).await;
     let dir = tempfile::tempdir().unwrap();
     let tower = start_tower(7704, dir.path(), wallet, None).await;

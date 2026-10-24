@@ -2,7 +2,7 @@
 
 use reqwest::StatusCode;
 
-use crate::package::Package;
+use crate::evm::EvmPackageView;
 use crate::store::PackageView;
 use crate::tower::Registered;
 
@@ -57,7 +57,8 @@ impl Client {
         })
     }
 
-    pub async fn upload(&self, package: &Package) -> Result<Registered, ClientError> {
+    /// Upload a [`crate::Package`] or a [`crate::EvmPackage`].
+    pub async fn upload(&self, package: &impl serde::Serialize) -> Result<Registered, ClientError> {
         let req = self
             .http
             .post(format!("{}/packages", self.base))
@@ -66,6 +67,12 @@ impl Client {
     }
 
     pub async fn status(&self, id: &str) -> Result<PackageView, ClientError> {
+        let req = self.http.get(format!("{}/packages/{id}", self.base));
+        Self::read(self.auth(req).send().await?).await
+    }
+
+    /// [`Client::status`] on a `--counter evm` tower.
+    pub async fn evm_status(&self, id: &str) -> Result<EvmPackageView, ClientError> {
         let req = self.http.get(format!("{}/packages/{id}", self.base));
         Self::read(self.auth(req).send().await?).await
     }

@@ -19,8 +19,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, Mutex};
 
 use super::config::{
-    addr_str, network_name, parse_address, token_str, Counter, EvmOffer, EvmProposeRequest,
-    EvmTerms,
+    addr_str, network_name, parse_address, policy_opt_in, token_str, Counter, EvmOffer,
+    EvmProposeRequest, EvmTerms,
 };
 use super::record::{bytes, EvmPending, EvmRecord, EvmStore};
 use super::view::{self, EvmStatusView};
@@ -137,8 +137,12 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
                 addr_str(&contract)
             )
         })?;
-        let policy = EvmPolicy::for_chain(chain_id, cli.dev_policy)
-            .map_err(|e| anyhow::anyhow!("{e} (pass --dev-policy for a local anvil setup)"))?;
+        let policy = EvmPolicy::for_chain(chain_id, policy_opt_in(&cli)).map_err(|e| {
+            anyhow::anyhow!(
+                "{e} (--dev-policy for a local anvil; --evm-testnet-policy for an unlisted test \
+                 network)"
+            )
+        })?;
         let role: Role = cli.role.into();
         let o = cli.maker_offer.unwrap_or(crate::config::OfferArg {
             rate_sat_per_zec: 40_000_000,
@@ -1542,6 +1546,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             if rec.taker {
                 self.exchange(rec).await;
             }
+            crate::tower::arm_evm(&self.cli, rec).await;
         }
         self.maybe_timeout(rec).await;
         for ev in self.chain_events(rec).await {
@@ -1768,6 +1773,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             out.push(EvmEvent::Chain(EvmChainEvent::ZecNoteSeen {
                 value: note.value,
                 confs: note.confirmations,
+                spent: note.spent_by.is_some(),
             }));
         }
         if let Some(txid) = rec.zec_sweep_txid.clone() {

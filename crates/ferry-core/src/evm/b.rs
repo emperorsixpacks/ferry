@@ -68,6 +68,10 @@ pub struct EvmBSwap {
     /// Our Ready(id) signature, once made.
     #[serde(default, with = "crate::hex_opt")]
     ready_sig: Option<[u8; 65]>,
+    /// A note at the joint address was spent before we signed Ready: someone else knows the
+    /// joint key (e.g. Z learned `b` from a watchtower that leaked it). Never sign it then.
+    #[serde(default)]
+    zec_spent_early: bool,
 }
 
 impl EvmBSwap {
@@ -83,6 +87,7 @@ impl EvmBSwap {
             lock_confs: 0,
             lock_seen: false,
             ready_sig: None,
+            zec_spent_early: false,
         };
         Ok((b, vec![lock]))
     }
@@ -117,9 +122,11 @@ impl EvmBSwap {
                 Err(self.unexpected(msg.name()))
             }
             EvmEvent::Chain(EvmChainEvent::Observed(o)) => self.on_observed(o),
-            EvmEvent::Chain(EvmChainEvent::ZecNoteSeen { value, confs }) => {
-                Ok(self.on_zec_note(value, confs))
-            }
+            EvmEvent::Chain(EvmChainEvent::ZecNoteSeen {
+                value,
+                confs,
+                spent,
+            }) => Ok(self.on_zec_note(value, confs, spent)),
             EvmEvent::Chain(EvmChainEvent::ZecSwept { confs }) => {
                 if self.state == EvmBState::Claimed && confs >= 1 {
                     self.state = EvmBState::ZecSwept;
@@ -181,9 +188,17 @@ impl EvmBSwap {
         Ok(vec![])
     }
 
-    fn on_zec_note(&mut self, value: u64, confs: u32) -> Vec<EvmAction> {
+    fn on_zec_note(&mut self, value: u64, confs: u32, spent: bool) -> Vec<EvmAction> {
         let params = &self.session.params;
         let waiting = matches!(self.state, EvmBState::Locked | EvmBState::ZecSeen { .. });
+        // We have not swept, so a spent note means someone else holds the joint key: Ready
+        // would hand Z the tokens on top. Withhold it for good; the swap runs into the refund.
+        if waiting && spent {
+            self.zec_spent_early = true;
+        }
+        if self.zec_spent_early {
+            return vec![];
+        }
         // A short note never gets the ready signature: the swap runs into the refund.
         if !waiting || value < params.zec_amount {
             return vec![];

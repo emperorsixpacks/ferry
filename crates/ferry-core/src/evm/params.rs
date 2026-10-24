@@ -10,8 +10,14 @@ use crate::Error;
 
 /// Anvil's chain id (local development).
 pub const ANVIL_CHAIN_ID: u64 = 31337;
+pub const ETHEREUM_CHAIN_ID: u64 = 1;
+pub const OPTIMISM_CHAIN_ID: u64 = 10;
 pub const BASE_CHAIN_ID: u64 = 8453;
+pub const ARBITRUM_CHAIN_ID: u64 = 42161;
+pub const SEPOLIA_CHAIN_ID: u64 = 11_155_111;
+pub const OP_SEPOLIA_CHAIN_ID: u64 = 11_155_420;
 pub const BASE_SEPOLIA_CHAIN_ID: u64 = 84532;
+pub const ARBITRUM_SEPOLIA_CHAIN_ID: u64 = 421_614;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvmParams {
@@ -171,35 +177,93 @@ pub struct EvmPolicy {
     pub min_claim_window_secs: u64,
 }
 
+/// What a party accepts beyond the chains Ferry has a policy for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PolicyOptIn {
+    /// Only the listed chains.
+    #[default]
+    Listed,
+    /// The relaxed development policy. Anvil only, and required there.
+    Dev,
+    /// A chain id Ferry has no policy for, declared a test network by the operator: it gets the
+    /// test-network minimums. Never accepted for a listed chain, so it can't loosen a mainnet.
+    UnlistedTestnet,
+}
+
+/// OP Stack and Arbitrum mainnets: a single sequencer can delay inclusion, so the margins are an
+/// hour and the claim window four. (Lock confirmations differ with the block time.)
+const SEQUENCER_MARGIN_SECS: u64 = 3_600;
+const SEQUENCER_CLAIM_WINDOW_SECS: u64 = 4 * 3_600;
+/// Every mainnet: ten Zcash blocks (about 12.5 minutes) before B lets Z claim.
+const MAINNET_ZEC_CONFIRMATIONS: u32 = 10;
+
+const TESTNET: EvmPolicy = EvmPolicy {
+    min_margin_secs: 120,
+    min_lock_confirmations: 2,
+    min_zec_confirmations: 3,
+    min_claim_window_secs: 1_200,
+};
+
 impl EvmPolicy {
-    /// Anvil is only accepted with `dev`. Base mainnet is strict (its single sequencer can
-    /// delay inclusion, so the margins are long); other chains (Base Sepolia) are looser.
-    pub fn for_chain(chain_id: u64, dev: bool) -> Result<EvmPolicy, Error> {
-        match (chain_id, dev) {
-            (ANVIL_CHAIN_ID, true) => Ok(EvmPolicy {
+    /// The minimums for `chain_id` (reasons in docs/EVM.md, "Timing rules"):
+    /// - Ethereum: no sequencer, 12 s blocks. 15 min margins, 64 lock confirmations (about two
+    ///   epochs, when a block is normally finalized), a claim window of at least 2 h.
+    /// - Base and Optimism (OP Stack, 2 s blocks): 1 h margins, 30 lock confirmations, 4 h.
+    /// - Arbitrum One (about 0.25 s blocks): Base's margins and claim window, and 240 lock
+    ///   confirmations, the same minute as Base's 30.
+    /// - Sepolia, Base Sepolia, OP Sepolia, Arbitrum Sepolia: test-network minimums.
+    /// - Anvil: only with [`PolicyOptIn::Dev`].
+    /// - Any other chain is refused, unless the operator declares it a test network
+    ///   ([`PolicyOptIn::UnlistedTestnet`]).
+    pub fn for_chain(chain_id: u64, opt_in: PolicyOptIn) -> Result<EvmPolicy, Error> {
+        let listed = match chain_id {
+            ETHEREUM_CHAIN_ID => Some(EvmPolicy {
+                min_margin_secs: 900,
+                min_lock_confirmations: 64,
+                min_zec_confirmations: MAINNET_ZEC_CONFIRMATIONS,
+                min_claim_window_secs: 2 * 3_600,
+            }),
+            BASE_CHAIN_ID | OPTIMISM_CHAIN_ID => Some(EvmPolicy {
+                min_margin_secs: SEQUENCER_MARGIN_SECS,
+                min_lock_confirmations: 30,
+                min_zec_confirmations: MAINNET_ZEC_CONFIRMATIONS,
+                min_claim_window_secs: SEQUENCER_CLAIM_WINDOW_SECS,
+            }),
+            ARBITRUM_CHAIN_ID => Some(EvmPolicy {
+                min_margin_secs: SEQUENCER_MARGIN_SECS,
+                min_lock_confirmations: 240,
+                min_zec_confirmations: MAINNET_ZEC_CONFIRMATIONS,
+                min_claim_window_secs: SEQUENCER_CLAIM_WINDOW_SECS,
+            }),
+            SEPOLIA_CHAIN_ID
+            | BASE_SEPOLIA_CHAIN_ID
+            | OP_SEPOLIA_CHAIN_ID
+            | ARBITRUM_SEPOLIA_CHAIN_ID => Some(TESTNET),
+            _ => None,
+        };
+        match (chain_id, opt_in, listed) {
+            (ANVIL_CHAIN_ID, PolicyOptIn::Dev, _) => Ok(EvmPolicy {
                 min_margin_secs: 2,
                 min_lock_confirmations: 1,
                 min_zec_confirmations: 1,
                 min_claim_window_secs: 10,
             }),
-            (ANVIL_CHAIN_ID, false) => {
-                Err(Error::Policy("anvil needs the explicit dev policy".into()))
-            }
-            (_, true) => Err(Error::Policy(
+            (ANVIL_CHAIN_ID, _, _) => Err(Error::Policy(
+                "anvil (chain 31337) needs the explicit dev policy".into(),
+            )),
+            (_, PolicyOptIn::Dev, _) => Err(Error::Policy(
                 "the dev policy is only for anvil (chain 31337)".into(),
             )),
-            (BASE_CHAIN_ID, false) => Ok(EvmPolicy {
-                min_margin_secs: 3_600,
-                min_lock_confirmations: 30,
-                min_zec_confirmations: 10,
-                min_claim_window_secs: 4 * 3_600,
-            }),
-            (_, false) => Ok(EvmPolicy {
-                min_margin_secs: 120,
-                min_lock_confirmations: 2,
-                min_zec_confirmations: 3,
-                min_claim_window_secs: 1_200,
-            }),
+            (_, PolicyOptIn::Listed, Some(p)) => Ok(p),
+            (_, PolicyOptIn::UnlistedTestnet, Some(_)) => Err(Error::Policy(format!(
+                "chain {chain_id} has its own policy; it can't be treated as an unlisted test \
+                 network"
+            ))),
+            (_, PolicyOptIn::UnlistedTestnet, None) => Ok(TESTNET),
+            (_, PolicyOptIn::Listed, None) => Err(Error::Policy(format!(
+                "Ferry has no safety policy for EVM chain {chain_id}; if it is a test network, \
+                 declare it one explicitly"
+            ))),
         }
     }
 }
@@ -276,14 +340,91 @@ mod tests {
     #[test]
     fn policies() {
         let p = test_params();
-        assert!(EvmPolicy::for_chain(ANVIL_CHAIN_ID, false).is_err());
-        assert!(EvmPolicy::for_chain(BASE_SEPOLIA_CHAIN_ID, true).is_err());
-        let dev = EvmPolicy::for_chain(ANVIL_CHAIN_ID, true).unwrap();
+        let dev = EvmPolicy::for_chain(ANVIL_CHAIN_ID, PolicyOptIn::Dev).unwrap();
         p.check_policy(&dev, 0).unwrap();
         // Too little time left before t1 − Δ.
         assert!(p.check_policy(&dev, 895).is_err());
-        let sepolia = EvmPolicy::for_chain(BASE_SEPOLIA_CHAIN_ID, false).unwrap();
+        let sepolia = EvmPolicy::for_chain(BASE_SEPOLIA_CHAIN_ID, PolicyOptIn::Listed).unwrap();
         let err = p.check_policy(&sepolia, 0).unwrap_err().to_string();
         assert!(err.contains("claim margin"), "{err}");
+    }
+
+    /// (margin s, lock confirmations, ZEC confirmations, claim window s) per chain.
+    fn table(chain_id: u64) -> (u64, u32, u32, u64) {
+        let p = EvmPolicy::for_chain(chain_id, PolicyOptIn::Listed)
+            .unwrap_or_else(|e| panic!("chain {chain_id}: {e}"));
+        (
+            p.min_margin_secs,
+            p.min_lock_confirmations,
+            p.min_zec_confirmations,
+            p.min_claim_window_secs,
+        )
+    }
+
+    #[test]
+    fn policy_table() {
+        assert_eq!(table(ETHEREUM_CHAIN_ID), (900, 64, 10, 7_200));
+        assert_eq!(table(BASE_CHAIN_ID), (3_600, 30, 10, 14_400));
+        assert_eq!(table(OPTIMISM_CHAIN_ID), table(BASE_CHAIN_ID));
+        assert_eq!(table(ARBITRUM_CHAIN_ID), (3_600, 240, 10, 14_400));
+        for testnet in [
+            SEPOLIA_CHAIN_ID,
+            BASE_SEPOLIA_CHAIN_ID,
+            OP_SEPOLIA_CHAIN_ID,
+            ARBITRUM_SEPOLIA_CHAIN_ID,
+        ] {
+            assert_eq!(table(testnet), (120, 2, 3, 1_200), "chain {testnet}");
+        }
+        // Lock confirmations cover at least Base's minute at each chain's block time.
+        let secs = |chain, block_ms: u64| u64::from(table(chain).1) * block_ms / 1_000;
+        assert!(secs(ARBITRUM_CHAIN_ID, 250) >= secs(BASE_CHAIN_ID, 2_000));
+        assert!(
+            secs(ETHEREUM_CHAIN_ID, 12_000) >= 12 * 60,
+            "about two epochs"
+        );
+        // Every mainnet is stricter than every test network.
+        for main in [
+            ETHEREUM_CHAIN_ID,
+            BASE_CHAIN_ID,
+            OPTIMISM_CHAIN_ID,
+            ARBITRUM_CHAIN_ID,
+        ] {
+            let (m, l, z, w) = table(main);
+            let (tm, tl, tz, tw) = table(SEPOLIA_CHAIN_ID);
+            assert!(m > tm && l > tl && z > tz && w > tw, "chain {main}");
+        }
+    }
+
+    #[test]
+    fn unknown_chains_are_refused_unless_declared_test_networks() {
+        let unknown = 59_144; // not listed
+        let err = EvmPolicy::for_chain(unknown, PolicyOptIn::Listed).unwrap_err();
+        assert!(err.to_string().contains("no safety policy"), "{err}");
+        assert_eq!(
+            EvmPolicy::for_chain(unknown, PolicyOptIn::UnlistedTestnet).unwrap(),
+            TESTNET
+        );
+        // The opt-in can't loosen a listed chain, mainnet or not.
+        for listed in [ETHEREUM_CHAIN_ID, BASE_CHAIN_ID, BASE_SEPOLIA_CHAIN_ID] {
+            assert!(EvmPolicy::for_chain(listed, PolicyOptIn::UnlistedTestnet).is_err());
+        }
+    }
+
+    #[test]
+    fn the_dev_policy_is_for_anvil_only() {
+        assert!(EvmPolicy::for_chain(ANVIL_CHAIN_ID, PolicyOptIn::Listed).is_err());
+        assert!(EvmPolicy::for_chain(ANVIL_CHAIN_ID, PolicyOptIn::UnlistedTestnet).is_err());
+        assert_eq!(
+            EvmPolicy::for_chain(ANVIL_CHAIN_ID, PolicyOptIn::Dev)
+                .unwrap()
+                .min_margin_secs,
+            2
+        );
+        for chain in [ETHEREUM_CHAIN_ID, BASE_SEPOLIA_CHAIN_ID, 59_144] {
+            assert!(
+                EvmPolicy::for_chain(chain, PolicyOptIn::Dev).is_err(),
+                "{chain}"
+            );
+        }
     }
 }

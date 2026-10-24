@@ -49,6 +49,19 @@ pub struct TxInfo {
     pub block_number: u64,
 }
 
+/// What the node knows about a transaction we sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxStatus {
+    /// Neither mined nor in the node's mempool: dropped, or it never arrived.
+    Unknown,
+    Pending,
+    /// Mined; `ok` is false if it reverted.
+    Mined {
+        ok: bool,
+        block: u64,
+    },
+}
+
 /// One account talking to one FerryLock deployment.
 #[derive(Clone, Debug)]
 pub struct EvmClient {
@@ -93,6 +106,14 @@ impl EvmClient {
 
     pub fn provider(&self) -> &DynProvider {
         &self.provider
+    }
+
+    /// The same node and account, talking to another FerryLock deployment.
+    pub fn at(&self, contract: Address) -> EvmClient {
+        EvmClient {
+            contract,
+            ..self.clone()
+        }
     }
 
     pub fn contract(&self) -> Address {
@@ -239,6 +260,23 @@ impl EvmClient {
     /// Refund to B by publishing `b`. Same pre-checks as [`EvmClient::claim`]: a reverted
     /// refund (sent before t1) would hand Z b while Z can still claim the tokens.
     pub async fn refund(&self, id: B256, b: &[u8; 32]) -> Result<TxInfo, Error> {
+        self.check_refund(id, b).await?;
+        let c = self.lock_contract();
+        let call = c.refund(id, U256::from_be_bytes(*b));
+        simulate(call.call().await.map(|_| ()))?;
+        mined(call.send().await?.get_receipt().await?)
+    }
+
+    /// [`EvmClient::refund`] without waiting for it to be mined (a watchtower follows it with
+    /// [`EvmClient::tx_status`]). The same pre-checks, then `eth_call` and `eth_estimateGas`;
+    /// nothing is sent if any of them fails. The caller enforces the `t2 − Δ` end of the window.
+    pub async fn submit_refund(&self, id: B256, b: &[u8; 32]) -> Result<B256, Error> {
+        self.check_refund(id, b).await?;
+        let c = self.lock_contract();
+        submit(c.refund(id, U256::from_be_bytes(*b))).await
+    }
+
+    async fn check_refund(&self, id: B256, b: &[u8; 32]) -> Result<(), Error> {
         let s = self.swap(id).await?;
         if !s.state.is_open() {
             return Err(Error::WrongState(s.state, "Locked"));
@@ -251,10 +289,7 @@ impl EvmClient {
                 s.terms.t1
             )));
         }
-        let c = self.lock_contract();
-        let call = c.refund(id, U256::from_be_bytes(*b));
-        simulate(call.call().await.map(|_| ()))?;
-        mined(call.send().await?.get_receipt().await?)
+        Ok(())
     }
 
     /// After t2 with no refund: pay Z. Anyone may send it.
@@ -264,17 +299,50 @@ impl EvmClient {
         simulate(call.call().await.map(|_| ()))?;
         mined(call.send().await?.get_receipt().await?)
     }
+
+    /// [`EvmClient::punish`] without waiting for it to be mined; simulated first, like
+    /// [`EvmClient::submit_refund`].
+    pub async fn submit_punish(&self, id: B256) -> Result<B256, Error> {
+        let c = self.lock_contract();
+        submit(c.punish(id)).await
+    }
+
+    pub async fn tx_status(&self, hash: B256) -> Result<TxStatus, Error> {
+        if let Some(r) = self.provider.get_transaction_receipt(hash).await? {
+            return Ok(TxStatus::Mined {
+                ok: r.status(),
+                block: r.block_number().unwrap_or_default(),
+            });
+        }
+        Ok(match self.provider.get_transaction_by_hash(hash).await? {
+            Some(_) => TxStatus::Pending,
+            None => TxStatus::Unknown,
+        })
+    }
+}
+
+/// Simulate `call` (`eth_call`, then `eth_estimateGas`) and broadcast it only if both pass,
+/// without waiting for it to be mined.
+async fn submit<P: Provider, C: alloy::sol_types::SolCall>(
+    call: alloy::contract::SolCallBuilder<P, C>,
+) -> Result<B256, Error> {
+    simulate(call.call().await.map(|_| ()))?;
+    let gas = call.estimate_gas().await.map_err(would_revert)?;
+    let pending = call.gas(gas.saturating_add(gas / 5)).send().await?;
+    Ok(*pending.tx_hash())
 }
 
 /// Turn a failed `eth_call` into [`Error::WouldRevert`], naming the contract error if known.
 fn simulate(result: Result<(), alloy::contract::Error>) -> Result<(), Error> {
-    result.map_err(|e| {
-        let reason = e
-            .as_decoded_interface_error::<FerryLock::FerryLockErrors>()
-            .map(|d| format!("{d:?}"))
-            .unwrap_or_else(|| e.to_string());
-        Error::WouldRevert(reason)
-    })
+    result.map_err(would_revert)
+}
+
+fn would_revert(e: alloy::contract::Error) -> Error {
+    let reason = e
+        .as_decoded_interface_error::<FerryLock::FerryLockErrors>()
+        .map(|d| format!("{d:?}"))
+        .unwrap_or_else(|| e.to_string());
+    Error::WouldRevert(reason)
 }
 
 fn mined<R: ReceiptResponse>(receipt: R) -> Result<TxInfo, Error> {

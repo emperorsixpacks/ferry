@@ -58,6 +58,11 @@ pub struct EvmArgs {
     /// Block range per eth_getLogs request (public RPCs cap it).
     #[arg(long, default_value_t = 2_000)]
     pub evm_log_chunk: u64,
+    /// Accept an EVM chain id Ferry has no safety policy for, as a test network (2 min margins,
+    /// 2 lock confirmations). Without it such a chain is refused. Never for real funds, and not
+    /// accepted for a listed chain (docs/EVM.md, "Timing rules").
+    #[arg(long, conflicts_with = "dev_policy")]
+    pub evm_testnet_policy: bool,
 }
 
 /// Timing terms of an EVM offer; the maker's apply to every swap it accepts.
@@ -137,14 +142,33 @@ impl EvmOffer {
     }
 }
 
-pub fn network_name(chain_id: u64) -> String {
-    use ferry_core::evm::{ANVIL_CHAIN_ID, BASE_CHAIN_ID, BASE_SEPOLIA_CHAIN_ID};
-    match chain_id {
-        ANVIL_CHAIN_ID => "anvil".into(),
-        BASE_SEPOLIA_CHAIN_ID => "base-sepolia".into(),
-        BASE_CHAIN_ID => "base".into(),
-        n => format!("evm-{n}"),
+/// Which policy the operator asked for beyond the listed chains.
+pub fn policy_opt_in(cli: &crate::config::Cli) -> ferry_core::evm::PolicyOptIn {
+    use ferry_core::evm::PolicyOptIn;
+    if cli.dev_policy {
+        PolicyOptIn::Dev
+    } else if cli.evm.evm_testnet_policy {
+        PolicyOptIn::UnlistedTestnet
+    } else {
+        PolicyOptIn::Listed
     }
+}
+
+pub fn network_name(chain_id: u64) -> String {
+    use ferry_core::evm::*;
+    match chain_id {
+        ANVIL_CHAIN_ID => "anvil",
+        ETHEREUM_CHAIN_ID => "ethereum",
+        OPTIMISM_CHAIN_ID => "optimism",
+        BASE_CHAIN_ID => "base",
+        ARBITRUM_CHAIN_ID => "arbitrum",
+        SEPOLIA_CHAIN_ID => "sepolia",
+        OP_SEPOLIA_CHAIN_ID => "op-sepolia",
+        BASE_SEPOLIA_CHAIN_ID => "base-sepolia",
+        ARBITRUM_SEPOLIA_CHAIN_ID => "arbitrum-sepolia",
+        n => return format!("evm-{n}"),
+    }
+    .into()
 }
 
 /// `POST /peer/swaps` on an EVM maker.
@@ -197,10 +221,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn policy_flags() {
+        use clap::Parser;
+        use ferry_core::evm::PolicyOptIn;
+        let cli = |extra: &[&str]| {
+            let base = [
+                "ferryd",
+                "--role",
+                "z",
+                "--name",
+                "n",
+                "--data-dir",
+                "/x",
+                "--counter",
+                "evm",
+            ];
+            crate::config::Cli::try_parse_from(base.iter().chain(extra))
+        };
+        assert_eq!(policy_opt_in(&cli(&[]).unwrap()), PolicyOptIn::Listed);
+        assert_eq!(
+            policy_opt_in(&cli(&["--dev-policy"]).unwrap()),
+            PolicyOptIn::Dev
+        );
+        assert_eq!(
+            policy_opt_in(&cli(&["--evm-testnet-policy"]).unwrap()),
+            PolicyOptIn::UnlistedTestnet
+        );
+        assert!(cli(&["--dev-policy", "--evm-testnet-policy"]).is_err());
+    }
+
+    #[test]
     fn formatting_and_parsing() {
         assert_eq!(token_str(250_000_000, 6, "USDC"), "250 USDC");
         assert_eq!(token_str(249_500_000, 6, "USDC"), "249.5 USDC");
         assert_eq!(token_str(1, 6, "USDC"), "0.000001 USDC");
+        assert_eq!(network_name(1), "ethereum");
+        assert_eq!(network_name(10), "optimism");
+        assert_eq!(network_name(8453), "base");
+        assert_eq!(network_name(42161), "arbitrum");
+        assert_eq!(network_name(11_155_111), "sepolia");
+        assert_eq!(network_name(11_155_420), "op-sepolia");
+        assert_eq!(network_name(84532), "base-sepolia");
+        assert_eq!(network_name(421_614), "arbitrum-sepolia");
+        assert_eq!(network_name(31337), "anvil");
+        assert_eq!(network_name(7), "evm-7");
         let a = parse_address("0x5FbDB2315678afecb367f032d93F642f64180aa3").unwrap();
         assert_eq!(addr_str(&a), "0x5FbDB2315678afecb367f032d93F642f64180aa3");
         assert!(parse_address("0x1234").is_err());

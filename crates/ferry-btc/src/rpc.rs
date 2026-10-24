@@ -13,7 +13,8 @@ use serde_json::{json, Value};
 /// bitcoind's "No such mempool or blockchain transaction".
 const RPC_INVALID_ADDRESS_OR_KEY: i64 = -5;
 
-/// Time limit for one RPC call, and for `importdescriptors`, which rescans recent blocks.
+/// Time limit for one RPC call, and for `importdescriptors` / `importmulti`, which rescan recent
+/// blocks.
 const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const RESCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
@@ -246,7 +247,7 @@ impl BitcoinRpc {
         params: Value,
     ) -> Result<T, RpcError> {
         // A hung node must not freeze the caller; only an import's rescan may take long.
-        let limit = if method == "importdescriptors" {
+        let limit = if method == "importdescriptors" || method == "importmulti" {
             RESCAN_TIMEOUT
         } else {
             RPC_TIMEOUT
