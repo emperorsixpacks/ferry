@@ -16,12 +16,15 @@ const EMPTY: Daemon = { connected: false, error: null, status: null, swaps: {} }
 // Follows one ferryd: a fetch, then the SSE stream. EventSource only retries network errors and
 // gives up for good on an HTTP error (a 401, or the proxy's 502 while the daemon restarts), so the
 // stream is reopened by hand. Every (re)connect refetches so nothing is missed while it was away.
-// `daemon` is the base path (DAEMONS[role], pairDaemon(id)); null waits. A new one starts clean.
-export function useDaemon(daemon: string | null): Daemon {
+// `daemon` is the base path (DAEMONS[role], pairDaemon(id)); null waits. A new one starts clean,
+// or from `seed`, a status of it seen elsewhere (the pair probes), so switching daemons doesn't
+// flash "not connected".
+export function useDaemon(daemon: string | null, seed: Status | null = null): Daemon {
   const [state, setState] = useState<Daemon>(EMPTY);
 
   useEffect(() => {
-    setState(EMPTY);
+    setState(seed ? { ...EMPTY, status: seed } : EMPTY);
+    if (seed) setCoinFrom(seed);
     if (!daemon) return;
     const base = daemon;
     let alive = true;
@@ -70,6 +73,8 @@ export function useDaemon(daemon: string | null): Daemon {
       clearTimeout(retry);
       es?.close();
     };
+    // the seed only matters when the daemon changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [daemon]);
 
   return state;

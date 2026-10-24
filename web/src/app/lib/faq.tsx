@@ -22,11 +22,11 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
     items: [
       {
         q: "What is Ferry?",
-        a: "Ferry swaps your shielded ZEC for Bitcoin, Litecoin, USDC or ETH directly with another person, your swap partner. There is no account, no exchange and no bridge in the middle: each side locks its own coins, and the swap releases both together.",
+        a: "Ferry swaps shielded ZEC for Bitcoin, Litecoin, USDC or ETH, either way round, directly with another person, your swap partner. There is no account, no exchange and no bridge in the middle: each side locks its own coins, and the swap releases both together.",
       },
       {
         q: "How do I make a swap?",
-        a: "Enter how much ZEC to sell, pick the coin you want, and press Swap. Ferry finds the partner with the best rate for your amount. Then wait a few minutes. You can close the page; your Ferry node finishes the swap.",
+        a: "To sell ZEC, enter how much, pick the coin you want, and press Sell ZEC. To buy ZEC, press the arrow between the two boxes first, then pick the coin you pay with, enter how much ZEC you want, and press Buy ZEC. Ferry finds the partner with the best rate for your amount. Then wait a few minutes. You can close the page; your Ferry node finishes the swap.",
       },
       {
         q: "What is my Ferry node?",
@@ -116,7 +116,7 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
       },
       {
         q: "Can I buy ZEC instead?",
-        a: "Yes. A Ferry node that holds Bitcoin, Litecoin or tokens buys shielded ZEC the same way, and its app says “Buy ZEC”.",
+        a: "Yes. Press the arrow between Sell and Buy on the swap page. You pay with the Bitcoin, Litecoin or tokens in your Ferry node, and the ZEC arrives shielded in its wallet. You lock your coins first; if your partner never locks the ZEC, your coins come back after the deadline. Ferry remembers which way you last swapped.",
       },
     ],
   },

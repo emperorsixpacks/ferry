@@ -1,6 +1,6 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { ArrowCounterClockwise, ArrowLeft, ArrowRight, Check, CircleNotch, Lock, ShieldCheck, ShieldSlash, Warning } from "@phosphor-icons/react";
-import type { Status, SwapView } from "@/api";
+import { directionOf, type Status, type SwapView } from "@/api";
 import { CHAIN_NAMES, coin } from "@/format";
 import { Link } from "@/router";
 import { btcText } from "@/swap/shared";
@@ -23,6 +23,13 @@ import { useWalletCaughtUp } from "../lib/walletSync";
 export function SwapDetail({ id }: { id: string }) {
   const d = useLocal();
   const swap = d.swaps[id];
+  // A swap of the other direction (opened from a link, or the banner after a flip): follow the
+  // daemon that runs it, so the page updates live and reads that daemon's status.
+  const other = !!swap && swap.role !== d.role && d.canFlip;
+  useEffect(() => {
+    if (other && swap) d.chooseDirection(directionOf(swap.role));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [other]);
   return (
     <Layout>
       <div className="mx-auto w-full max-w-[480px]">
@@ -242,7 +249,18 @@ function Technical({ swap, status }: { swap: SwapView; status: Status | null }) 
         <Row label={swap.role === "Z" ? "You send" : "You pay"} value={swap.role === "Z" ? a.zec : a.coin} />
         <Row label="You receive" value={swap.role === "Z" ? a.coin : a.zec} />
         <Row label="Rate" value={rate ? `1 ZEC = ${btcText(rate)} ${coin().ticker}` : "–"} />
-        <Row label="Network fee" value={evm ? "Gas only, paid in ETH" : status?.offer.fee_sat != null ? `${status.offer.fee_sat.toLocaleString("en-US")} ${coin().unit}` : "–"} />
+        <Row
+          label="Network fee"
+          value={
+            evm
+              ? "Gas only, paid in ETH"
+              : swap.role === "B"
+                ? `Your wallet's usual fee for the ${coin().ticker} lock`
+                : status?.offer.fee_sat != null
+                  ? `${status.offer.fee_sat.toLocaleString("en-US")} ${coin().unit}, taken from what you receive`
+                  : "–"
+          }
+        />
         <Row label="Counterparty" value={<span className="font-mono text-xs break-all">{swap.counterparty}</span>} />
         <Row label="Networks" value={`${chain} ${status?.chains.btc.network ?? ""} · Zcash ${status?.chains.zec.network ?? ""}`} />
       </Group>

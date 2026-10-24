@@ -10,8 +10,9 @@ import { ChainLogo, PairLogo, type ChainMarkId } from "./Logos";
 import { Sheet, arrowKeys } from "./ui/sheet";
 
 // "Select a token": every coin Ferry can swap ZEC for, filtered by chain or by a search. A row is
-// one pair (USDC on Base, ETH on Arbitrum); pairs this server has no Ferry node for are listed
-// dimmed, so people see what exists without being able to pick it.
+// one pair (USDC on Base, ETH on Arbitrum); pairs this server has no Ferry node for in the
+// direction on screen are listed dimmed ("only for selling ZEC here", "not available here"), so
+// people see what exists without being able to pick it.
 
 const FILTERS: { id: "all" | ChainMarkId; label: string }[] = [
   { id: "all", label: "All" },
@@ -30,7 +31,7 @@ const chainName = (id: PairId) => (pairChain(id) ? CHAIN_NAMES[pairChain(id)!] :
 export const tokenSubtitle = (id: PairId) => (pairChain(id) ? `${assetName(id)} · ${chainName(id)}` : assetName(id));
 
 export function TokenPicker({ open, onClose, makers, role }: { open: boolean; onClose: () => void; makers: Makers; role: Role }) {
-  const { pairs, pair, choosePair, status } = useLocal();
+  const { pairs, pair, choosePair, status, dir } = useLocal();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]["id"]>("all");
   const [query, setQuery] = useState("");
   const phone = typeof window !== "undefined" && window.matchMedia("(max-width: 639px)").matches;
@@ -64,10 +65,13 @@ export function TokenPicker({ open, onClose, makers, role }: { open: boolean; on
         const n = pairName(id);
         return [n.title, n.ticker, n.noun, assetName(id), chainName(id), pairCoin(id) === "weth" ? "eth ether" : ""].some((s) => s.toLowerCase().includes(q));
       })
-      .map((id) => ({ id, can: !!pairs.find((p) => p.id === id)?.daemon }));
+      .map((id) => {
+        const p = pairs.find((x) => x.id === id);
+        return { id, can: !!p?.[dir].daemon, otherWay: !!p?.[dir === "sell" ? "buy" : "sell"].daemon };
+      });
     // what can be picked first, in the usual order
     return [...list.filter((r) => r.can), ...list.filter((r) => !r.can)];
-  }, [filter, query, pairs]);
+  }, [filter, query, pairs, dir]);
 
   const pick = (id: PairId) => {
     choosePair(id);
@@ -129,10 +133,20 @@ export function TokenPicker({ open, onClose, makers, role }: { open: boolean; on
             {firstOff >= 0 ? (
               <div role="group" aria-labelledby="tokens-off">
                 <p id="tokens-off" className={cn("px-3 pb-1.5 text-xs font-medium text-slate-500", firstOff > 0 ? "pt-4" : "pt-1")}>
-                  Not available on this server
+                  Not available here
                 </p>
                 {rows.filter((r) => !r.can).map((r) => (
-                  <Row key={r.id} id={r.id} can={false} selected={r.id === pair} rate={undefined} focus={false} phone={phone} onPick={pick} />
+                  <Row
+                    key={r.id}
+                    id={r.id}
+                    can={false}
+                    off={r.otherWay ? `only for ${dir === "buy" ? "selling" : "buying"} ZEC here` : "not available here"}
+                    selected={r.id === pair}
+                    rate={undefined}
+                    focus={false}
+                    phone={phone}
+                    onPick={pick}
+                  />
                 ))}
               </div>
             ) : null}
@@ -143,7 +157,26 @@ export function TokenPicker({ open, onClose, makers, role }: { open: boolean; on
   );
 }
 
-function Row({ id, can, selected, rate, focus, phone, onPick }: { id: PairId; can: boolean; selected: boolean; rate: number | undefined; focus: boolean; phone: boolean; onPick: (id: PairId) => void }) {
+function Row({
+  id,
+  can,
+  off = "not available here",
+  selected,
+  rate,
+  focus,
+  phone,
+  onPick,
+}: {
+  id: PairId;
+  can: boolean;
+  // why it can't be picked
+  off?: string;
+  selected: boolean;
+  rate: number | undefined;
+  focus: boolean;
+  phone: boolean;
+  onPick: (id: PairId) => void;
+}) {
   const n = pairName(id);
   return (
     <button
@@ -160,7 +193,7 @@ function Row({ id, can, selected, rate, focus, phone, onPick }: { id: PairId; ca
       <PairLogo pair={id} size={36} className={can ? undefined : "opacity-40 grayscale"} />
       <span className="min-w-0 flex-1">
         <span className={cn("block font-medium", can ? "text-slate-900" : "text-slate-500")}>{n.ticker}</span>
-        <span className="block truncate text-[13px] text-slate-500">{can ? tokenSubtitle(id) : `${chainName(id)} · not available here`}</span>
+        <span className="block truncate text-[13px] text-slate-500">{can ? tokenSubtitle(id) : `${chainName(id)} · ${off}`}</span>
       </span>
       {can && rate != null ? (
         <span className="shrink-0 text-right">

@@ -51,7 +51,7 @@ function Hero() {
           <span className="text-slate-500">Privately.</span>
         </h1>
         <p className="mt-6 max-w-[34rem] text-lg leading-relaxed text-slate-600">
-          {z ? "Get Bitcoin, Litecoin, USDC or ETH for your shielded ZEC." : "Pay with Bitcoin, Litecoin, USDC or ETH, and get shielded ZEC."} No account. No bridge. Nobody holds your coins.
+          {z ? "Sell it for Bitcoin, Litecoin, USDC or ETH, or buy it with them." : "Pay with Bitcoin, Litecoin, USDC or ETH, and get shielded ZEC."} No account. No bridge. Nobody holds your coins.
         </p>
         <a href="#how" className="mt-7 inline-flex items-center gap-1.5 rounded text-[15px] font-medium text-slate-700 transition-colors hover:text-slate-900">
           See how it works
@@ -101,13 +101,13 @@ function QuoteCard() {
   return (
     <div className="w-full rounded-[28px] border border-slate-200 bg-white p-2 shadow-[0_24px_64px_-32px_rgba(24,24,27,0.22)] lg:justify-self-end lg:max-w-[440px]">
       <div className="flex flex-col">
-        {zecSide}
+        {z ? zecSide : coinSide}
         <div className="relative z-10 -my-[18px] flex justify-center" aria-hidden>
           <span className="flex h-10 w-10 items-center justify-center rounded-2xl border-4 border-white bg-slate-100 text-slate-700">
             <ArrowDown size={16} weight="bold" />
           </span>
         </div>
-        {coinSide}
+        {z ? coinSide : zecSide}
       </div>
       <p className="px-3 pt-3 pb-1 text-[13px] text-slate-500" aria-live="polite">
         {!online
@@ -190,12 +190,12 @@ function Steps() {
     role === "Z"
       ? [
           { title: "Choose what you want", body: "Type how much ZEC to sell and pick Bitcoin, Litecoin, USDC or ETH." },
-          { title: "Confirm", body: "Press Swap. Ferry finds the best rate, and both sides lock their coins." },
+          { title: "Confirm", body: "Press Sell ZEC. Ferry finds the best rate, and both sides lock their coins." },
           { title: "Receive", body: "Your coins arrive in a few minutes. If anything stalls, your ZEC comes back." },
         ]
       : [
           { title: "Choose what you pay with", body: "Type how much ZEC to buy and pick Bitcoin, Litecoin, USDC or ETH to pay." },
-          { title: "Confirm", body: "Press Swap. Ferry finds the best rate, and both sides lock their coins." },
+          { title: "Confirm", body: "Press Buy ZEC. Ferry finds the best rate; you lock your coins first, then your partner locks the ZEC." },
           { title: "Receive", body: "Shielded ZEC arrives in a few minutes. If anything stalls, your coins come back." },
         ];
   return (
