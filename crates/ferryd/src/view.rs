@@ -122,6 +122,8 @@ pub struct SwapView {
     pub route: Option<String>,
     /// B taker: the shielded address our sweep pays (null: our own wallet).
     pub sweep_to: Option<String>,
+    /// Z taker: the address tx_redeem pays, given as `payout_to` (null: our own wallet).
+    pub payout_to: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -235,6 +237,7 @@ pub fn swap_view(rec: &SwapRecord) -> SwapView {
         watchtower: rec.watchtower.clone(),
         route: rec.route.clone(),
         sweep_to: rec.sweep_to.clone(),
+        payout_to: rec.payout_to.clone(),
     }
 }
 

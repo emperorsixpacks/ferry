@@ -370,6 +370,20 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 .await
                 .map_err(|e| ApiError::bad(format!("sweep_to: {e}")))?;
         }
+        // payout_to (role Z): an address of our coin and network, of a type tx_redeem can pay,
+        // checked before the maker hears from us. The dust rule follows once the amount is known.
+        let payout = match &route.payout_to {
+            None => None,
+            Some(to) => {
+                let bad = |e: String| ApiError::bad(format!("payout_to: {e}"));
+                let addr = self
+                    .chain()
+                    .parse_address(to)
+                    .map_err(|e| bad(e.to_string()))?;
+                ferry_core::check_payout_type(&addr).map_err(|e| bad(e.to_string()))?;
+                Some(addr)
+            }
+        };
         let offer: Offer = self
             .http
             .get(format!("{maker}/peer/offer"))
@@ -409,6 +423,19 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 zec_str(offer.max_zat)
             )));
         }
+        // A maker that predates payout addresses would drop ours and fail the transcript check
+        // (nothing would be locked); refuse it plainly instead.
+        if payout.is_some()
+            && !offer
+                .features
+                .iter()
+                .any(|f| f == crate::route::PAYOUT_FEATURE)
+        {
+            return Err(ApiError::bad(
+                "payout_to: this maker's ferryd can't pay a payout address (its offer does not \
+                 list the \"payout\" feature); leave payout_to out or choose another maker",
+            ));
+        }
         // Firm quote (crate::quote): signed by this maker's key, for its market, our side and this
         // amount; its rate replaces the offer's.
         let rate = match &quote {
@@ -434,9 +461,17 @@ impl<L: ZecLeg + 'static> Daemon<L> {
 
         let mut sid = [0u8; 32];
         OsRng.fill_bytes(&mut sid);
-        let (proposal, propose) =
-            Proposal::new(&mut OsRng, sid, self.role, params.clone(), address)
-                .map_err(|e| ApiError::bad(e.to_string()))?;
+        // The payout goes into our setup (Setup::redeem_address), so the maker builds tx_redeem
+        // to it and its redeem signature commits to it.
+        let (proposal, propose) = Proposal::with_payout(
+            &mut OsRng,
+            sid,
+            self.role,
+            params.clone(),
+            address,
+            payout.clone(),
+        )
+        .map_err(|e| ApiError::bad(e.to_string()))?;
         let resp = self
             .http
             .post(format!("{maker}/peer/swaps"))
@@ -474,6 +509,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         // Before the first save: a router that lost our answer finds the swap by its label.
         rec.route = route.route;
         rec.sweep_to = route.sweep_to;
+        rec.payout_to = payout.map(|a| self.chain().encode_address(&a));
         watch_swap(&self.rpc, &rec)
             .await
             .map_err(|e| ApiError(500, format!("watching the swap outputs: {e}")))?;
@@ -495,6 +531,14 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         );
         if let Some(note) = crate::route::leg_note(rec.route.as_deref(), rec.sweep_to.as_deref()) {
             rec.log("local", "route_leg", note, None);
+        }
+        if let Some(to) = rec.payout_to.clone() {
+            rec.log(
+                "local",
+                "payout_to",
+                crate::route::payout_note(&to, "redeem", false),
+                None,
+            );
         }
         rec.pending.extend(actions.into_iter().map(Pending::from));
 
@@ -1418,12 +1462,18 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 "tx_lock is confirmed and pays the agreed Taproot address",
                 Self::lock_txid(rec),
             ),
-            (Role::Z, "BtcRedeemed") => rec.log(
-                "local",
-                "swap_complete",
-                format!("Swap complete. {} is in Z's wallet", btc_str(params.btc_amount - params.btc_fee)),
-                None,
-            ),
+            (Role::Z, "BtcRedeemed") => {
+                let got = params.btc_amount - params.btc_fee;
+                let label = match &rec.payout_to {
+                    None => format!("Swap complete. {} is in Z's wallet", btc_str(got)),
+                    Some(to) => format!(
+                        "Swap complete. {} went to {}, the payout address given for this swap",
+                        coin_str(got, params.coin.ticker()),
+                        crate::route::short_address(to)
+                    ),
+                };
+                rec.log("local", "swap_complete", label, None)
+            }
             (Role::Z, "ZecReclaiming") => {
                 rec.peer_learned = true;
                 rec.log(

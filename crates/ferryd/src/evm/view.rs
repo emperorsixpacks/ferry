@@ -138,6 +138,9 @@ pub struct EvmSwapView {
     pub route: Option<String>,
     /// B taker: the shielded address our sweep pays (null: our own wallet).
     pub sweep_to: Option<String>,
+    /// Z taker: the payout address given as `payout_to`, the lock's claimer (null: our own
+    /// account). `counter.claimer` shows the same address once the terms are agreed.
+    pub payout_to: Option<String>,
     pub counter: SwapCounter,
 }
 
@@ -249,6 +252,7 @@ pub fn swap_view(rec: &EvmRecord) -> EvmSwapView {
         watchtower: rec.watchtower.clone(),
         route: rec.route.clone(),
         sweep_to: rec.sweep_to.clone(),
+        payout_to: rec.payout_to.clone(),
         counter: SwapCounter {
             kind: "evm",
             chain_id: p.chain_id,

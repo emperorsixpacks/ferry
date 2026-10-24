@@ -68,7 +68,9 @@ How it is checked:
 
 1. **Setup** (peer messages `Propose` and `Accept`, with their own transcript domain). Each side
    sends its DLEQ-proven share points, a nonce, an ECDH key and its EVM account: Z's `claimer`
-   and B's `refunder`. The terms add the chain id, the FerryLock address, the token, `amount`,
+   and B's `refunder`. Z's claimer is its own account, or the payout address its user named for
+   this swap (`payout_to`, [API.md](API.md#payout-address-payout_to)); either way the claim and
+   the punish pay it, and Z's own account sends the claim. Z's check in step 3 covers it. The terms add the chain id, the FerryLock address, the token, `amount`,
    absolute `t1` and `t2`, both Δ margins, the confirmation targets and `maxTip`. The salt comes
    from the session id, so both sides know the swap id before anything is on chain.
 2. **Lock.** B approves the token and calls `lock`. ferryd answers the proposal (or the UI's

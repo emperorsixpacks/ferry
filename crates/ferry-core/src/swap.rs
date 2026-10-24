@@ -93,9 +93,34 @@ impl Proposal {
         params: SwapParams,
         btc_address: Address,
     ) -> Result<(Proposal, Envelope), Error> {
+        Proposal::with_payout(rng, session_id, role, params, btc_address, None)
+    }
+
+    /// [`Proposal::new`], where Z may name `payout`: the address tx_redeem pays instead of
+    /// `btc_address`, which keeps tx_punish. It goes to the maker in the Propose (as
+    /// `Setup::redeem_address`), so it is in the transcript, and B's redeem signature commits to
+    /// it: once negotiated, nobody can change where the redeem pays. Checked with
+    /// [`check_payout_address`]; B can't name one.
+    pub fn with_payout<R: RngCore + CryptoRng>(
+        rng: &mut R,
+        session_id: [u8; 32],
+        role: Role,
+        params: SwapParams,
+        btc_address: Address,
+        payout: Option<Address>,
+    ) -> Result<(Proposal, Envelope), Error> {
         params.validate()?;
         check_address(&btc_address, &params, role)?;
-        let me = LocalKeys::generate(rng, &session_id, role, btc_address);
+        if let Some(payout) = &payout {
+            if role != Role::Z {
+                return Err(Error::InvalidPayout(
+                    "only Z names a payout address (B's sweep destination is a Zcash matter)",
+                ));
+            }
+            check_payout_address(payout, &params)?;
+        }
+        let mut me = LocalKeys::generate(rng, &session_id, role, btc_address);
+        me.setup.redeem_address = payout.map(Address::into_unchecked);
         let mut transcript = Transcript::new(&session_id);
         let message = Message::Propose {
             params: params.clone(),
@@ -181,6 +206,11 @@ pub fn accept<R: RngCore + CryptoRng>(
         params.network,
         setup.clone(),
     )?;
+    // A Z taker's payout address: we will sign a tx_redeem paying it, so it must be one the
+    // templates can pay (the type and dust rules every template output meets).
+    if let Some(payout) = &peer.redeem_address {
+        check_payout_address(payout, params)?;
+    }
     transcript.absorb(&env.message);
     let me = LocalKeys::generate(rng, &env.session_id, role, btc_address);
     let mut session = Session {
@@ -207,6 +237,41 @@ fn check_address(addr: &Address, params: &SwapParams, role: Role) -> Result<(), 
             reason: "btc address network",
         })
     }
+}
+
+/// Whether `addr`'s output type can take a swap payout: one every node relays and that only
+/// its owner can spend. P2TR, P2WPKH and P2WSH (Taproot and segwit), and the legacy P2PKH and
+/// P2SH, which the presigned templates pay just as well (each output is held to its own type's
+/// dust floor). Refused: a pay-to-anchor output or a witness version with no meaning yet, which
+/// anyone could spend.
+pub fn check_payout_type(addr: &Address) -> Result<(), Error> {
+    use ferry_btc::bitcoin::AddressType::{P2pkh, P2sh, P2tr, P2wpkh, P2wsh};
+    match addr.address_type() {
+        Some(P2tr | P2wpkh | P2wsh | P2pkh | P2sh) => Ok(()),
+        _ => Err(Error::InvalidPayout(
+            "not a Taproot, segwit, P2PKH or P2SH address (anyone could spend that output)",
+        )),
+    }
+}
+
+/// [`check_payout_type`], plus: an address of the swap's network, and tx_redeem's output
+/// (`btc_amount − btc_fee`) clears that type's dust floor on the swap's coin.
+pub fn check_payout_address(addr: &Address, params: &SwapParams) -> Result<(), Error> {
+    if !addr.as_unchecked().is_valid_for_network(params.network) {
+        return Err(Error::InvalidPayout("an address of another network"));
+    }
+    check_payout_type(addr)?;
+    let dust = params.coin.dust(&addr.script_pubkey());
+    if params
+        .btc_amount()
+        .checked_sub(params.btc_fee())
+        .is_none_or(|v| v < dust)
+    {
+        return Err(Error::InvalidPayout(
+            "the redeem would pay it less than the dust floor of its type",
+        ));
+    }
+    Ok(())
 }
 
 /// A running swap in either role.

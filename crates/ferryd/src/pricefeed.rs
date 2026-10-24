@@ -744,6 +744,7 @@ mod tests {
             liquidity: None,
             paused: false,
             quote_key: None,
+            features: vec![],
         }
     }
 

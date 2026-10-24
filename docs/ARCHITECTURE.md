@@ -90,6 +90,26 @@ state machine is a pure `step(route, observation)`, persisted one JSON file per 
 [PROTOCOL.md](PROTOCOL.md#routes); `infra/route-demo.sh` runs three routes on regtest Bitcoin and
 anvil with one mock Zcash chain.
 
+## Cross-chain settlement with NEAR Intents
+
+Ferry does the private hop, shielded ZEC ⇄ BTC, LTC or an ERC-20 (USDC, WETH), as an atomic
+swap. NEAR Intents gives reach: its 1Click API delivers 205 assets on 37 chains (checked against
+the live API on 2026-10-20). The two meet only on the coin side:
+
+- **Out.** A Z taker names a 1Click deposit address on its coin's chain as `payout_to`
+  ([API.md](API.md#payout-address-payout_to)), and the swap's redeem (EVM: claim) pays it directly:
+  shielded ZEC → BTC, say, then → any asset NEAR delivers. The address is fixed at negotiation
+  (`Setup.redeem_address` in the tx_redeem template, or `claimer` in the FerryLock terms). A route
+  can end the same way: leg 2 takes the route's `payout_to`.
+- **In.** The coin side can be funded from NEAR Intents (it accepts BTC, LTC, USDC, WETH and ETH
+  deposits on their chains and pays out to an address the user names, such as their B daemon's).
+- **Never ZEC.** 1Click's ZEC deposit address is transparent, so Ferry never sends ZEC into NEAR
+  Intents; the ZEC stays in the shielded pool from lock to sweep.
+
+What the user trusts on the NEAR leg (custody during settlement, its bridges, a public trail) is
+in [THREAT-MODEL.md](THREAT-MODEL.md#paying-out-to-another-address-payout_to-near-intents). The
+web side (1Click proxy, quotes, progress) is the UI server's; ferryd itself never calls NEAR.
+
 ## Firm quotes
 
 **What it is.** You say what you want ("sell 0.7 ZEC for BTC"). The partners your Ferry server lists

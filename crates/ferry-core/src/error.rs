@@ -19,6 +19,8 @@ pub enum Error {
     Policy(String),
     #[error("invalid setup from {role:?}: {reason}")]
     InvalidSetup { role: Role, reason: &'static str },
+    #[error("payout address refused: {0}")]
+    InvalidPayout(&'static str),
     #[error("DLEQ proof from {0:?} rejected: {1:?}")]
     Dleq(Role, ferry_dleq::VerifyError),
     #[error("MuSig2 key path: {0}")]

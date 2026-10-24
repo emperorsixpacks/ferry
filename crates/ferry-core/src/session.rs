@@ -177,18 +177,33 @@ impl Session {
         }
     }
 
-    /// Transaction templates for a lock at `outpoint`.
+    /// Where tx_redeem pays: the payout address Z named for this swap (`Setup::redeem_address`),
+    /// or else Z's own address. Both parties derive it from the negotiated setups, and B's redeem
+    /// signature commits to it.
+    pub fn redeem_address(&self) -> Address {
+        let named = if self.role() == Role::Z {
+            self.me.setup.redeem_address.clone().map(|a| {
+                a.require_network(self.params.network)
+                    .expect("own redeem address checked at setup")
+            })
+        } else {
+            self.peer.redeem_address.clone()
+        };
+        named.unwrap_or_else(|| self.address(Role::Z))
+    }
+
+    /// Transaction templates for a lock at `outpoint`. tx_redeem pays [`Session::redeem_address`];
+    /// tx_punish always pays Z's own address, and tx_refund B's.
     pub fn txs(&self, outpoint: OutPoint) -> Result<SwapTxs, Error> {
-        let z = self.address(Role::Z).script_pubkey();
         Ok(SwapTxs::new(
             self.params.coin,
             self.scripts(),
             outpoint,
             self.params.btc_amount(),
             self.params.btc_fee(),
-            z.clone(),
+            self.redeem_address().script_pubkey(),
             self.address(Role::B).script_pubkey(),
-            z,
+            self.address(Role::Z).script_pubkey(),
         )?)
     }
 }

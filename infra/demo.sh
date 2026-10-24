@@ -94,10 +94,10 @@ CHAIN=ltc (or infra/demo-ltc.sh) runs it against litecoind instead of bitcoind.
                          start Z ($Z_NAME, :$Z_PORT) and B ($B_NAME, :$B_PORT), the maker (MAKER=b: B,
                          MAKER=z: Z) at $RATE sat/ZEC, fund B's BTC wallet and start the block producer.
                          Starts from a fresh chain.
-  infra/demo.sh happy | refund | punish
+  infra/demo.sh happy | payout | refund | punish
                          run one story through the API: the taker ($TAKER now) proposes to the maker
-  infra/demo.sh test     up, happy, refund, punish, down; exits non-zero if any story fails
-                         (MAKER=z infra/demo.sh test: the same three stories buying ZEC)
+  infra/demo.sh test     up, happy, payout, refund, punish, down; exits non-zero if any story fails
+                         (MAKER=z infra/demo.sh test: happy, refund and punish buying ZEC)
   infra/demo.sh down     stop the daemons, the block producer and bitcoind (logs stay in $STATE/logs)
   infra/demo.sh status   chain height, daemon status and swaps at a glance
   infra/demo.sh logs [z|b|miner|bitcoind|zec-miner|zebra|zaino]   follow a log
@@ -119,6 +119,8 @@ The three stories (the same whoever takes; with MAKER=z, B starts them from the 
   refund  Stall Z once its ZEC is locked. B cancels after T1 and refunds (revealing b);
           Z wakes when tx_cancel confirms, extracts b and reclaims its ZEC.
   punish  Stall B after it locks BTC. Z cancels after T1, B never refunds, Z punishes after T2.
+  payout  (Z takes) A happy swap whose redeem pays payout_to, a segwit address of a third
+          wallet, instead of Z's own wallet: the locked amount less the redeem fee.
   While a party is stalled the block producer mines every ${FAST_BLOCK_SECS}s instead of ${BLOCK_SECS}s.
 
 The same swap through the API (the taker's; with MAKER=z use B's port and FERRY_B_TOKEN):
@@ -690,13 +692,44 @@ story_punish() {
   log "punish: Z holds the $TICKER ($(($(balance z btc_sat) - z0)) sat); its ZEC stays in the joint note, B's penalty"
 }
 
+story_payout() {
+  [ "$TAKER" = z ] || die "payout needs Z as the taker (MAKER=b): payout_to is Z's"
+  log "--- payout: Z sells ZEC with payout_to, a segwit address of a third wallet; the redeem pays it, not Z"
+  local z0 id sat fee to got out code
+  rpc "" createwallet '["payee"]' >/dev/null 2>&1 || rpc "" loadwallet '["payee"]' >/dev/null 2>&1 || true
+  to=$(rpc payee getnewaddress '["", "bech32"]' | result)
+  # Refused before the maker is asked: an address of another network (mainnet).
+  out=$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $(cat "$STATE/z/api-token")" \
+    -H 'content-type: application/json' \
+    -d "{\"maker\":\"http://127.0.0.1:1\",\"zec_zat\":$SWAP_ZAT,\"payout_to\":\"bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq\"}" \
+    "http://127.0.0.1:$Z_PORT/api/swaps")
+  [ "$out" = 400 ] || die "a mainnet payout_to got $out, not 400"
+  z0=$(balance z btc_sat)
+  out=$(curl -s -w '\n%{http_code}' -H "authorization: Bearer $(cat "$STATE/z/api-token")" \
+    -H 'content-type: application/json' \
+    -d "{\"maker\":\"$MAKER_URL\",\"zec_zat\":$SWAP_ZAT,\"payout_to\":\"$to\"}" "http://127.0.0.1:$Z_PORT/api/swaps")
+  code=$(echo "$out" | tail -n 1)
+  [ "$code" = 201 ] || die "the payout swap did not start ($code): $(echo "$out" | head -n 1)"
+  id=$(echo "$out" | head -n 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])')
+  log "swap $id pays $to"
+  [ "$(swap_field z 's["payout_to"]')" = "$to" ] || die "the swap view does not show payout_to"
+  wait_for 300 "both sides to finish" 'outcome_is z swapped && outcome_is b swapped'
+  sat=$(swap_field z 's["amounts"]["btc_sat"]')
+  fee=$(fee_sat z)
+  wait_for 60 "the payee's $TICKER" "[ \"\$(rpc payee getreceivedbyaddress '[\"$to\", 0]' | result | python3 -c 'import sys; print(round(float(sys.stdin.read()) * 1e8))')\" = \"$((sat - fee))\" ]"
+  got=$(rpc payee getreceivedbyaddress "[\"$to\", 0]" | result | python3 -c 'import sys; print(round(float(sys.stdin.read()) * 1e8))')
+  [ "$(balance z btc_sat)" = "$z0" ] || die "Z's own wallet changed: $z0 -> $(balance z btc_sat)"
+  log "payout: the redeem paid $got sat of $TICKER to $to (the locked amount less the redeem fee); Z's own wallet unchanged"
+}
+
 cmd_test() {
   trap cmd_down EXIT
   cmd_up
   story_happy
+  if [ "$TAKER" = z ]; then story_payout; fi
   story_refund
   story_punish
-  log "all three stories passed (MAKER=$MAKER: $(who "$TAKER") took from $(who "$MAKER"))"
+  log "all stories passed (MAKER=$MAKER: $(who "$TAKER") took from $(who "$MAKER"))"
 }
 
 case "${1:-help}" in
@@ -706,6 +739,7 @@ case "${1:-help}" in
   logs) cmd_logs "${2:-z}" ;;
   mine) cmd_mine "${2:-1}" ;;
   happy) story_happy ;;
+  payout) story_payout ;;
   refund) story_refund ;;
   punish) story_punish ;;
   test) cmd_test ;;
