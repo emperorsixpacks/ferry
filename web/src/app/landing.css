@@ -1,252 +1,29 @@
 /* ======================================================================
-   The landing page (/): the Shield Gate. Deep night, neon glows in
-   Zcash gold, violet, cyan and magenta, and each coin in its own colour.
-   The app (/app) keeps its light, neutral look; none of this applies
-   there. Every animation here pauses under .lp-paused (off screen or a
-   hidden tab) and stops under prefers-reduced-motion.
-   Text on the night: white, #C3C9EA (muted) and #9AA2D0 (quiet), all
-   well over AA on --lp-night.
+   The landing page (/): the Shield Gate on the app's own white. Ink,
+   greys and white, with Zcash gold only at the gate's core; coins and
+   chains keep their colours inside their marks. The small loops here
+   are slow, pause under .lp-paused (off screen or a hidden tab) and
+   stop under prefers-reduced-motion.
    ====================================================================== */
 
-.lp {
-  --lp-night: #070921;
-  --lp-night-2: #0b0e2d;
-  --lp-gold: #f4b728;
-  --lp-gold-hi: #ffe7a3;
-  --lp-violet: #8b5cf6;
-  --lp-cyan: #22d3ee;
-  --lp-magenta: #e879f9;
-  --lp-muted: #c3c9ea;
-  --lp-quiet: #9aa2d0;
-  background: var(--lp-night);
-  color: #fff;
-}
-.lp ::selection {
-  background: rgb(244 183 40 / 0.35);
-}
-.lp :where(a, button, [tabindex]):focus-visible {
-  outline: 2px solid var(--lp-gold-hi);
-  outline-offset: 3px;
-}
-
-/* --- backgrounds ------------------------------------------------------- */
-.lp-hero {
-  background:
-    radial-gradient(55% 45% at 50% 78%, rgb(139 92 246 / 0.2), transparent 70%),
-    radial-gradient(30% 26% at 50% 76%, rgb(244 183 40 / 0.14), transparent 70%),
-    linear-gradient(180deg, #05061a 0%, #070921 55%, #0a0c2a 100%);
-}
-@media (max-width: 639px) {
-  .lp-hero {
-    background:
-      radial-gradient(80% 30% at 50% 20%, rgb(139 92 246 / 0.24), transparent 70%),
-      radial-gradient(50% 18% at 50% 20%, rgb(244 183 40 / 0.16), transparent 70%),
-      linear-gradient(180deg, #05061a 0%, #070921 55%, #0a0c2a 100%);
-  }
-}
-/* a faint grid, fading out from the middle */
-.lp-grid {
-  background-image:
-    linear-gradient(rgb(139 92 246 / 0.07) 1px, transparent 1px),
-    linear-gradient(90deg, rgb(139 92 246 / 0.07) 1px, transparent 1px);
-  background-size: 56px 56px;
-  mask-image: radial-gradient(70% 60% at 50% 55%, #000 20%, transparent 75%);
-}
-/* soft glows that drift with the scroll */
-.lp-blob {
-  position: absolute;
-  border-radius: 9999px;
-  filter: blur(80px);
-  opacity: 0.5;
-  pointer-events: none;
-  transform: translate3d(0, var(--lp-py, 0px), 0);
-}
-[data-parallax] {
-  transform: translate3d(0, var(--lp-py, 0px), 0);
-  will-change: transform;
-}
-/* keeps the hero's text clear of the light behind it */
-.lp-scrim {
-  position: relative;
-  isolation: isolate;
-}
-.lp-scrim::before {
-  content: "";
-  position: absolute;
-  inset: -8% -18% -12%;
-  z-index: -1;
-  background: radial-gradient(closest-side, rgb(5 6 26 / 0.86), rgb(5 6 26 / 0.55) 62%, transparent);
-  pointer-events: none;
-}
-
-/* --- headline glow ------------------------------------------------------ */
-.lp-glow-text {
-  text-shadow:
-    0 0 40px rgb(139 92 246 / 0.35),
-    0 0 80px rgb(244 183 40 / 0.18);
-}
-.lp-gold-text {
-  background: linear-gradient(100deg, #fff3cf 0%, #ffd56a 35%, #f4b728 60%, #ffe7a3 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
-/* --- buttons ------------------------------------------------------------ */
-.lp-cta {
-  position: relative;
-  overflow: hidden;
-  isolation: isolate;
-  background: linear-gradient(180deg, #ffdc7a 0%, #f4b728 58%, #e2a218 100%);
-  color: #1b1404;
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.6),
-    0 0 0 1px rgb(255 231 163 / 0.55),
-    0 10px 30px -8px rgb(244 183 40 / 0.75),
-    0 0 70px -14px rgb(244 183 40 / 0.85);
-  transition:
-    box-shadow 0.25s ease,
-    transform 0.25s ease;
-}
-.lp-cta:hover {
-  transform: translateY(-1px);
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.7),
-    0 0 0 1px rgb(255 231 163 / 0.8),
-    0 14px 36px -8px rgb(244 183 40 / 0.9),
-    0 0 90px -8px rgb(244 183 40 / 0.95);
-}
-/* a shine sweeping across now and then */
-.lp-cta::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background: linear-gradient(105deg, transparent 35%, rgb(255 255 255 / 0.55) 50%, transparent 65%);
-  transform: translateX(-120%);
-  animation: lp-shine 4.5s ease-in-out infinite;
-}
-@keyframes lp-shine {
-  0%,
-  55% {
-    transform: translateX(-120%);
-  }
-  80%,
-  100% {
-    transform: translateX(120%);
-  }
-}
-.lp-ghost {
-  border: 1px solid rgb(255 255 255 / 0.2);
-  background: rgb(255 255 255 / 0.04);
-  color: #fff;
-  transition:
-    border-color 0.25s ease,
-    box-shadow 0.25s ease,
-    background-color 0.25s ease;
-}
-.lp-ghost:hover {
-  border-color: rgb(139 92 246 / 0.7);
-  background: rgb(139 92 246 / 0.1);
-  box-shadow: 0 0 40px -8px rgb(139 92 246 / 0.7);
-}
-
-/* --- the live dot --------------------------------------------------------- */
-.lp-live {
-  position: relative;
-}
-.lp-live::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: inherit;
-  animation: lp-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
-}
-@keyframes lp-ping {
-  75%,
-  100% {
-    transform: scale(2.6);
-    opacity: 0;
-  }
-}
-
-/* --- glowing cards -------------------------------------------------------- */
+/* --- cards lift a little under the pointer ------------------------------ */
 .lp-card {
-  --c1: var(--lp-gold);
-  --c2: var(--lp-violet);
-  position: relative;
-  border-radius: 28px;
-  background:
-    radial-gradient(120% 80% at 0% 0%, color-mix(in srgb, var(--c1) 14%, transparent), transparent 55%),
-    linear-gradient(180deg, rgb(255 255 255 / 0.06), rgb(255 255 255 / 0.02));
   transition:
-    transform 0.4s cubic-bezier(0.16, 1, 0.3, 1),
-    box-shadow 0.4s ease;
-  box-shadow: 0 30px 80px -40px color-mix(in srgb, var(--c1) 60%, transparent);
-}
-.lp-card::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 1px;
-  background: linear-gradient(140deg, var(--c1), rgb(255 255 255 / 0.08) 38%, rgb(255 255 255 / 0.08) 62%, var(--c2));
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  pointer-events: none;
+    transform 0.35s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 0.35s ease;
 }
 .lp-card:hover {
-  transform: translateY(-6px);
-  box-shadow:
-    0 40px 90px -36px color-mix(in srgb, var(--c1) 80%, transparent),
-    0 0 60px -20px color-mix(in srgb, var(--c2) 70%, transparent);
+  transform: translateY(-3px);
+  box-shadow: 0 18px 40px -24px rgb(24 24 27 / 0.25);
 }
 
-/* the swap card's frame: a ring of light turning round it */
-@property --lp-turn {
-  syntax: "<angle>";
-  initial-value: 0deg;
-  inherits: false;
-}
-.lp-frame {
-  position: relative;
-  border-radius: 34px;
-  padding: 2px;
-  isolation: isolate;
-}
-.lp-frame::before,
-.lp-frame::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  z-index: -1;
-  background: conic-gradient(from var(--lp-turn), var(--lp-gold), var(--lp-magenta), var(--lp-violet), var(--lp-cyan), var(--lp-gold));
-  animation: lp-turn 6s linear infinite;
-}
-.lp-frame::after {
-  inset: -14px;
-  filter: blur(36px);
-  opacity: 0.55;
-}
-@keyframes lp-turn {
-  to {
-    --lp-turn: 360deg;
-  }
-}
-
-/* --- the networks strip ---------------------------------------------------- */
+/* --- the networks row ------------------------------------------------------- */
 .lp-marquee {
   display: flex;
   width: max-content;
-  animation: lp-marquee 48s linear infinite;
+  animation: lp-marquee 60s linear infinite;
 }
-.lp-marquee-wrap:hover .lp-marquee,
-.lp-marquee-wrap:focus-within .lp-marquee {
+.lp-marquee-wrap:hover .lp-marquee {
   animation-play-state: paused;
 }
 @keyframes lp-marquee {
@@ -254,36 +31,32 @@
     transform: translateX(-50%);
   }
 }
+/* a chain's colour only as a faint ring and tint under the pointer */
 .lp-chain {
-  --c: var(--lp-gold);
+  --c: #18181b;
   transition:
-    border-color 0.3s ease,
-    box-shadow 0.3s ease,
-    background-color 0.3s ease,
-    transform 0.3s ease;
+    border-color 0.25s ease,
+    box-shadow 0.25s ease,
+    background-color 0.25s ease;
 }
-.lp-chain:hover,
-.lp-chain:focus-visible {
-  border-color: color-mix(in srgb, var(--c) 80%, white);
-  background: color-mix(in srgb, var(--c) 14%, transparent);
-  box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--c) 60%, transparent),
-    0 0 50px -6px var(--c);
-  transform: translateY(-3px);
+.lp-chain:hover {
+  border-color: color-mix(in srgb, var(--c) 35%, white);
+  background-color: color-mix(in srgb, var(--c) 4%, white);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 12%, transparent);
 }
 
-/* --- the three proof cards' icons ------------------------------------------ */
-/* private: a shield drawing itself, ciphertext inside */
+/* --- the proof cards' loops --------------------------------------------------- */
+/* private: the shield outlines itself */
 .lp-shield-draw {
   stroke-dasharray: 100;
-  animation: lp-draw 3.6s ease-in-out infinite;
+  animation: lp-draw 6s ease-in-out infinite;
 }
 @keyframes lp-draw {
   0% {
     stroke-dashoffset: 100;
   }
-  45%,
-  80% {
+  40%,
+  85% {
     stroke-dashoffset: 0;
   }
   100% {
@@ -296,65 +69,63 @@
   position: absolute;
   top: 50%;
   left: 0;
-  margin-top: -18px;
-  animation: lp-swap-a 3.2s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+  margin-top: -17px;
+  animation: lp-swap-a 5s cubic-bezier(0.65, 0, 0.35, 1) infinite;
 }
 .lp-swap-b {
-  left: calc(100% - 36px);
+  left: calc(100% - 34px);
   animation-name: lp-swap-b;
 }
 @keyframes lp-swap-a {
   0%,
-  20% {
+  25% {
     left: 0;
     transform: translateY(0);
   }
   50% {
-    transform: translateY(-26px);
+    transform: translateY(-22px);
   }
-  80%,
+  75%,
   100% {
-    left: calc(100% - 36px);
+    left: calc(100% - 34px);
     transform: translateY(0);
   }
 }
 @keyframes lp-swap-b {
   0%,
-  20% {
-    left: calc(100% - 36px);
+  25% {
+    left: calc(100% - 34px);
     transform: translateY(0);
   }
   50% {
-    transform: translateY(26px);
+    transform: translateY(22px);
   }
-  80%,
+  75%,
   100% {
     left: 0;
     transform: translateY(0);
   }
 }
-.lp-lock-pulse {
-  animation: lp-lock 3.2s ease-in-out infinite;
+.lp-lock {
+  animation: lp-lock 5s ease-in-out infinite;
 }
 @keyframes lp-lock {
   0%,
-  15%,
-  85%,
+  20%,
+  80%,
   100% {
-    box-shadow: 0 0 0 0 rgb(34 211 238 / 0);
     transform: scale(1);
   }
   50% {
-    box-shadow: 0 0 34px 4px rgb(34 211 238 / 0.55);
-    transform: scale(1.12);
+    transform: scale(1.08);
   }
 }
-/* any chain: marks circling shielded ZEC */
+/* any chain: coins circling shielded ZEC */
 .lp-spin {
-  animation: lp-spin 14s linear infinite;
+  animation: lp-spin 30s linear infinite;
 }
 .lp-spin-rev {
-  animation: lp-spin 14s linear infinite reverse;
+  animation: lp-spin 30s linear infinite reverse;
 }
 @keyframes lp-spin {
   to {
@@ -362,83 +133,66 @@
   }
 }
 
-/* --- how it works ---------------------------------------------------------- */
-/* 1. pick: the coin in the pill keeps changing */
+/* --- how it works ------------------------------------------------------------- */
+/* pick: the coin in the pill changes */
 .lp-pick > * {
   position: absolute;
   inset: 0;
   opacity: 0;
-  animation: lp-pick 8s infinite;
+  animation: lp-pick 12s infinite;
 }
 .lp-pick > :nth-child(2) {
-  animation-delay: 2s;
+  animation-delay: 3s;
 }
 .lp-pick > :nth-child(3) {
-  animation-delay: 4s;
+  animation-delay: 6s;
 }
 .lp-pick > :nth-child(4) {
-  animation-delay: 6s;
+  animation-delay: 9s;
 }
 @keyframes lp-pick {
   0% {
     opacity: 0;
-    transform: translateY(10px) scale(0.9);
+    transform: translateY(6px);
   }
-  5%,
-  22% {
+  4%,
+  23% {
     opacity: 1;
     transform: none;
   }
   27%,
   100% {
     opacity: 0;
-    transform: translateY(-10px) scale(0.9);
+    transform: translateY(-6px);
   }
 }
-/* 2. lock: the shackle closes, the frame lights */
+/* lock: the shackle closes */
 .lp-shackle {
-  animation: lp-shackle 3.4s ease-in-out infinite;
-  transform-origin: 50% 100%;
+  animation: lp-shackle 5s ease-in-out infinite;
 }
 @keyframes lp-shackle {
   0%,
   20% {
-    transform: translateY(-7px);
+    transform: translateY(-6px);
   }
   40%,
   85% {
     transform: translateY(0);
   }
   100% {
-    transform: translateY(-7px);
+    transform: translateY(-6px);
   }
 }
-.lp-lockbox {
-  animation: lp-lockbox 3.4s ease-in-out infinite;
-}
-@keyframes lp-lockbox {
-  0%,
-  30% {
-    box-shadow: 0 0 0 0 rgb(244 183 40 / 0);
-  }
-  45%,
-  80% {
-    box-shadow: 0 0 40px 2px rgb(244 183 40 / 0.55);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgb(244 183 40 / 0);
-  }
-}
-/* 3. receive: the coin drops in, a tick appears */
+/* receive: the coin drops in, a tick appears */
 .lp-drop {
-  animation: lp-drop 3s cubic-bezier(0.3, 1.4, 0.5, 1) infinite;
+  animation: lp-drop 4.5s cubic-bezier(0.3, 1.25, 0.5, 1) infinite;
 }
 @keyframes lp-drop {
   0% {
-    transform: translateY(-46px) scale(0.7);
+    transform: translateY(-36px);
     opacity: 0;
   }
-  30%,
+  28%,
   85% {
     transform: none;
     opacity: 1;
@@ -449,15 +203,15 @@
   }
 }
 .lp-tick {
-  animation: lp-tick 3s ease-out infinite;
+  animation: lp-tick 4.5s ease-out infinite;
 }
 @keyframes lp-tick {
   0%,
-  32% {
+  30% {
     transform: scale(0);
     opacity: 0;
   }
-  42%,
+  40%,
   85% {
     transform: scale(1);
     opacity: 1;
@@ -466,40 +220,21 @@
     opacity: 0;
   }
 }
-/* the line through the steps fills as they scroll by */
+/* the hairline through the steps fills as they scroll by */
 .lp-progress {
   transform-origin: 0 50%;
   transform: scaleX(var(--lp-fill, 0));
 }
 
-/* --- the closing gate -------------------------------------------------------- */
-.lp-hex {
-  clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
-}
-.lp-breathe {
-  animation: lp-breathe 3.2s ease-in-out infinite;
-}
-@keyframes lp-breathe {
-  0%,
-  100% {
-    transform: scale(1);
-    opacity: 0.75;
-  }
-  50% {
-    transform: scale(1.06);
-    opacity: 1;
-  }
-}
-
-/* --- entrances: up out of depth, sharpening ------------------------------------ */
+/* --- entrances: up into place, sharpening --------------------------------------- */
 .lp-reveal [data-reveal] {
   opacity: 0;
-  filter: blur(10px);
-  transform: translate3d(0, 56px, 0) scale(0.96);
+  filter: blur(6px);
+  transform: translate3d(0, 28px, 0);
   transition:
-    opacity 0.9s cubic-bezier(0.16, 1, 0.3, 1),
-    filter 0.9s cubic-bezier(0.16, 1, 0.3, 1),
-    transform 1.1s cubic-bezier(0.16, 1, 0.3, 1);
+    opacity 0.8s cubic-bezier(0.16, 1, 0.3, 1),
+    filter 0.8s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.9s cubic-bezier(0.16, 1, 0.3, 1);
   transition-delay: var(--lp-delay, 0ms);
 }
 .lp-reveal [data-reveal][data-shown] {
@@ -508,7 +243,7 @@
   transform: none;
 }
 
-/* --- pausing and reduced motion ---------------------------------------------------- */
+/* --- pausing and reduced motion -------------------------------------------------- */
 .lp-paused,
 .lp-paused *,
 .lp-paused *::before,
