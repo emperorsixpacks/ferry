@@ -19,7 +19,7 @@ import { Popover } from "./ui/popover";
 const nav = [
   { to: "/app", label: "Swap", match: (p: string) => p === "/app" || p.startsWith("/app/swap/") || p.startsWith("/app/route/") || p.startsWith("/app/near/") },
   { to: "/app/activity", label: "Activity", match: (p: string) => p === "/app/activity" },
-  { to: "/help", label: "Help", match: (p: string) => p === "/help" || p === "/how-it-works" || p === "/safety" },
+  { to: "/help", label: "Help", match: (p: string) => p === "/help" || p === "/how-it-works" || p === "/safety" || p === "/privacy" },
 ];
 
 export const REPO_URL = "https://github.com/JemIIahh/ferry";
@@ -246,6 +246,7 @@ function OfflineBanner({ error }: { error: string | null }) {
 // the footer's pages (the landing's closing footer shows the same ones)
 export const FOOTER_LINKS: [string, string][] = [
   ["Help", "/help"],
+  ["What the world sees", "/privacy"],
   ["Safety details", "/safety"],
   ["How it works in depth", "/how-it-works"],
   ["For developers", "/inspect"],
