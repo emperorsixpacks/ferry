@@ -15,7 +15,12 @@
 // A Ferry payout into a deposit address (the mock ferryd's payout_to) arrives through deposit().
 // What NEAR Intents delivers, or refunds, goes to onDeliver({asset, address, amount}), so the mock
 // world can credit its own parties.
+//
+// `node mock/oneclick.mjs` runs it on its own (MOCK_NEAR_PORT, default 7150), for real daemons: a
+// script that sees a real payout land at a deposit address tells it with POST /_mock/deposit.
 import { createPrivateKey, createPublicKey, createHash, randomBytes, sign } from "node:crypto";
+import http from "node:http";
+import { pathToFileURL } from "node:url";
 import { addressProblem, base58, ed25519Key, quoteMessage } from "../server/near.mjs";
 
 // [assetId, symbol, blockchain, decimals, price]; ZEC at what the mock makers' BTC rates make it
@@ -262,4 +267,25 @@ export function mockOneClick({ speed = 1, onDeliver = () => {}, now = Date.now }
   }
 
   return { handler, deposit, status, tokens: TOKENS, publicKey: MOCK_ONE_CLICK_PUBKEY };
+}
+
+// on its own: `node mock/oneclick.mjs`
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const port = Number(process.env.MOCK_NEAR_PORT ?? 7150);
+  const one = mockOneClick({ speed: Number(process.env.MOCK_NEAR_SPEED ?? 1) || 1 });
+  const readBody = (req) =>
+    new Promise((ok) => {
+      let data = "";
+      req.on("data", (c) => (data += c));
+      req.on("end", () => {
+        try {
+          ok(data ? JSON.parse(data) : {});
+        } catch {
+          ok(null);
+        }
+      });
+    });
+  http
+    .createServer((req, res) => one.handler(req, res, readBody).catch(() => !res.headersSent && (res.writeHead(500), res.end())))
+    .listen(port, "127.0.0.1", () => console.log(`mock 1Click (NEAR Intents) on http://127.0.0.1:${port}  key ${one.publicKey}`));
 }
