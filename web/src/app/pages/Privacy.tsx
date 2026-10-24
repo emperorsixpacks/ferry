@@ -258,7 +258,7 @@ const COLS: Col[] = [
         <Bullets
           items={[
             "1Click makes a deposit address for each quote. The deposit, the settlement on NEAR and the payout are all public, and the deposit address ties the payout to its destination.",
-            "NEAR Intents holds the coin while it settles, and the conversion is not atomic: you rely on it to deliver or refund.",
+            "Settlement on NEAR is atomic, but the path around it is not: NEAR Intents holds your coin from the deposit until it pays out, and you rely on it to deliver or refund.",
             "Its ZEC deposit address is transparent (we checked the live 1Click API on 2026-10-20). ZEC sent there would leave the shielded pool with its amount on show, so Ferry never sends ZEC to NEAR Intents.",
           ]}
         />
