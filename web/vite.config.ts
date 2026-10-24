@@ -1,5 +1,7 @@
 import { defineConfig, type ProxyOptions } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+import path from "node:path";
 
 // The UI talks to two ferryd daemons. In dev and preview they are proxied under /daemon/z and
 // /daemon/b: the proxy adds each daemon's API token (FERRY_Z_TOKEN, FERRY_B_TOKEN; infra/demo.sh
@@ -33,7 +35,8 @@ const proxy = {
 };
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
+  resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
   define: {
     // The maker URL is handed to Z's daemon, so it must be reachable from Z, not from the browser.
     __FERRY_MAKER_URL__: JSON.stringify(process.env.FERRY_MAKER_URL ?? B_URL),

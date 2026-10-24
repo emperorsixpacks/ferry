@@ -1,0 +1,90 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+@import "@fontsource/jetbrains-mono/700.css";
+
+/* ======================================================================
+   Ferry design system, ported from SealPad (Saturn Credit-derived):
+   white canvas, obsidian ink, #FF5100 orange, 0.69px micro-radii,
+   Inter + JetBrains Mono, tiny tracked-out mono labels.
+   ====================================================================== */
+@theme inline {
+  --font-sans: "Inter Variable", "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+  --font-heading: "Inter Variable", "Inter", system-ui, sans-serif;
+
+  --color-brand-50: #fff7ed;
+  --color-brand-100: #ffedd5;
+  --color-brand-200: #ffd7a8;
+  --color-brand-300: #ffb74d;
+  --color-brand-400: #ffa726;
+  --color-brand-500: #ff5100;
+  --color-brand-600: #e84800;
+  --color-brand-700: #c73d00;
+  --color-brand-800: #a02e00;
+  --color-brand-900: #7a2300;
+
+  --color-slate-50: #fcfcfc;
+  --color-slate-100: #f5f5f5;
+  --color-slate-200: #e5e7eb;
+  --color-slate-300: #d1d1d1;
+  --color-slate-400: #9ca3af;
+  --color-slate-500: #686868;
+  --color-slate-600: #4f4f4f;
+  --color-slate-700: #2a2a2a;
+  --color-slate-800: #1f1f1f;
+  --color-slate-900: #181818;
+
+  --color-canvas: #ffffff;
+  --color-cloud: #fcfcfc;
+  --color-surface-soft: #f7f9fb;
+  --color-obsidian: #181818;
+
+  --color-background: #ffffff;
+  --color-foreground: #181818;
+  --color-card: #ffffff;
+  --color-card-foreground: #181818;
+  --color-primary: #ff5100;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #f5f5f5;
+  --color-secondary-foreground: #181818;
+  --color-muted: #f7f9fb;
+  --color-muted-foreground: #686868;
+  --color-destructive: #dc2626;
+  --color-border: #e5e7eb;
+  --color-input: #e5e7eb;
+  --color-ring: #ff5100;
+
+  --radius-sm: 0.69px;
+  --radius-md: 0.69px;
+  --radius-lg: 0.69px;
+  --radius-xl: 0.69px;
+  --radius-2xl: 0.69px;
+  --radius-3xl: 0.69px;
+  --radius: 0.69px;
+}
+
+@layer base {
+  button,
+  [role="button"] {
+    cursor: pointer;
+  }
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+  }
+  body {
+    @apply bg-canvas text-slate-900 font-sans antialiased;
+    font-feature-settings:
+      "ss01" 1,
+      "cv11" 1;
+  }
+}
+
+.font-data {
+  font-family: var(--font-mono);
+  letter-spacing: -0.005em;
+}

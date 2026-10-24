@@ -1,51 +1,51 @@
 1
-00:00:04,004 --> 00:00:09,010
+00:00:04,001 --> 00:00:09,005
 Your side of the swap. You hold shielded ZEC and want bitcoin. No one in between.
 
 2
-00:00:09,010 --> 00:00:15,010
+00:00:09,005 --> 00:00:15,005
 The other side locks their bitcoin first, in a Taproot output.
 
 3
-00:00:15,010 --> 00:00:21,010
+00:00:15,005 --> 00:00:21,005
 Your ZEC goes in shielded, to an address only this swap can open.
 
 4
-00:00:21,010 --> 00:00:27,010
+00:00:21,005 --> 00:00:27,005
 You claim the bitcoin with one signature, and that hands them their key to the ZEC.
 
 5
-00:00:27,010 --> 00:00:33,010
+00:00:27,005 --> 00:00:33,005
 Done. To anyone watching, an ordinary bitcoin payment.
 
 6
-00:00:33,010 --> 00:00:39,514
+00:00:33,005 --> 00:00:39,509
 Underneath, the other side read z from your signature, and with z and b swept the shielded note.
 
 7
-00:00:39,514 --> 00:00:47,519
+00:00:39,509 --> 00:00:47,512
 What each chain saw: on Bitcoin, one-signature Taproot payments; on Zcash, ciphertext. Nothing links them.
 
 8
-00:00:47,519 --> 00:00:50,920
+00:00:47,512 --> 00:00:50,914
 And if the other side vanishes?
 
 9
-00:00:50,920 --> 00:00:56,920
+00:00:50,914 --> 00:00:56,914
 A second swap: bitcoin locked, your ZEC sealed, as before.
 
 10
-00:00:56,920 --> 00:01:00,205
+00:00:56,914 --> 00:00:59,945
 Then silence. The claim never comes.
 
 11
-00:01:00,205 --> 00:01:08,205
+00:00:59,945 --> 00:01:07,945
 The deadline passes and the swap is called off. Both ways back were signed in advance.
 
 12
-00:01:08,205 --> 00:01:15,205
+00:01:07,945 --> 00:01:14,945
 Your ZEC comes back to your shielded wallet. Nobody lost a coin.
 
 13
-00:01:15,205 --> 00:01:22,204
+00:01:14,945 --> 00:01:21,948
 No custodian. ZEC never leaves the shielded pool. And when it succeeds, the Bitcoin side looks like any other payment.

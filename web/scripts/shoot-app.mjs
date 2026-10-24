@@ -1,26 +1,26 @@
-// `pnpm shoot:app`: screenshots of the swap app at / in every state, at 1440 and 1280 wide,
-// against the node mock. Saved into screenshots/app/ (AS=b: B's mirror view, into screenshots/app/b/).
+// `pnpm shoot:app`: every page of the web app at 1440 and 1280, against the node mock, into
+// screenshots/app/. Each story starts from a fresh mock world (POST /api/_mock/reset), so the
+// wallet in every shot matches the story it tells.
 //
-// Z: idle, validation error, in progress (+ details), done (+ details), unwinding, refunded,
-//    settled (B stalls, Z is paid after T2), offline.
-// B: idle, in progress, done, unwinding, refunded, lost (B stalls and is punished).
+//   landing, how-it-works, inspect, app (empty, validation error, with swaps), offline
+//   Z: swap in progress, done; refund (cancelling, refunded); settled (the other side stalls)
+//   B (screenshots/app/b/): in progress, done, lost (B stalls and is punished)
+//
+// `pnpm shoot:app:real` runs the Z happy and refund stories against running ferryd daemons
+// (FERRY_Z_URL, FERRY_B_URL, FERRY_MAKER_URL and tokens from the demo env) into screenshots/app/real/.
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { chromium } from "playwright";
 
-const AS = process.env.AS === "b" ? "b" : "z";
-// --real: against running ferryd daemons (FERRY_Z_URL, FERRY_B_URL, FERRY_MAKER_URL and the
-// tokens from the demo env), into screenshots/app/real/; no offline shot.
 const REAL = process.argv.includes("--real");
 const PORT = process.env.PORT ?? "5191";
-const OUT = new URL(`../screenshots/app/${REAL ? "real/" : ""}${AS === "b" ? "b/" : ""}`, import.meta.url).pathname;
-mkdirSync(OUT, { recursive: true });
+const ROOT = new URL(`../screenshots/app/${REAL ? "real/" : ""}`, import.meta.url).pathname;
+mkdirSync(ROOT + "b", { recursive: true });
 
 const env = REAL
   ? { ...process.env, PORT }
   : { ...process.env, MOCK_SPEED: process.env.MOCK_SPEED ?? "2", MOCK_Z_PORT: "7151", MOCK_B_PORT: "7152", FERRY_Z_URL: "http://127.0.0.1:7151", FERRY_B_URL: "http://127.0.0.1:7152", PORT };
 const MAKER = REAL ? env.FERRY_MAKER_URL ?? env.FERRY_B_URL : "http://127.0.0.1:7152";
-// a second UI whose daemons don't exist, for the offline state
 const deadEnv = { ...process.env, FERRY_Z_URL: "http://127.0.0.1:7159", FERRY_B_URL: "http://127.0.0.1:7158", FERRY_Z_TOKEN: "", FERRY_B_TOKEN: "", PORT: String(Number(PORT) + 1) };
 const procs = [spawn("pnpm", ["exec", "vite"], { env, stdio: "ignore" })];
 if (!REAL) {
@@ -45,101 +45,161 @@ for (const url of REAL ? [BASE] : [BASE, DEAD])
 const browser = await chromium.launch();
 const pages = [];
 for (const width of [1440, 1280]) {
-  const ctx = await browser.newContext({ viewport: { width, height: 900 } });
-  const page = await ctx.newPage();
+  const page = await browser.newPage({ viewport: { width, height: 900 } });
   page.on("console", (m) => m.type() === "error" && !/Failed to load resource/.test(m.text()) && console.log(`[${width}]`, m.text()));
-  await page.goto(BASE + (AS === "b" ? "/?as=b" : "/"));
   pages.push({ width, page });
 }
 const main = pages[0].page;
+let as = "z"; // whose app the pages show
+const each = (fn) => Promise.all(pages.map(({ page }) => fn(page)));
+const goto = (path) => each((p) => p.goto(BASE + path + (as === "b" ? (path.includes("?") ? "&" : "?") + "as=b" : "")));
+
+await main.goto(BASE + "/");
 const api = (who, path, body) =>
   main.evaluate(
     async ([who, path, body]) =>
       (await fetch(`/daemon/${who}${path}`, body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : undefined)).json(),
     [who, path, body],
   );
-const newest = async (who = AS) => (await api(who, "/api/swaps")).sort((x, y) => x.timeline[0].at.localeCompare(y.timeline[0].at)).at(-1);
+const swap = (id, who = as) => api(who, `/api/swaps/${id}`);
 const has = (s, ...k) => s.timeline.some((e) => k.includes(e.kind));
-async function until(pred, label, who = AS) {
+async function until(id, pred, label, who = as) {
   for (let i = 0; i < 6000; i++) {
-    const s = await newest(who);
-    if (s && pred(s)) return s;
+    const s = await swap(id, who);
+    if (s && s.id && pred(s)) return s;
     await sleep(120);
   }
   throw new Error("timed out: " + label);
 }
-async function idleBoth() {
+async function idle() {
   for (let i = 0; i < 600; i++) {
     const [z, b] = await Promise.all([api("z", "/api/swaps"), api("b", "/api/swaps")]);
     if ([...z, ...b].every((s) => s.outcome)) return;
     await sleep(150);
   }
 }
-const each = async (fn) => {
-  for (const { page } of pages) await fn(page);
-};
-async function shoot(name, settle = 2400) {
+async function reset() {
+  if (REAL) return idle();
+  await api("z", "/api/_mock/reset", {});
+}
+async function shoot(name, { full = false, settle = 1800 } = {}) {
   await sleep(settle);
+  const dir = ROOT + (as === "b" ? "b/" : "");
   for (const { width, page } of pages) {
-    await page.screenshot({ path: `${OUT}${name}-${width}.png` });
+    await page.screenshot({ path: `${dir}${name}-${width}.png`, fullPage: full });
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     if (overflow > 0) console.log(`  ! ${name}-${width}: horizontal overflow ${overflow}px`);
   }
-  console.log("shot", name);
+  console.log("shot", (as === "b" ? "b/" : "") + name);
 }
-const details = (open) =>
-  each(async (p) => {
-    const b = p.locator(".bd-card .bd-link").first();
-    if ((await b.count()) && (await b.getAttribute("aria-expanded")) !== String(open)) await b.click();
-  });
-const again = () => each((p) => p.locator(".bd-card .bd-go").click());
-const start = () => main.locator(".bd-card button[type=submit]").click();
+const start = async () => (await api("z", "/api/swaps", { maker: MAKER, zec_zat: 100000000 })).id;
 const stall = (who, id) => api(who, `/api/swaps/${id}/fault`, { fault: "stall" });
 
-await sleep(1500);
-await shoot("01-idle");
-
-if (AS === "z") {
-  await each((p) => p.locator(".bd-field input").fill("12"));
-  await shoot("02-validation", 600);
-  await each((p) => p.locator(".bd-field input").fill("1.00"));
+// --- static pages
+if (!REAL) {
+  await reset();
+  await goto("/");
+  await shoot("01-landing", { settle: 2500 });
+  // the landing reveals sections on scroll; scroll through once so the full page is drawn
+  await each(async (p) => {
+    const h = await p.evaluate(() => document.body.scrollHeight);
+    for (let y = 0; y < h; y += 400) {
+      await p.evaluate((y) => window.scrollTo(0, y), y);
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    await p.evaluate(() => window.scrollTo(0, 0));
+  });
+  await shoot("01-landing-full", { full: true, settle: 1200 });
+  await goto("/how-it-works");
+  await each(async (p) => {
+    const h = await p.evaluate(() => document.body.scrollHeight);
+    for (let y = 0; y < h; y += 400) {
+      await p.evaluate((y) => window.scrollTo(0, y), y);
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    await p.evaluate(() => window.scrollTo(0, 0));
+  });
+  await shoot("02-how-it-works", { settle: 1500 });
+  await shoot("02-how-it-works-full", { full: true, settle: 5500 });
 }
 
-// happy swap
-await start();
-await until((s) => (AS === "z" ? has(s, "zec_lock_broadcast") && s.timeline.find((e) => e.kind === "zec_lock_broadcast").height != null : has(s, "zec_confirmed")), "in progress");
-await shoot("03-in-progress");
-await details(true);
-await shoot("04-in-progress-details", 800);
-await until((s) => s.outcome, "done");
-await details(false);
-await shoot("05-done");
-await details(true);
-await shoot("06-done-details", 800);
+// --- the app, empty and with a validation error
+await reset();
+await goto("/app");
+await shoot("03-app-empty");
+if (!REAL) {
+  await each((p) => p.locator("input[inputmode=decimal]").fill("12"));
+  await shoot("04-app-validation", { settle: 500 });
+}
 
-// Z stalls: unwinding, then refunded
-await idleBoth();
-await again();
-const r = await api("z", "/api/swaps", { maker: MAKER, zec_zat: 100000000 });
-await until((s) => s.id === r.id && s.state === "ZecLocked", "Z locked", "z");
-await stall("z", r.id);
-await until((s) => s.id === r.id && has(s, "cancel_broadcast", "cancel_seen"), "cancel");
-await shoot("07-unwinding");
-await until((s) => s.id === r.id && s.outcome, "refunded");
-await shoot("08-refunded");
+// --- story 1: a happy swap
+await reset();
+await goto("/app");
+await each((p) => p.locator("input[inputmode=decimal]").fill("1.00"));
+await main.locator("form button[type=submit]").click();
+await main.waitForURL(/\/app\/swap\//);
+const id1 = main.url().match(/swap\/([0-9a-f]+)/)[1];
+await pages[1].page.goto(`${BASE}/app/swap/${id1}`);
+await until(id1, (s) => has(s, "zec_lock_broadcast") && s.timeline.find((e) => e.kind === "zec_lock_broadcast").height != null, "in progress");
+await shoot("05-swap-in-progress");
+await shoot("05-swap-in-progress-full", { full: true, settle: 200 });
+if (!REAL) {
+  await goto("/inspect");
+  await shoot("06-inspect-full", { full: true, settle: 2500 });
+  await goto(`/app/swap/${id1}`);
+}
+await until(id1, (s) => s.outcome, "done");
+await shoot("07-swap-done");
+await shoot("07-swap-done-full", { full: true, settle: 200 });
+await goto("/app");
+await shoot("08-app-with-swap");
 
-// B stalls: Z is paid after T2 (settled), B loses (lost)
-await idleBoth();
-await again();
-const q = await api("z", "/api/swaps", { maker: MAKER, zec_zat: 100000000 });
-await until((s) => s.id === q.id && s.state === "BtcLocked", "B locked", "b");
-await stall("b", q.id);
-await until((s) => s.id === q.id && s.outcome, "punished");
-await shoot(AS === "z" ? "09-settled" : "09-lost");
+// --- story 2: Z stalls, the swap is undone
+await reset();
+const id2 = await start();
+await goto(`/app/swap/${id2}`);
+await until(id2, (s) => s.state === "ZecLocked", "Z locked", "z");
+await stall("z", id2);
+await until(id2, (s) => has(s, "cancel_broadcast", "cancel_seen"), "cancel");
+await shoot("09-swap-cancelling");
+await until(id2, (s) => s.outcome, "refunded");
+await shoot("10-swap-refunded");
+await goto("/app");
+await shoot("11-app-refunded");
 
-if (AS === "z" && !REAL) {
-  await each((p) => p.goto(DEAD + "/"));
-  await shoot("10-offline", 3500);
+// --- story 3: B stalls after locking, Z is paid after the deadline
+if (!REAL) {
+  await reset();
+  const id3 = await start();
+  await goto(`/app/swap/${id3}`);
+  await until(id3, (s) => s.state === "BtcLocked", "B locked", "b");
+  await stall("b", id3);
+  await until(id3, (s) => s.outcome, "punished");
+  await shoot("12-swap-settled-after-deadline");
+
+  // --- offline
+  await each((p) => p.goto(DEAD + "/app"));
+  await shoot("13-app-offline", { settle: 3500 });
+
+  // --- B's view of the same three stories
+  as = "b";
+  await goto("/app");
+  await reset();
+  const b1 = await start();
+  await goto(`/app/swap/${b1}`);
+  await until(b1, (s) => has(s, "zec_confirmed"), "B saw ZEC");
+  await shoot("05-swap-in-progress");
+  await until(b1, (s) => s.outcome, "B done");
+  await shoot("07-swap-done");
+  await goto("/app");
+  await shoot("08-app-with-swap");
+  await reset();
+  const b3 = await start();
+  await goto(`/app/swap/${b3}`);
+  await until(b3, (s) => s.state === "BtcLocked", "B locked");
+  await stall("b", b3);
+  await until(b3, (s) => s.outcome, "lost");
+  await shoot("12-swap-lost");
 }
 
 await browser.close();

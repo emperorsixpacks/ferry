@@ -6,13 +6,8 @@ import { Observer } from "./components/Observer";
 import { PartyPanel } from "./components/PartyPanel";
 import { deriveCrossing, deriveDeadlines, latestEvent } from "./derive";
 import { btcShort, zec } from "./format";
-import { Link } from "./router";
-import "@fontsource/instrument-serif/latin-400";
-import "@fontsource/instrument-serif/latin-400-italic";
-import "@fontsource/instrument-sans/latin-400";
-import "@fontsource/instrument-sans/latin-500";
-import "@fontsource/instrument-sans/latin-600";
-import "@fontsource/fragment-mono/latin-400";
+import { Layout, PageHeader } from "./app/components/Layout";
+import "./styles.css";
 import "./inspector.css";
 import { currentSwapId, useDaemon } from "./useDaemon";
 
@@ -82,14 +77,15 @@ export default function App() {
   };
 
   return (
+    <Layout wide>
     <div className="page insp">
-      <header className="masthead">
-        <h1 className="wordmark">Ferry</h1>
-        <p className="thesis">Shielded ZEC ⇄ BTC. No bridge. No custodian. Nothing unshielded.</p>
-        <Link to="/" className="back-link">
-          ← Back to the app
-        </Link>
-      </header>
+      <div className="mb-8">
+        <PageHeader
+          eyebrow="For developers"
+          title="Protocol inspector"
+          subtitle="Both parties of a live swap side by side: every message, key share and transaction, on both chains."
+        />
+      </div>
 
       <form
         className="controls"
@@ -189,5 +185,6 @@ export default function App() {
       </main>
 
     </div>
+    </Layout>
   );
 }

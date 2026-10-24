@@ -1,139 +1,187 @@
-/* /inspect in Ferry's identity: ink on paper, Instrument Serif and Sans, Fragment Mono, one
-   ultramarine accent. The visualizer's own tokens are redefined here, so its layout is untouched.
-   One theme only, like the app. */
-
-body:has(.insp) {
-  background: #ece8de;
-}
+/* /inspect in the app's design system (ported from SealPad): white cards, obsidian ink,
+   #FF5100 for the one accent, Inter + JetBrains Mono, hairline borders, micro radii.
+   The visualizer's own tokens are redefined here, so its layout is untouched. */
 
 .insp {
-  --ink: #101218;
-  --ink-2: #4b4d5b;
-  --ink-3: #9a99a3;
-  --rule: #d2ccbd;
-  --paper: #ece8de;
-  --water: #dde0f0;
-  --land: #d9d1bc;
-  --land-edge: #b4aa90;
-  --magenta: #2b3bff;
-  --magenta-wash: #dfe2ff;
-  --abort: #b3261e;
-  --abort-wash: #f4dcd7;
-  --on-ink: #ece8de;
-  --serif: "Instrument Serif", Georgia, serif;
-  --sans: "Instrument Sans", system-ui, sans-serif;
-  --mono: "Fragment Mono", ui-monospace, monospace;
-  color: var(--ink);
+  --ink: #181818;
+  --ink-2: #686868;
+  --ink-3: #9ca3af;
+  --rule: #e5e7eb;
+  --paper: #ffffff;
+  --water: #f7f9fb;
+  --land: #f5f5f5;
+  --land-edge: #d1d1d1;
+  --magenta: #ff5100;
+  --magenta-wash: #fff7ed;
+  --abort: #dc2626;
+  --abort-wash: #fef2f2;
+  --on-ink: #ffffff;
+  --serif: "Inter Variable", "Inter", system-ui, sans-serif;
+  --sans: "Inter Variable", "Inter", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
   color-scheme: light;
 }
 
-/* Instrument Serif comes in one weight: size carries the hierarchy instead of bold */
-.insp .wordmark {
-  font: italic 400 64px/1 var(--serif);
-}
-
+/* headings: SealPad's bold, tight Inter instead of the old italic serif */
 .insp .crossing-head h2,
 .insp .observer-head h2 {
-  font: italic 400 40px/1.05 var(--serif);
-  letter-spacing: -0.015em;
+  font: 600 22px/1.2 var(--sans);
+  letter-spacing: -0.01em;
 }
 
 .insp .party h3,
 .insp .obs h3 {
-  font: italic 400 22px/1.2 var(--serif);
+  font: 500 10px/1.4 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
 }
 
 .insp .unlink dt {
-  font: italic 400 21px var(--serif);
+  font: 500 10px var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.insp .party-letter,
+.insp .share-sym,
+.insp .narration b {
+  font-family: var(--mono);
+  font-style: normal;
+  font-weight: 700;
+  border-radius: 0.69px;
 }
 
 .insp .party-letter {
-  font: italic 400 28px/1 var(--serif);
+  font-size: 18px;
 }
 
 .insp .share-sym {
-  font: italic 400 20px/1 var(--serif);
+  font-size: 13px;
+  padding-bottom: 0;
 }
 
 .insp .narration b {
-  font: italic 400 15px/1 var(--serif);
+  font-size: 11px;
 }
 
 .insp .chart-label-title {
-  font: italic 400 17px var(--serif);
+  font: 600 13px var(--sans);
 }
 
 .insp .party-flag text {
-  font: italic 400 21px var(--serif);
+  font: 700 15px var(--mono);
 }
 
-.insp .thesis {
-  max-width: none;
+.insp .party-flag circle {
+  rx: 0;
+}
+
+/* cards: the three columns and the observer sit on white with a hairline ring, like SealPad */
+.insp .party,
+.insp .crossing,
+.insp .observer {
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(24, 24, 24, 0.1);
+  border: 0;
+  padding: 20px;
+}
+
+.insp .controls {
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(24, 24, 24, 0.1);
+  border: 0;
+  padding: 18px 20px;
+  margin-bottom: 24px;
+}
+
+.insp .field label,
+.insp .state-label,
+.insp .balances dt,
+.insp .fault-hint {
   font-family: var(--mono);
-  font-size: 12px;
-  letter-spacing: 0.14em;
+  font-size: 10px;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
 }
 
-.insp .party-head h2 {
-  font-weight: 500;
-}
-
-/* the masthead rule picks up the accent, like the app's one accent line */
-.insp .controls {
-  border-top-color: var(--ink);
-}
-
-.insp .masthead {
-  position: relative;
-}
-
-.insp .masthead::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  bottom: -2px;
-  width: 120px;
-  height: 2px;
-  background: var(--magenta);
-}
-
 .insp .btn {
-  border-radius: 999px;
+  border-radius: 0.69px;
+}
+
+.insp .btn-primary {
+  background: #ff5100;
+  color: #fff;
 }
 
 .insp .btn-primary:hover:not(:disabled) {
-  background: var(--magenta);
+  background: #e84800;
 }
 
-.insp .back-link {
-  font-size: 13px;
-  padding: 8px 15px;
-  border: 1px solid var(--rule);
-  border-radius: 999px;
+.insp .btn-primary:disabled {
+  background: #d1d1d1;
+  color: #fff;
 }
 
-.insp .back-link:hover {
-  background: var(--ink);
-  color: var(--paper);
-  border-color: var(--ink);
+.insp .btn-fault {
+  color: #181818;
+  border-color: #e5e7eb;
 }
 
-/* the shielded shore reads as the app's dark half */
+.insp .btn-fault:hover:not(:disabled) {
+  border-color: #ff5100;
+  color: #e84800;
+  background: #fff7ed;
+}
+
+.insp .input-wrap {
+  border-radius: 0.69px;
+  border-color: #e5e7eb;
+}
+
+.insp .badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* the chart: a hairline frame instead of the graduated neatline; Zcash as the obsidian shore */
+.insp .chart {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  padding: 0;
+}
+
+.insp .chart .water {
+  stroke: none;
+}
+
 .insp .chart .land-zec {
-  fill: #0e1030;
-  stroke: #0e1030;
+  fill: #181818;
+  stroke: #181818;
 }
 
 .insp .chart .shore-zec .chart-label-title,
 .insp .chart .shore-zec .chart-label-sub {
-  fill: #ece8de !important;
+  fill: #ffffff !important;
 }
 
 .insp .chart .shore-zec .chart-label-land {
-  stroke: #0e1030;
+  stroke: #181818;
+}
+
+.insp .token-hull {
+  rx: 1;
+}
+
+.insp .scale,
+.insp .scale i {
+  border-radius: 0;
 }
 
 .insp .magic {
-  border-left-color: var(--magenta);
+  border-left-color: #ff5100;
+  background: #fff7ed;
 }

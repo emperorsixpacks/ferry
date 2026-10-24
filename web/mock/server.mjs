@@ -50,9 +50,10 @@ const chains = {
   zec: { network: "regtest", height: 233, pool: "ironwood", txs: [], lastBlock: now() },
 };
 
+const START = { Z: { zec_shielded_zat: 500000000, btc_sat: 0 }, B: { zec_shielded_zat: 0, btc_sat: 5000000 } };
 const parties = {
-  Z: { role: "Z", name: "zoe", port: Z_PORT, balances: { zec_shielded_zat: 500000000, btc_sat: 0 } },
-  B: { role: "B", name: "bram", port: B_PORT, balances: { zec_shielded_zat: 0, btc_sat: 5000000 } },
+  Z: { role: "Z", name: "zoe", port: Z_PORT, balances: { ...START.Z } },
+  B: { role: "B", name: "bram", port: B_PORT, balances: { ...START.B } },
 };
 
 const swaps = [];
@@ -526,6 +527,15 @@ function handler(role) {
     if (req.method === "OPTIONS") return send(res, 204, {});
 
     if (req.method === "GET" && path === "/api/status") return send(res, 200, statusView(role));
+
+    // mock only, for screenshot and film scripts: forget every swap and restore the starting
+    // balances, so each story starts from the same wallet. Chains keep their heights.
+    if (req.method === "POST" && path === "/api/_mock/reset") {
+      swaps.length = 0;
+      for (const r of ["Z", "B"]) parties[r].balances = { ...START[r] };
+      for (const r of ["Z", "B"]) for (const c of clients[r]) c.last = {};
+      return send(res, 200, { ok: true });
+    }
 
     if (req.method === "GET" && path === "/api/swaps") return send(res, 200, swaps.map((s) => swapView(s, role)));
 

@@ -60,38 +60,17 @@
   color-scheme: dark;
 }
 
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-}
-
-html {
-  -webkit-text-size-adjust: 100%;
-}
-
-body {
-  margin: 0;
-  background: var(--paper);
+/* The inspector lives inside the app shell, so its base styles are scoped to its root rather
+   than set on html/body (Tailwind's preflight handles the global reset). */
+.page {
   color: var(--ink);
   font: 400 15px/1.5 var(--sans);
   font-feature-settings: "tnum" 1;
   -webkit-font-smoothing: antialiased;
 }
 
-h1,
-h2,
-h3,
-p,
-ol,
-ul,
-dl,
-dd {
-  margin: 0;
-}
-
-ol,
-ul {
+.page ol,
+.page ul {
   padding: 0;
   list-style: none;
 }
@@ -102,11 +81,11 @@ ul {
   letter-spacing: -0.01em;
 }
 
-b {
+.page b {
   font-weight: 600;
 }
 
-:focus-visible {
+.page :focus-visible {
   outline: 2px solid var(--magenta);
   outline-offset: 2px;
 }
@@ -114,7 +93,6 @@ b {
 .page {
   max-width: 1440px;
   margin: 0 auto;
-  padding: 28px 40px 64px;
 }
 
 /* masthead ---------------------------------------------------------------- */

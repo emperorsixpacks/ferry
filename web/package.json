@@ -14,28 +14,26 @@
     "shoot:real": "node scripts/shoot.mjs --real",
     "film": "node scripts/film.mjs",
     "shoot:app": "node scripts/shoot-app.mjs",
-    "shoot:directions": "node scripts/shoot-directions.mjs",
-    "shoot:app:real": "node scripts/shoot-app.mjs --real",
-    "shoot:explainer": "node scripts/shoot-explainer.mjs"
+    "shoot:app:real": "node scripts/shoot-app.mjs --real"
   },
   "dependencies": {
-    "@fontsource/big-shoulders-display": "^5.3.0",
-    "@fontsource/fragment-mono": "^5.3.0",
-    "@fontsource/ibm-plex-mono": "^5.3.0",
-    "@fontsource/instrument-sans": "^5.3.0",
-    "@fontsource/instrument-serif": "^5.3.0",
-    "@fontsource/martian-mono": "^5.3.0",
-    "@fontsource/public-sans": "^5.3.0",
-    "@fontsource/spectral": "^5.3.0",
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^22.20.5",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^4.7.0",
     "playwright": "^1.64.1",
+    "tailwindcss": "^4.3.3",
     "typescript": "~5.6.3",
     "vite": "^6.4.4"
   },

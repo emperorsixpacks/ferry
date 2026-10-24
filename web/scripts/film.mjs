@@ -7,7 +7,7 @@
 // One continuous Playwright recording (1440x900) is cut into segments by timestamps taken while
 // the story plays. Waiting on chains is sped up to a fixed on-screen length, so the edit and the
 // captions come out the same length on every run. Title cards and the caption band are an HTML
-// overlay injected into the page, drawn in Ferry's own type and colours.
+// overlay injected into the page, in the app's design system (white, obsidian, #FF5100).
 //
 // The story: the swap app at / from the user's side, the protocol view of the same swap at
 // /inspect, then a refund story back in the app.
@@ -62,40 +62,37 @@ for (let i = 0; ; i++) {
 const OVERLAY = String.raw`
 (() => {
   const css = ${"`"}
-  .film-card { position: fixed; inset: 0; z-index: 100; display: grid; grid-template-columns: 1fr 1fr;
-    opacity: 0; pointer-events: none; transition: opacity .7s cubic-bezier(.45,0,.2,1); }
+  .film-card { position: fixed; inset: 0; z-index: 100; background: #fff; opacity: 0; pointer-events: none;
+    transition: opacity .7s cubic-bezier(.45,0,.2,1); font-family: "Inter Variable", Inter, sans-serif; color: #181818; }
   .film-card.on { opacity: 1; }
-  .film-card::before { content: ""; background: #0e1030; }
-  .film-card::after { content: ""; background: #ece8de; }
-  .film-card-inner { position: absolute; inset: 0; display: grid; grid-template-columns: 1fr 1fr; align-items: center; }
-  .film-card .l, .film-card .r { padding: 0 72px 0 96px; }
-  .film-card .l { color: #ece8de; }
-  .film-card .r { color: #101218; }
-  .film-card .wm { font: italic 400 190px/0.9 "Instrument Serif", serif; letter-spacing: -.02em; }
-  .film-card .meta { font: 400 13px/1.9 "Fragment Mono", monospace; letter-spacing: .18em; text-transform: uppercase; }
-  .film-card .wm + .meta { margin-top: 34px; }
-  .film-card .say { font: italic 400 64px/1.02 "Instrument Serif", serif; letter-spacing: -.015em; }
-  .film-card ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 30px; }
-  .film-card li { display: grid; grid-template-columns: 54px 1fr; align-items: baseline;
-    font: italic 400 44px/1.08 "Instrument Serif", serif; }
-  .film-card li span { font: 400 13px "Fragment Mono", monospace; letter-spacing: .14em; color: #2b3bff; }
+  .film-card-inner { position: absolute; inset: 0; display: grid; grid-template-columns: 7fr 5fr; gap: 64px; align-items: center; padding: 0 112px; }
+  .film-card .r { border-left: 1px solid #e5e7eb; padding-left: 48px; }
+  .film-card .eyebrow { font: 500 12px "JetBrains Mono", monospace; letter-spacing: .18em; text-transform: uppercase; color: #ff5100; }
+  .film-card .wm { display: flex; align-items: center; gap: 18px; font: 700 34px Inter, sans-serif; letter-spacing: .08em; margin-bottom: 40px; }
+  .film-card .mark { position: relative; width: 56px; height: 56px; background: #181818; }
+  .film-card .mark::before { content: ""; position: absolute; left: 0; right: 0; top: 22px; height: 12px; background: #fff; }
+  .film-card .mark::after { content: ""; position: absolute; left: 11px; top: 20px; width: 16px; height: 16px; background: #ff5100; }
+  .film-card .say { margin-top: 28px; font-weight: 500; font-size: 84px; line-height: 1.02; letter-spacing: -.025em; }
+  .film-card .say span { color: #9ca3af; }
+  .film-card .meta { font: 500 11px/2 "JetBrains Mono", monospace; letter-spacing: .18em; text-transform: uppercase; color: #686868; }
+  .film-card ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 26px; }
+  .film-card li { font-weight: 500; font-size: 30px; letter-spacing: -.01em; }
+  .film-card li span { display: block; font: 500 12px "JetBrains Mono", monospace; letter-spacing: .18em; color: #9ca3af; margin-bottom: 8px; }
   .film-band { position: fixed; left: 0; right: 0; bottom: 0; height: 76px; z-index: 90; pointer-events: none;
-    background: #101218; color: #ece8de; display: flex; align-items: center; gap: 22px; padding: 0 48px;
-    transform: translateY(100%); transition: transform .5s cubic-bezier(.2,.8,.2,1); }
+    background: #fff; border-top: 1px solid #e5e7eb; color: #181818; display: flex; align-items: center; gap: 18px; padding: 0 48px;
+    font-family: "Inter Variable", Inter, sans-serif; transform: translateY(100%); transition: transform .5s cubic-bezier(.2,.8,.2,1); }
   .film-band.on { transform: none; }
-  .film-band .n { flex: none; min-width: 30px; height: 30px; padding: 0 9px; border-radius: 999px; background: #2b3bff;
-    color: #fff; display: grid; place-items: center; font: 400 12px "Fragment Mono", monospace; letter-spacing: .1em; }
+  .film-band .n { flex: none; height: 22px; padding: 0 10px; border-radius: 999px; background: #ff5100; color: #fff;
+    display: grid; place-items: center; font: 500 11px "JetBrains Mono", monospace; letter-spacing: .14em; }
   .film-band .n:empty { display: none; }
-  .film-band.quiet .n { background: #ece8de; color: #101218; }
-  .film-band .t { font: italic 400 30px/1 "Instrument Serif", serif; white-space: nowrap; }
-  .film-band .b { font: 400 17px/1.35 "Instrument Sans", sans-serif; color: #b9b6ae; }
-  .film-band .x { transition: opacity .3s; }
-  .bd { min-height: calc(100vh - 76px) !important; }
+  .film-band.quiet .n { background: #f5f5f5; color: #181818; }
+  .film-band .t { font-weight: 600; font-size: 20px; letter-spacing: -.01em; white-space: nowrap; }
+  .film-band .b { font-size: 16px; color: #686868; }
+  body { padding-bottom: 76px; }
   .film-ring { position: fixed; z-index: 95; width: 58px; height: 58px; margin: -29px 0 0 -29px;
-    border: 2px solid #2b3bff; border-radius: 50%; pointer-events: none;
-    animation: film-ring .8s cubic-bezier(.2,.6,.3,1) forwards; }
+    border: 2px solid #ff5100; pointer-events: none; animation: film-ring .8s cubic-bezier(.2,.6,.3,1) forwards; }
   @keyframes film-ring { from { transform: scale(.4); opacity: 1 } to { transform: scale(1.5); opacity: 0 } }
-  .film-mark { outline: 2px solid #2b3bff; outline-offset: 6px; }
+  .film-mark { outline: 2px solid #ff5100; outline-offset: 6px; }
   ${"`"};
   const style = document.createElement("style");
   style.textContent = css;
@@ -139,15 +136,9 @@ const context = await browser.newContext({
 const page = await context.newPage();
 const t0 = Date.now(); // the recording starts with the page
 page.on("console", (m) => m.type() === "error" && console.log("console:", m.text()));
-await page.goto(BASE + "/");
+await page.goto(BASE + "/app");
 await page.evaluate(OVERLAY);
 await sleep(2500); // fonts, first SSE events
-// a daemon that has swapped before shows its last result; clear it so the film opens on the form
-if (!(await page.locator(".bd-card button[type=submit]").count()) && (await page.locator(".bd-card .bd-go").count())) {
-  await page.locator(".bd-card .bd-go").click();
-  await page.mouse.move(4, 4);
-  await sleep(500);
-}
 
 const marks = {};
 const mark = (name) => (marks[name] = (Date.now() - t0) / 1000);
@@ -207,8 +198,9 @@ const cue = (from, to, text) => cues.push({ from, to, text });
 // 1. title card (cut in once it has faded up)
 await film(
   "card",
-  `<div class="l"><div class="wm">Ferry</div><div class="meta">Shielded ZEC to Bitcoin</div></div>
-   <div class="r"><div class="say">Goes in shielded.<br>Comes out Bitcoin.</div><div class="meta" style="margin-top:28px">No bridge / No custodian / Nothing unshielded</div></div>`,
+  `<div class="l"><div class="wm"><i class="mark"></i>FERRY</div><div class="eyebrow">Shielded ZEC ⇄ BTC · Atomic swaps</div>
+     <div class="say">Shielded ZEC in.<br>Bitcoin out.<br><span>No middleman.</span></div></div>
+   <div class="r"><div class="eyebrow">Guarantees</div><div class="meta" style="margin-top:20px">No bridge<br>No custodian<br>Nothing unshielded</div></div>`,
 );
 await sleep(900);
 mark("title");
@@ -225,12 +217,12 @@ mark("idleEnd");
 
 // 3. the happy swap, from the user's side
 await lower({ n: "1", title: "Bitcoin is locked first", body: "The other side locks theirs in a Taproot output before you risk anything." });
-await clickWithRing(page.locator(".bd-card button[type=submit]"));
+await clickWithRing(page.locator("form button[type=submit]"));
 mark("h0");
 await until((z) => has(z, "btc_lock_seen"), "BTC locked");
 await hold("h0");
 mark("h1");
-await lower({ n: "2", title: "Your ZEC goes in shielded", body: "To an Ironwood address only this swap can open. On chain it is ciphertext." });
+await lower({ n: "2", title: "Your ZEC goes in shielded", body: "To a shielded address only this swap can open. On chain it is ciphertext." });
 await until((z) => confirmed(z, "zec_lock_broadcast"), "ZEC locked");
 await hold("h1");
 mark("h2");
@@ -277,22 +269,20 @@ cue("obs", "obsEnd", "What each chain saw: on Bitcoin, one-signature Taproot pay
 
 // 5. the refund story, back in the app
 await film("hideLower");
-await film("card", `<div class="l"><div class="say">And if the other side vanishes?</div></div><div class="r"><div class="meta">A second swap / one daemon stops responding</div></div>`);
+await film("card", `<div class="l"><div class="eyebrow">If anyone disappears</div><div class="say" style="font-size:72px">And if the other side vanishes?</div></div><div class="r"><div class="meta">A second swap.<br>One daemon stops responding.</div></div>`);
 await page.evaluate(() => window.scrollTo(0, 0));
-await page.locator(".back-link").click();
+await page.evaluate(() => {
+  window.history.pushState(null, "", "/app");
+  window.dispatchEvent(new PopStateEvent("popstate"));
+});
 await sleep(600);
 mark("rCard");
 await sleep(3400);
 mark("rCardEnd");
 await film("hideCard");
 await sleep(500);
-// a finished swap shows its result; start the next one from the result card
-const againBtn = page.locator(".bd-card .bd-go");
-if (await againBtn.count()) await againBtn.click();
-await page.mouse.move(4, 4);
-await sleep(500);
 await lower({ n: "1", title: "A second swap", body: "Bitcoin locked, your ZEC sealed, exactly as before.", tone: "quiet" });
-await clickWithRing(page.locator(".bd-card button[type=submit]"));
+await clickWithRing(page.locator("form button[type=submit]"));
 mark("r0");
 await until((z) => z?.state === "ZecLocked" && confirmed(z, "zec_lock_broadcast"), "Z locked");
 await hold("r0");
@@ -321,7 +311,8 @@ cue("r3", "r4", "Your ZEC comes back to your shielded wallet. Nobody lost a coin
 await film("hideLower");
 await film(
   "card",
-  `<div class="l"><div class="wm" style="font-size:150px">Ferry</div><div class="meta">Shielded ZEC to Bitcoin</div></div>
+  `<div class="l"><div class="wm"><i class="mark"></i>FERRY</div><div class="eyebrow">What you get</div>
+     <div class="say" style="font-size:64px">Three guarantees<br><span>bridges can't make.</span></div></div>
    <div class="r"><ol>
      <li><span>01</span>No custodian.</li>
      <li><span>02</span>ZEC never leaves the shielded pool.</li>

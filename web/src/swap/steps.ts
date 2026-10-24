@@ -45,6 +45,28 @@ export function stepsOf(v: SwapView): Step[] {
   const confirmed = (e?: TimelineEntry) => (e && e.height != null ? e : undefined);
   const terms = find(v, "cancel_sig_received", "refund_adaptor_verified");
 
+  if (phaseOf(v) === "settled" || phaseOf(v) === "lost") {
+    // the other side (Z's view) or this side (B's view) went quiet past both deadlines
+    const cancel = find(v, "cancel_broadcast", "cancel_seen");
+    const punish = find(v, "punish_broadcast", "punish_seen", "punished");
+    return activate(
+      v.role === "Z"
+        ? [
+            step("Agreed the swap with the other side", terms),
+            step("Bitcoin locked by the other side", find(v, "btc_lock_seen")),
+            step("Your ZEC is locked in a shielded address only this swap can open", confirmed(find(v, "zec_lock_broadcast"))),
+            step("The other side stopped responding, so the swap was called off", cancel),
+            step("They never took their bitcoin back, so after the deadline it was released to you", punish),
+          ]
+        : [
+            step("Agreed the swap with the other side", terms),
+            step("Your BTC is locked", confirmed(find(v, "btc_lock_broadcast"))),
+            step("Your daemon stopped responding, so the swap was called off", cancel),
+            step("After the deadline, the BTC went to the other side", punish),
+          ],
+    );
+  }
+
   if (phaseOf(v) === "unwinding" || phaseOf(v) === "refunded") {
     const cancel = find(v, "cancel_broadcast", "cancel_seen");
     if (v.role === "Z") {
