@@ -183,6 +183,15 @@ const scrollTo = (selector, offset = 24) =>
     [selector, offset],
   );
 
+// On-screen seconds for the segments that wait on chains, keyed by the mark that starts them.
+// A step that finishes early is held in real time until it has filled its slot, so the edit never
+// freezes a frame; a step that runs long is sped up to fit.
+const TARGET = { h0: 6, h1: 6, h2: 6, h3: 5, magicEnd: 6, r0: 6, r2: 8, r3: 7 };
+async function hold(from) {
+  const left = marks[from] + TARGET[from] - (Date.now() - t0) / 1000;
+  if (left > 0) await sleep(left * 1000);
+}
+
 // The story. Each lower third is also one caption cue; `cue` records which segment it spans.
 const cues = [];
 const cue = (from, to, text) => cues.push({ from, to, text });
@@ -212,22 +221,37 @@ await lower({ n: "1", title: "B locks BTC first", body: "Into a Taproot output t
 await clickWithRing(page.locator("button[type=submit]"));
 mark("h0");
 await until((z, b) => has(b, "btc_lock_broadcast"), "tx_lock");
+await hold("h0");
 mark("h1");
 await lower({ n: "2", title: "Z locks shielded ZEC", body: "Ironwood to Ironwood, to an address whose spend key is split in two: z + b. Neither side can spend it alone." });
 await until((z) => has(z, "zec_lock_broadcast"), "ZEC lock");
+await hold("h1");
 mark("h2");
 await lower({ n: "3", title: "B hands Z an adaptor signature", body: "Once the note is confirmed, B signs the redeem, encrypted so that only Z's secret z can complete it." });
 await until((z) => has(z, "redeem_adaptor_received"), "redeem adaptor");
+await hold("h2");
 mark("h3");
 await lower({ n: "4", title: "Z redeems the BTC", body: "One MuSig2 key-path signature. Completing it is what puts z on chain." });
 await until((z, b) => has(b, "secret_extracted"), "z extracted");
+await hold("h3");
 mark("magic");
+// With a key-path redeem, B often reads z within a second of the redeem, while the previous lower
+// third is still up. Redraw the arc and the callout as the magic-moment caption arrives.
+await page.evaluate(() =>
+  document.querySelectorAll(".reveal path, .magic").forEach((el) =>
+    el.getAnimations().forEach((a) => {
+      a.currentTime = 0;
+      a.play();
+    }),
+  ),
+);
 await lower({ title: "B reads z from Z's signature", body: "s − s′ = z. With z + b, B now holds the spend key of the joint Ironwood note.", tone: "magic" });
 await sleep(5200);
 mark("magicEnd");
 await lower({ n: "5", title: "B sweeps the ZEC home", body: "After a random delay, into B's own shielded notes. The swap is done; neither side ever trusted the other." });
 await until((z, b) => z?.outcome && b?.outcome, "happy outcome");
 await sleep(1800);
+await hold("magicEnd");
 mark("swept");
 cue("title", "titleEnd", "Ferry. Atomic swaps between shielded ZEC and Bitcoin.");
 cue("idle", "idleEnd", "Two parties. Z holds shielded ZEC, B holds bitcoin. Nobody in between.");
@@ -267,6 +291,7 @@ await lower({ n: "1", title: "A second swap starts", body: "B locks BTC, Z locks
 await clickWithRing(page.locator("button[type=submit]"));
 mark("r0");
 await until((z) => z?.state === "ZecLocked" && has(z, "zec_lock_broadcast"), "Z locked");
+await hold("r0");
 mark("r1");
 await lower({ n: "2", title: "Z goes silent", body: "For the demo we stall Z's daemon. B never gets a redeem.", tone: "abort" });
 await clickWithRing(page.getByRole("button", { name: "Make Z stall" }));
@@ -274,10 +299,12 @@ await sleep(2600);
 mark("r2");
 await lower({ n: "3", title: "After T1, B cancels and refunds", body: "Both abort transactions were presigned. B's refund signature puts b on chain.", tone: "abort" });
 await until((z, b) => has(b, "refund_broadcast"), "refund");
+await hold("r2");
 mark("r3");
 await lower({ n: "4", title: "Z takes its ZEC back", body: "Z reads b from the refund, so Z now holds z + b and sweeps the note home. Nobody lost anything.", tone: "abort" });
 await until((z, b) => z?.outcome && b?.outcome, "refund outcome");
 await sleep(2000);
+await hold("r3");
 mark("r4");
 cue("rCard", "rCardEnd", "Now, what if Z vanishes?");
 cue("r0", "r1", "Same start: B locks bitcoin, Z locks shielded ZEC.");
@@ -309,25 +336,25 @@ const SRC = join(WORK, webm);
 writeFileSync(join(WORK, "marks.json"), JSON.stringify(marks, null, 2));
 
 // ------------------------------------------------------------------------------------------------
-// edit: [from mark, to mark, on-screen seconds]; `null` keeps real time
+// edit: [from mark, to mark, on-screen seconds from TARGET]; `null` keeps real time
 
 const EDL = [
-  ["title", "titleEnd", null],
-  ["idle", "idleEnd", null],
-  ["h0", "h1", 6],
-  ["h1", "h2", 6],
-  ["h2", "h3", 6],
-  ["h3", "magic", 5],
-  ["magic", "magicEnd", null],
-  ["magicEnd", "swept", 6],
-  ["obs", "obsEnd", null],
-  ["rCard", "rCardEnd", null],
-  ["r0", "r1", 6],
-  ["r1", "r2", null],
-  ["r2", "r3", 8],
-  ["r3", "r4", 7],
-  ["end", "endEnd", null],
-];
+  ["title", "titleEnd"],
+  ["idle", "idleEnd"],
+  ["h0", "h1"],
+  ["h1", "h2"],
+  ["h2", "h3"],
+  ["h3", "magic"],
+  ["magic", "magicEnd"],
+  ["magicEnd", "swept"],
+  ["obs", "obsEnd"],
+  ["rCard", "rCardEnd"],
+  ["r0", "r1"],
+  ["r1", "r2"],
+  ["r2", "r3"],
+  ["r3", "r4"],
+  ["end", "endEnd"],
+].map(([from, to]) => [from, to, TARGET[from] ?? null]);
 
 const ff = (args) => {
   const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", ...args], { stdio: "inherit" });
