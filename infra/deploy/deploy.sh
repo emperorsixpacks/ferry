@@ -6,7 +6,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REMOTE_DIR="${FERRY_REMOTE_DIR:-ferry}"
 PROJECT="${FERRY_COMPOSE_PROJECT:-ferry}"
-COMPOSE="docker compose -p $PROJECT -f infra/deploy/docker-compose.yml --env-file infra/deploy/.env"
+# docker compose through infra/deploy/compose, which passes the enabled pairs (COMPOSE_PROFILES in
+# the host's .env) on to the web server; infra/deploy/ctl does the per-pair work on the host.
+COMPOSE="FERRY_COMPOSE_PROJECT=$PROJECT infra/deploy/compose"
+CTL="FERRY_COMPOSE_PROJECT=$PROJECT infra/deploy/ctl"
+ALL_PROFILES="--profile ltc --profile usdc-base --profile weth-base"
 LOCAL_TESTNET="${FERRY_TESTNET_DIR:-$ROOT/.testnet}"
 LOCAL_SIGNET_RPC="${LOCAL_SIGNET_RPC:-http://127.0.0.1:38332}"
 
@@ -15,13 +19,20 @@ usage() {
 Usage: infra/deploy/deploy.sh <ssh-host> [command]
 
   up (default)     copy the repository (tracked and untracked files git doesn't ignore) to
-                   <ssh-host>:~/$REMOTE_DIR, create the secrets and infra/deploy/.env there on first
-                   run, then build and start everything
-  status           containers, signet sync, daemon balances and swaps
-  logs [service]   follow logs (bitcoind, ferryd-z, ferryd-b, web, caddy; default: all)
-  addresses        where to send test coins (B's signet address, Z's Zcash testnet address)
-  rotate-tokens    replace both daemons' API tokens (the web server picks them up)
-  down             stop everything (volumes, so wallets and the synced chain, are kept)
+                   <ssh-host>:~/$REMOTE_DIR, create what is missing there (infra/deploy/.env, the
+                   node RPC passwords, the enabled pairs' Base Sepolia keys), build and start
+                   everything, and stop the pairs that are no longer enabled
+  status           containers, node sync, daemon balances and swaps, for every enabled pair
+  logs [service]   follow logs (bitcoind, ferryd-z, ferryd-b, web, caddy; litecoind,
+                   ferryd-{z,b}-ltc, ferryd-{z,b}-usdc-base, ferryd-{z,b}-weth-base; default: all)
+  addresses        what to fund, where and how much: B's signet address and Z's Zcash testnet
+                   address, then each enabled pair's addresses, amounts and faucets
+  pairs            the optional pairs (ltc, usdc-base, weth-base) and which are enabled
+  enable <pair>    add a pair to COMPOSE_PROFILES in the host's .env (then run \`up\`)
+  disable <pair>   remove it (\`up\` then stops its containers; its volumes are kept)
+  wrap-weth <ETH>  wrap Base Sepolia ETH into WETH in the WETH maker's account (WETH deposit())
+  rotate-tokens    replace every daemon's API token (the web server picks them up)
+  down             stop everything, every pair (volumes, so wallets and synced chains, are kept)
   migrate-wallets [--force]
                    owner only: move the wallets of a local infra/testnet.sh setup to the host
                    (copies .testnet/{z,b} into the ferryd volumes and imports the zoe/bram
@@ -42,6 +53,7 @@ CMD=${2:-up}
 
 remote() { ssh "$HOST" "cd $REMOTE_DIR && $*"; }
 rcompose() { remote "$COMPOSE $*"; }
+rctl() { remote "$CTL $*"; }
 
 # GET a daemon's control API from inside its container (the API is not published; the token is
 # read from its file there and never put on a command line).
@@ -70,30 +82,10 @@ sync_repo() {
 }
 
 ensure_env() {
-  # First run: secrets are generated on the server and never leave it.
-  remote '
-    set -e
-    umask 077
-    f=infra/deploy/.env
-    [ -f "$f" ] || cp infra/deploy/.env.example "$f"
-    mkdir -p infra/deploy/secrets
-    chmod 700 infra/deploy/secrets
-    if [ ! -s infra/deploy/secrets/btc_rpc_pass ]; then
-      head -c 32 /dev/urandom | od -An -tx1 | tr -d " \n" > infra/deploy/secrets/btc_rpc_pass
-      # Readable inside the containers (a bind-mounted secret keeps host permissions); the
-      # directory above stays private to the deploying user.
-      chmod 644 infra/deploy/secrets/btc_rpc_pass
-      sed "/^BTC_RPCAUTH=/d" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-    fi
-    if ! grep -q "^BTC_RPCAUTH=." "$f"; then
-      auth=$(python3 -c "
-import hashlib, hmac, secrets
-pw = open(\"infra/deploy/secrets/btc_rpc_pass\").read().strip()
-salt = secrets.token_hex(16)
-print(\"ferry:%s\$%s\" % (salt, hmac.new(salt.encode(), pw.encode(), hashlib.sha256).hexdigest()))")
-      sed "/^BTC_RPCAUTH=/d" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-      printf "BTC_RPCAUTH=%s\n" "'"'"'$auth'"'"'" >> "$f"
-    fi'
+  # Secrets are generated on the server and never leave it: on the first run .env and the node
+  # RPC passwords, later only what is missing (a newly enabled pair's keys). Nothing existing is
+  # overwritten (infra/deploy/ctl secrets).
+  rctl secrets
   if remote 'grep -q "^DOMAIN=ferry.example.com$" infra/deploy/.env'; then
     die "set DOMAIN in $HOST:~/$REMOTE_DIR/infra/deploy/.env (DNS must point at the host), then run again"
   fi
@@ -105,8 +97,10 @@ cmd_up() {
   ensure_env
   log "building and starting (the first build compiles zcash-devtool: allow 20-40 minutes)"
   rcompose up -d --build
+  rctl stop-disabled
   rcompose ps
-  log "done. Follow the signet sync with: infra/deploy/deploy.sh $HOST status"
+  log "done. Follow the sync with: infra/deploy/deploy.sh $HOST status"
+  log "what to fund: infra/deploy/deploy.sh $HOST addresses"
 }
 
 cmd_status() {
@@ -130,6 +124,8 @@ import json, sys
 for s in json.load(sys.stdin):
     print("  swap %s…  %-18s outcome %s" % (s["id"][:12], s["state"], s["outcome"]))' || true
   done
+  echo
+  rctl status
 }
 
 cmd_addresses() {
@@ -145,16 +141,12 @@ else:
     print("  (Z is paid in %s BTC at %s)" % (btc["network"], btc["address"]))' \
       || echo "ferryd $key is not answering yet"
   done
+  echo
+  rctl addresses
 }
 
 cmd_rotate_tokens() {
-  log "replacing the API tokens"
-  rcompose stop ferryd-z ferryd-b web
-  for key in z b; do
-    ssh "$HOST" "docker run --rm -v ${PROJECT}_token-$key:/t debian:bookworm-slim rm -f /t/api-token"
-  done
-  rcompose up -d ferryd-z ferryd-b web
-  log "done: each daemon created a new token; the web server reads it from the token volume"
+  rctl rotate-tokens
 }
 
 local_rpc() { # local_rpc <wallet> <method> [json params]
@@ -257,6 +249,17 @@ case "$CMD" in
   addresses) cmd_addresses ;;
   rotate-tokens) cmd_rotate_tokens ;;
   migrate-wallets) cmd_migrate_wallets "${3:-}" ;;
-  down) rcompose down ;;
+  pairs) rctl pairs ;;
+  enable | disable)
+    case "${3:-}" in
+      ltc | usdc-base | weth-base) ;;
+      *) die "usage: infra/deploy/deploy.sh <ssh-host> $CMD ltc|usdc-base|weth-base" ;;
+    esac
+    rctl "$CMD" "$3"
+    log "next: infra/deploy/deploy.sh $HOST   (creates what the pair needs, starts or stops it)" ;;
+  wrap-weth) rctl wrap-weth "${3:-}" ;;
+  down)
+    # shellcheck disable=SC2086 # several --profile flags
+    rcompose $ALL_PROFILES down ;;
   *) usage; exit 2 ;;
 esac

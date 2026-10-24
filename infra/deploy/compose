@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# docker compose for the Ferry deployment, with the enabled pairs (COMPOSE_PROFILES in
+# infra/deploy/.env) passed on to the web server. Use it on the host instead of plain
+# `docker compose`, e.g. infra/deploy/compose ps, infra/deploy/compose logs -f web.
+exec "$(dirname "${BASH_SOURCE[0]}")/ctl" compose "$@"
