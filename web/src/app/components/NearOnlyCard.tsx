@@ -107,7 +107,7 @@ export function NearOnlyCard({ pick, path, ctx, onPick, onFlip, blocked, optOut 
                 setAmount(e.target.value.replace(",", "."));
               }}
               aria-describedby="alone-message"
-              className={cn("h-12 w-full min-w-0 bg-transparent leading-none font-medium tracking-tight text-slate-900 tabular-nums placeholder:text-slate-300 focus:outline-none focus-visible:outline-none", amountSize(amount))}
+              className={cn("h-12 w-full min-w-0 bg-transparent leading-none font-medium tracking-tight text-slate-900 tabular-nums placeholder:text-slate-300 dark:placeholder:text-slate-400 focus:outline-none focus-visible:outline-none", amountSize(amount))}
             />
           </Panel>
           <FlipButton onFlip={onFlip} title={`Sell ${outName} for ${inName} instead`} />
@@ -123,7 +123,7 @@ export function NearOnlyCard({ pick, path, ctx, onPick, onFlip, blocked, optOut 
               </span>
             }
           >
-            <output aria-live="polite" aria-label={`You get ${outName}`} className={cn("flex h-12 items-center truncate leading-none font-medium tracking-tight tabular-nums", amountSize(out && to ? nearText(out, to) : "0"), out ? "text-slate-900" : "text-slate-300")}>
+            <output aria-live="polite" aria-label={`You get ${outName}`} className={cn("flex h-12 items-center truncate leading-none font-medium tracking-tight tabular-nums", amountSize(out && to ? nearText(out, to) : "0"), out ? "text-slate-900" : "text-slate-300 dark:text-slate-400")}>
               {out && to ? `≈${nearText(out, to).split(" ")[0]}` : "0"}
             </output>
           </Panel>

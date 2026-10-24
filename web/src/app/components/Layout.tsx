@@ -1,10 +1,11 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { ArrowUpRight, CaretDown, CaretRight, WarningCircle } from "@phosphor-icons/react";
+import { ArrowUpRight, CaretDown, CaretRight, Moon, Sun, WarningCircle } from "@phosphor-icons/react";
 import { Link, usePath } from "@/router";
 import { coin, isMainnet, networkLabel } from "@/format";
 import { counterBalance } from "@/api";
 import { useLocal, type Status } from "../lib/daemon";
 import { pairName } from "../lib/pairs";
+import { useTheme, type ThemeChoice } from "../lib/theme";
 import { cn } from "../lib/utils";
 import { Wordmark } from "./LogoMark";
 import { PairLogo, TokenLogo } from "./Logos";
@@ -12,9 +13,9 @@ import { Fold } from "./ui/fold";
 import { Popover } from "./ui/popover";
 
 // The app shell: a sticky header across the full width (the mark on the left; Swap, Ramp and Help
-// as a segmented pill in the true centre; the network and your account on the right, or "Start a
-// swap" on the landing) and a footer with the deeper pages. Below md the tabs get their own row,
-// the same pill centred, so they stay one tap away on a phone.
+// as a segmented pill in the true centre; the network, the light/dark switch and your account on the
+// right, or "Start a swap" on the landing) and a footer with the deeper pages. Below md the tabs get
+// their own row, the same pill centred, so they stay one tap away on a phone.
 
 const nav = [
   { to: "/app", label: "Swap", match: (p: string) => p === "/app" || p === "/app/activity" || p.startsWith("/app/swap/") || p.startsWith("/app/route/") || p.startsWith("/app/near/") },
@@ -28,7 +29,7 @@ export function Layout({ children, wide }: { children: ReactNode; wide?: boolean
   const d = useLocal();
   const online = d.connected || !!d.status;
   return (
-    <div className="flex min-h-screen flex-col bg-white text-slate-900">
+    <div className="flex min-h-screen flex-col bg-canvas text-slate-900">
       <SiteHeader />
       <main className={cn("mx-auto w-full flex-1 px-4 py-8 sm:px-6 md:py-14", wide ? "max-w-[1400px]" : "max-w-6xl")}>
         {!online ? <OfflineBanner error={d.error} /> : null}
@@ -46,7 +47,7 @@ export function SiteHeader({ landing = false }: { landing?: boolean } = {}) {
   const online = d.connected || !!d.status;
   const tabs = nav.map((n) => ({ ...n, active: n.match(path) }));
   return (
-    <header className="sticky top-0 z-40 border-b border-slate-200/70 bg-white/80 backdrop-blur-md">
+    <header className="sticky top-0 z-40 border-b border-slate-200/70 bg-canvas/80 backdrop-blur-md">
       <div className="relative flex h-16 items-center gap-3 px-4 sm:px-6 lg:px-10">
         <Link to="/" className="flex shrink-0 items-center rounded-lg" aria-label="Ferry, home">
           <Wordmark size={26} />
@@ -56,6 +57,7 @@ export function SiteHeader({ landing = false }: { landing?: boolean } = {}) {
         </nav>
         <div className="ml-auto flex min-w-0 items-center gap-2">
           <NetworkBadge status={d.status} />
+          <ThemeToggle />
           {landing ? (
             <Link to="/app" className="inline-flex h-10 shrink-0 items-center rounded-full bg-slate-900 px-5 text-sm font-semibold text-white transition-colors hover:bg-slate-800">
               Start a swap
@@ -88,7 +90,7 @@ function Tabs({ tabs }: { tabs: { to: string; label: string; active: boolean }[]
           aria-current={t.active ? "page" : undefined}
           className={cn(
             "rounded-full px-4 py-1.5 text-sm whitespace-nowrap transition-[color,background-color,box-shadow]",
-            t.active ? "bg-white font-medium text-slate-900 shadow-[0_1px_3px_rgba(24,24,27,0.12),0_1px_1px_rgba(24,24,27,0.04)]" : "text-slate-500 hover:text-slate-900",
+            t.active ? "bg-white font-medium text-slate-900 shadow-[0_1px_3px_rgba(24,24,27,0.12),0_1px_1px_rgba(24,24,27,0.04)] dark:bg-slate-300" : "text-slate-500 hover:text-slate-900",
           )}
         >
           {t.label}
@@ -122,6 +124,54 @@ function NetworkBadge({ status }: { status: Status | null }) {
       {main ? null : <span className="mt-1 block text-slate-600">Coins here are for testing and have no value.</span>}
       <span className="mt-3 block border-t border-slate-100 pt-3 text-xs text-slate-500">{names.join(" · ")}</span>
     </Popover>
+  );
+}
+
+// Light or dark, in one tap: a moon in light mode, a sun in dark mode. The choice is remembered;
+// the account menu also offers "System", to follow the device again.
+function ThemeToggle() {
+  const { theme, setChoice } = useTheme();
+  const next = theme === "dark" ? "light" : "dark";
+  const label = `Switch to ${next} mode`;
+  return (
+    <button
+      type="button"
+      onClick={() => setChoice(next)}
+      aria-label={label}
+      title={label}
+      className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900"
+    >
+      {theme === "dark" ? <Sun size={18} weight="bold" aria-hidden /> : <Moon size={18} weight="bold" aria-hidden />}
+    </button>
+  );
+}
+
+const THEMES: [ThemeChoice, string][] = [
+  ["system", "System"],
+  ["light", "Light"],
+  ["dark", "Dark"],
+];
+
+// System, Light or Dark, in the account menu: the current choice is a raised pill, as in the tabs
+function ThemeChoices() {
+  const { choice, setChoice } = useTheme();
+  return (
+    <div role="group" aria-label="Theme" className="flex items-center gap-0.5 rounded-full bg-slate-100 p-1">
+      {THEMES.map(([c, text]) => (
+        <button
+          key={c}
+          type="button"
+          aria-pressed={choice === c}
+          onClick={() => setChoice(c)}
+          className={cn(
+            "rounded-full px-2.5 py-1 text-xs whitespace-nowrap transition-[color,background-color,box-shadow]",
+            choice === c ? "bg-white font-medium text-slate-900 shadow-[0_1px_3px_rgba(24,24,27,0.12),0_1px_1px_rgba(24,24,27,0.04)] dark:bg-slate-300" : "text-slate-500 hover:text-slate-900",
+          )}
+        >
+          {text}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -205,6 +255,12 @@ function AccountMenu({ name, status }: { name: string | null; status: Status | n
           </div>
         </dl>
         <p className="px-3 pt-3 pb-2 text-xs text-slate-500">Pair on screen: ZEC ⇄ {pairName(pair).noun}</p>
+        <div className="flex items-center justify-between gap-3 border-t border-slate-100 px-3 py-2.5">
+          <span className="text-xs text-slate-500" aria-hidden>
+            Theme
+          </span>
+          <ThemeChoices />
+        </div>
         {/* a link closes the menu (the click bubbles up to here) */}
         <div className="border-t border-slate-100 pt-1" onClick={() => setOpen(false)}>
           {(
@@ -255,7 +311,7 @@ export const FOOTER_LINKS: [string, string][] = [
 export function SiteFooter() {
   const links = FOOTER_LINKS;
   return (
-    <footer className="border-t border-slate-200/80 bg-white">
+    <footer className="border-t border-slate-200/80 bg-canvas">
       <div className="flex flex-col gap-5 px-4 py-10 sm:px-6 md:flex-row lg:px-10 md:items-center md:justify-between">
         <div className="flex items-center gap-3">
           <Wordmark size={22} />

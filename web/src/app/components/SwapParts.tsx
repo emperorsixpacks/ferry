@@ -69,7 +69,8 @@ export function SidePill({ token, side, onOpen, name }: { token: Token; side: "s
   return <CoinPill logo={<CoinMark token={token} />} label={label} onClick={onOpen} ariaLabel={`${side === "sell" ? "You sell" : "You get"} ${what}. Choose another coin`} />;
 }
 
-// The arrow between the panels: it swaps the two sides, whatever they are.
+// The arrow between the panels: it swaps the two sides, whatever they are. Its thick border is the
+// page's colour, cutting it out of the two panels.
 export function FlipButton({ onFlip, title }: { onFlip: () => void; title: string }) {
   return (
     <div className="relative z-10 -my-[18px] flex justify-center">
@@ -78,7 +79,7 @@ export function FlipButton({ onFlip, title }: { onFlip: () => void; title: strin
         onClick={onFlip}
         aria-label="Switch direction"
         title={title}
-        className="group flex h-10 w-10 items-center justify-center rounded-2xl border-4 border-white bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+        className="group flex h-10 w-10 items-center justify-center rounded-2xl border-4 border-canvas bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
       >
         <ArrowDown size={16} weight="bold" className="group-hover:hidden group-focus-visible:hidden" aria-hidden />
         <ArrowsDownUp size={16} weight="bold" className="hidden group-hover:block group-focus-visible:block" aria-hidden />
