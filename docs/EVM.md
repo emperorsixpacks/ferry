@@ -477,6 +477,9 @@ commands at the fork with
 
 - **Test networks only.** Test ETH, test USDC and TAZ have no value. Base mainnet has a much
   stricter policy (1 h margins, 30 confirmations), and nothing here has been run there.
+  `infra/mainnet-demo.sh` is the tooling for one small owner-funded run on Base mainnet and Zcash
+  mainnet (at most 0.02 ZEC, paid on through NEAR Intents), rehearsed on a fork of Base mainnet
+  under that policy ([MAINNET-DEMO.md](MAINNET-DEMO.md)).
 - **RPC rate limits.** https://sepolia.base.org is shared and throttled, and it answers
   `eth_getLogs` for at most 200 blocks at a time. The script and ferryd retry throttled requests
   with a backoff and time requests out, ferryd scans logs in 200-block chunks and re-reads only
