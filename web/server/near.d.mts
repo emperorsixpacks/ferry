@@ -7,6 +7,8 @@ export const ONE_CLICK_URL: string;
 export const ONE_CLICK_PUBKEY: string;
 export const EXPLORER_URL: string;
 export const PLACEHOLDER: string;
+export function segwitAddress(hrp: string, program: Uint8Array): string;
+export function dryAddress(blockchain: string, side: string): [string, string];
 export const LOCK_FEE_RESERVE: number;
 export const BUY_BUFFER_BPS: number;
 export const FERRY_ASSETS: Record<string, { assetId: string; decimals: number }>;

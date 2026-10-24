@@ -7,6 +7,8 @@ import test from "node:test";
 import {
   FERRY_ASSETS,
   PLACEHOLDER,
+  dryAddress,
+  segwitAddress,
   addressProblem,
   base58,
   bestFerry,
@@ -108,6 +110,17 @@ test("addresses: a first format check per chain, and never a Zcash address", () 
   assert.equal(addressProblem("sol", "has space"), "That doesn't look like an address.");
   // a chain without a known format: anything address-like, and 1Click decides
   assert.equal(addressProblem("qtc", "qtc1abcdefgh12345"), null);
+});
+
+test("dry quotes' placeholder addresses: valid on their chain, held by nobody, NEAR Intents' own account elsewhere", () => {
+  // BIP-173's own test vector
+  assert.equal(segwitAddress("bc", Buffer.from("751e76e8199196d454941c45d1b3a323f1433bd6", "hex")), "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
+  for (const chain of ["btc", "ltc", "sol", "eth", "base", "arb", "op", "bsc"]) {
+    const [a, type] = dryAddress(chain, "DESTINATION_CHAIN");
+    assert.equal(type, "DESTINATION_CHAIN");
+    assert.equal(addressProblem(chain, a), null, `${chain}: ${a}`);
+  }
+  assert.deepEqual(dryAddress("tron", "ORIGIN_CHAIN"), [PLACEHOLDER, "INTENTS"]);
 });
 
 test("amounts: three significant digits for a dry quote, and what a buy asks for", () => {
@@ -235,8 +248,8 @@ test("a quote: the best coin Ferry swaps here, then NEAR Intents' dry quote for 
   assert.equal(asked.swapType, "FLEX_INPUT");
   // a row's quote: a rounded amount, and NEAR Intents placeholders, never a real address
   assert.equal(asked.amount, "401000000");
-  assert.equal(asked.recipient, PLACEHOLDER);
-  assert.equal(asked.recipientType, "INTENTS");
+  assert.deepEqual([asked.recipient, asked.recipientType], dryAddress("sol", "DESTINATION_CHAIN"));
+  assert.deepEqual([asked.refundTo, asked.refundType], dryAddress("base", "ORIGIN_CHAIN"));
   assert.equal(one.calls.find((c) => c.path === "/v0/quote").headers.authorization, "Bearer partner-jwt");
   // a buy: the cheapest route, an exact output of the coin plus the buffer
   const b = await n.quote({ direction: "buy", zec_zat: 100_000_000, asset: "nep141:sol.omft.near" });

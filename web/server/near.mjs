@@ -21,7 +21,7 @@
 //   oneClick({url, jwt})     the API: tokens (cached 5 min), quote, status; timeouts, size caps
 //   nearDesk({...})          quotes composed with a Ferry leg, swaps started from them, and the jobs
 //                            that follow them to the end (kept in a JSON file)
-import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomBytes, verify } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import http from "node:http";
@@ -50,10 +50,58 @@ export const FERRY_ASSETS = {
 };
 export const pairOfAsset = (assetId) => Object.keys(FERRY_ASSETS).find((p) => FERRY_ASSETS[p].assetId === assetId) ?? null;
 
-// A dry quote needs a valid recipient and refund address before the user has typed one: an
-// account inside NEAR Intents (an implicit account of zeros), which 1Click accepts for any asset.
-// It leaves out the destination chain's withdrawal fee, so these quotes are marked approximate.
+// A dry quote needs a valid recipient and refund address before the person has typed one. Where we
+// can form one, an address on the asset's own chain that nobody holds (derived from a fixed string,
+// so its withdrawal fee is counted, and 1Click routes BTC only to a Bitcoin address); else an
+// account inside NEAR Intents (an implicit account of zeros), which 1Click accepts for any asset but
+// without the withdrawal. Dry quotes never move anything; a real one always names real addresses.
 export const PLACEHOLDER = "0".repeat(64);
+
+const BECH32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+function bech32Polymod(values) {
+  const G = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  let chk = 1;
+  for (const v of values) {
+    const b = chk >>> 25;
+    chk = (((chk & 0x1ffffff) << 5) ^ v) >>> 0;
+    for (let i = 0; i < 5; i++) if ((b >>> i) & 1) chk = (chk ^ G[i]) >>> 0;
+  }
+  return chk;
+}
+// a segwit v0 address of a 20-byte program (P2WPKH), as BIP-173 encodes it
+export function segwitAddress(hrp, program) {
+  const data = [0];
+  let acc = 0;
+  let bits = 0;
+  for (const b of program) {
+    acc = (acc << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      data.push((acc >>> bits) & 31);
+    }
+  }
+  if (bits) data.push((acc << (5 - bits)) & 31);
+  const expand = [...hrp].map((c) => c.charCodeAt(0) >> 5).concat([0], [...hrp].map((c) => c.charCodeAt(0) & 31));
+  const mod = bech32Polymod([...expand, ...data, 0, 0, 0, 0, 0, 0]) ^ 1;
+  const check = Array.from({ length: 6 }, (_, i) => (mod >>> (5 * (5 - i))) & 31);
+  return `${hrp}1${[...data, ...check].map((d) => BECH32[d]).join("")}`;
+}
+const seed = (s) => createHash("sha256").update(`ferry dry quote ${s}`, "utf8").digest();
+let dry = null;
+const DRY = () => (dry ??= {
+  btc: segwitAddress("bc", seed("btc").subarray(0, 20)),
+  ltc: segwitAddress("ltc", seed("ltc").subarray(0, 20)),
+  evm: `0x${seed("evm").subarray(0, 20).toString("hex")}`,
+  // an ed25519 public key (on the curve, as a wallet's is), from a fixed seed
+  sol: base58(createPublicKey(createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed("sol")]), format: "der", type: "pkcs8" })).export({ format: "der", type: "spki" }).subarray(-32)),
+});
+// [address, type] for a dry quote on `blockchain`
+export function dryAddress(blockchain, side) {
+  const d = DRY();
+  const a = blockchain === "btc" ? d.btc : blockchain === "ltc" ? d.ltc : blockchain === "sol" ? d.sol : EVM_CHAINS.has(blockchain) ? d.evm : null;
+  return a ? [a, side] : [PLACEHOLDER, "INTENTS"];
+}
 
 // what a Ferry leg takes, roughly, before NEAR Intents' part (mainnet block times)
 const FERRY_SECS = { btc: 1800, ltc: 900, evm: 600 };
@@ -578,9 +626,14 @@ export function nearDesk({
     return address;
   }
 
-  // A sell's partner must pay its coin to an address of ours (its offer lists "payout"); where swaps
-  // run, only those are quoted. On a demo the quote is informational, and every partner counts.
-  const payoutOk = (m) => (directory.offerOf?.(m.index)?.features ?? []).includes("payout");
+  // A sell's partner must build the payout to an address of ours: a Bitcoin or Litecoin maker's offer
+  // lists "payout" (the redeem template comes from the setup), while on an EVM chain the payout is
+  // just the FerryLock claimer, which any maker takes. Where swaps run, only those are quoted; on a
+  // demo the quote is informational, and every partner counts.
+  const payoutOk = (m) => {
+    const offer = directory.offerOf?.(m.index);
+    return offer?.counter === "evm" || (offer?.features ?? []).includes("payout");
+  };
 
   // The routes Ferry can take for `dir`: the user's daemons whose pair NEAR Intents lists, best Ferry
   // leg first, with the maker that takes `zat` and the amount of coin C it comes to.
@@ -602,31 +655,23 @@ export function nearDesk({
     return out;
   }
 
+  // A 1Click quote for a route: `address` is the person's (a sell's recipient, a buy's refund address)
+  // and `recipient` a buy's delivery address (the user's own node); what's missing gets a dry
+  // placeholder (dryAddress), so only a dry quote may leave either out.
   function quoteBody(dir, v, asset, amount, { address = null, recipient = null } = {}) {
-    if (dir === "sell")
-      return {
-        swapType: "FLEX_INPUT",
-        slippageTolerance: slippageBps,
-        originAsset: v.token.assetId,
-        depositType: "ORIGIN_CHAIN",
-        destinationAsset: asset.assetId,
-        amount: amount.toString(),
-        refundTo: PLACEHOLDER,
-        refundType: "INTENTS",
-        recipient: address ?? PLACEHOLDER,
-        recipientType: address ? "DESTINATION_CHAIN" : "INTENTS",
-      };
+    const [to, toType] = (dir === "sell" ? address : recipient) ? [dir === "sell" ? address : recipient, "DESTINATION_CHAIN"] : dryAddress(dir === "sell" ? asset.blockchain : v.token.blockchain, "DESTINATION_CHAIN");
+    const [back, backType] = dir === "buy" && address ? [address, "ORIGIN_CHAIN"] : dryAddress(dir === "sell" ? v.token.blockchain : asset.blockchain, "ORIGIN_CHAIN");
     return {
-      swapType: "EXACT_OUTPUT",
+      swapType: dir === "sell" ? "FLEX_INPUT" : "EXACT_OUTPUT",
       slippageTolerance: slippageBps,
-      originAsset: asset.assetId,
+      originAsset: dir === "sell" ? v.token.assetId : asset.assetId,
       depositType: "ORIGIN_CHAIN",
-      destinationAsset: v.token.assetId,
+      destinationAsset: dir === "sell" ? asset.assetId : v.token.assetId,
       amount: amount.toString(),
-      refundTo: address ?? PLACEHOLDER,
-      refundType: address ? "ORIGIN_CHAIN" : "INTENTS",
-      recipient: recipient ?? PLACEHOLDER,
-      recipientType: recipient ? "DESTINATION_CHAIN" : "INTENTS",
+      refundTo: back,
+      refundType: backType,
+      recipient: to,
+      recipientType: toType,
     };
   }
 
