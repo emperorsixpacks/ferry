@@ -1,5 +1,6 @@
 //! `ferryd`: runs one party (Z or B) of a Ferry ZEC<->BTC swap.
 
+mod bump;
 mod capacity;
 mod config;
 mod daemon;
