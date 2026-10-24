@@ -1,4 +1,15 @@
 {
+  "rewrites": [
+    {
+      "source": "/daemon/:role",
+      "destination": "/api/daemon?role=:role"
+    }
+  ],
+  "functions": {
+    "api/daemon.ts": {
+      "maxDuration": 300
+    }
+  },
   "headers": [
     {
       "source": "/(.*)",

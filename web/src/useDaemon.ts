@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getStatus, getSwaps, type Status, type SwapView } from "./api";
+import { daemonUrl, getStatus, getSwaps, type Status, type SwapView } from "./api";
 import { setCoinFrom } from "./format";
 
 export interface Daemon {
@@ -51,7 +51,7 @@ export function useDaemon(daemon: string | null, seed: Status | null = null): Da
     };
 
     const open = () => {
-      es = new EventSource(base + "/api/events");
+      es = new EventSource(daemonUrl(base, "/api/events"));
       es.onopen = () => {
         setState((s) => ({ ...s, connected: true }));
         refresh();

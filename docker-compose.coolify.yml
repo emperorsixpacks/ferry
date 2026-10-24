@@ -1,6 +1,6 @@
 # Ferry for Coolify: no Caddy — Coolify's reverse proxy handles TLS.
 # Coolify builds this from the repo root and injects env vars via its UI or .env.
-# Expose only the web service; everything else stays on the internal network.
+# Expose ferryd-z (7101) and ferryd-b (7102); the Vercel serverless proxy talks to them directly.
 name: ferry
 
 x-ferryd: &ferryd
@@ -10,7 +10,7 @@ x-ferryd: &ferryd
   image: ferry-ferryd:local
   restart: unless-stopped
   depends_on: [bitcoind]
-  networks: [internal]
+  networks: [internal, coolify]
   stop_grace_period: 30s
 
 services:
@@ -128,41 +128,10 @@ services:
       timeout: 10s
       start_period: 60s
 
-  web:
-    build:
-      context: .
-      dockerfile: infra/deploy/Dockerfile.web
-    image: ferry-web:local
-    restart: unless-stopped
-    environment:
-      PORT: "8080"
-      FERRY_Z_URL: http://ferryd-z:7101
-      FERRY_B_URL: http://ferryd-b:7102
-      FERRY_MAKER_URL: http://ferryd-b:7112
-      FERRY_Z_TOKEN: ${FERRY_Z_TOKEN}
-      FERRY_B_TOKEN: ${FERRY_B_TOKEN}
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost}
-      TRUST_PROXY: "1"
-      DEMO_MAX_ZAT: ${DEMO_MAX_ZAT:-50000000}
-      DEMO_RATE_PER_HOUR: ${DEMO_RATE_PER_HOUR:-3}
-      DEMO_FAULTS: ${DEMO_FAULTS:-0}
-    # Coolify's reverse proxy attaches here; the Vercel frontend calls /daemon/* on this domain.
-    expose:
-      - "8080"
-    networks: [internal]
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
-        ]
-      interval: 30s
-      timeout: 5s
-
 networks:
   internal: {}
+  coolify:
+    external: true
 
 volumes:
   bitcoind: {}

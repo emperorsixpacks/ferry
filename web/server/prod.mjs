@@ -1044,7 +1044,19 @@ const server = http.createServer((req, res) => {
   const m = url.pathname.match(/^\/daemon\/([a-z-]+)(\/.*)?$/);
   if (m && !Object.hasOwn(DAEMONS, m[1])) return json(res, 404, { error: "No such daemon on this server" });
   if (m) {
-    proxy(m[1], m[2] ?? "/", url.search, req, res).catch((e) => {
+    // A production build sends the daemon sub-path in the query (?path=..., the form
+    // web/api/daemon.ts takes on Vercel); dev and older builds send it in the pathname. The daemon
+    // sees a pathname either way, and the query parameter is not its business.
+    let sub = m[2] ?? "/";
+    if (m[2] == null) {
+      const p = url.searchParams.get("path");
+      if (p) {
+        sub = `/${p.replace(/^\/+/, "")}`;
+        url.searchParams.delete("path");
+      }
+    }
+    const search = url.searchParams.toString() ? `?${url.searchParams}` : "";
+    proxy(m[1], sub, search, req, res).catch((e) => {
       console.error("ferry-ui proxy:", e);
       if (!res.headersSent) json(res, 500, { error: "Internal error" });
     });

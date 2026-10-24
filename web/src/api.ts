@@ -105,6 +105,21 @@ export interface SwapView {
   sweep_to?: string | null;
 }
 
+// Routes one daemon call through the proxy this deployment provides. In dev (the Vite proxy) and
+// anywhere else the pathname form works, the path is appended to the base as-is. A production build
+// sends it in query form instead — /daemon/:role?path=... — the shape web/api/daemon.ts takes on
+// Vercel (avoiding catch-all rewrites and slashes in query values, both of which Vercel handles
+// unreliably) and web/server/prod.mjs also reads.
+export function daemonUrl(base: string, path: string): string {
+  if (import.meta.env.DEV) return base + path;
+  // a query the caller put in the path is kept as a real query parameter: the proxy's guards match
+  // the path on its own, and forward the rest themselves.
+  const i = path.indexOf("?");
+  const p = (i < 0 ? path : path.slice(0, i)).replace(/^\//, "");
+  const q = i < 0 ? "" : path.slice(i + 1);
+  return `${base}?path=${encodeURIComponent(p)}${q ? `&${q}` : ""}`;
+}
+
 export const DAEMONS: Record<Role, string> = { Z: "/daemon/z", B: "/daemon/b" };
 // Which way the swap goes, for the person: selling shielded ZEC (their Z daemon takes from a B
 // maker) or buying it (their B daemon takes from a Z maker).
@@ -146,12 +161,15 @@ export const TIMEOUT_TEXT = "The daemon didn't answer in time.";
 const READ_TIMEOUT_MS = 15_000;
 
 async function call<T>(base: string, path: string, body?: unknown): Promise<T> {
+  // daemon paths go through the production ?path= shim; router (/router) and other paths stay
+  // pathname-based.
+  const url = base.startsWith("/daemon") ? daemonUrl(base, path) : base + path;
   // a read gives up on its own after READ_TIMEOUT_MS; a POST (a swap start) waits for the server's answer
   const ctl = body === undefined ? new AbortController() : null;
   const timer = ctl ? setTimeout(() => ctl.abort(), READ_TIMEOUT_MS) : undefined;
   try {
     const res = await fetch(
-      base + path,
+      url,
       ctl
         ? { signal: ctl.signal }
         : {
