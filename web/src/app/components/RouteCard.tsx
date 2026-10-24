@@ -1,38 +1,40 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, ArrowsDownUp, Check, Clock, GearSix, HandCoins, Hourglass, ShieldCheck } from "@phosphor-icons/react";
+import { Check, Clock, GearSix, HandCoins, Hourglass, ShieldCheck } from "@phosphor-icons/react";
 import { counterBalance, startRoute, type Pause, type PairId, type Status } from "@/api";
 import { amountIn } from "@/format";
 import { navigate } from "@/router";
 import { useLocal } from "../lib/daemon";
 import { useMakers } from "../lib/makers";
 import { storePause, storedPause } from "../lib/pairs";
+import { type CardProps, type Side } from "../lib/paths";
 import { useQuotes } from "../lib/quotes";
-import { PAUSE, PAUSES, canRoute, coinFor, parseUnits, routeQuote, startAmount, tickerOf, unitsText, useRoutes, zecText, type RouteQuote } from "../lib/routes";
+import { PAUSE, PAUSES, coinFor, parseUnits, routeQuote, startAmount, tickerOf, unitsText, useRoutes, zecText, type RouteQuote } from "../lib/routes";
 import { cn } from "../lib/utils";
-import { PairLogo, TokenLogo } from "./Logos";
 import { RouteStrip } from "./RouteStrip";
-import { RoutePicker, tokenSubtitle, type Token } from "./TokenPicker";
-import { CoinPill, Fact, Panel, Section, amountSize } from "./SwapParts";
+import { CoinPicker, tokenSubtitle } from "./TokenPicker";
+import { Fact, FlipButton, Panel, PathLine, PrivacyLine, Section, SidePill, amountSize } from "./SwapParts";
 import { Sheet } from "./ui/sheet";
 
-// The swap card when neither side is ZEC: a private swap. Sell one coin, Buy another, and Ferry runs
-// two swaps through Zcash's shielded pool, coin → shielded ZEC → coin (the user's router does). The
-// amount is what you sell, at most: the first swap buys as much ZEC as that pays for, rounded down,
-// at its partner's live rate; the second sells it at the best price now, and never for less than a
-// little under it, else you keep the ZEC. One quiet line says it's a private swap and how long it
-// takes; a short confirmation says what's different before anything starts.
+// The swap card for two Ferry coins: a private swap, the default for any two coins. Sell one coin,
+// Buy another, and Ferry runs two swaps through Zcash's shielded pool, coin → shielded ZEC → coin
+// (the user's router does). The amount is what you sell, at most: the first swap buys as much ZEC
+// as that pays for, rounded down, at its partner's live rate; the second sells it at the best price
+// now, and never for less than a little under it, else you keep the ZEC. The path line says it's
+// private and how long it takes; a short confirmation says what's different before anything starts.
 
 // what a Bitcoin or Litecoin lock's own fee needs on top of the amount (ferryd's B keeps as much)
 const LOCK_FEE_RESERVE = 10_000;
 
-export function RouteCard({ from, to, onChange, blocked }: { from: PairId; to: PairId; onChange: (r: { from: PairId; to: PairId } | null) => void; blocked: string | null }) {
+export function RouteCard({ pick, path, ctx, onPick, onFlip, blocked }: CardProps) {
+  const from = path.from as PairId;
+  const to = path.to as PairId;
   const d = useLocal();
   const routes = useRoutes();
   const makers = useMakers();
   const [amount, setAmount] = useState("");
   const [touched, setTouched] = useState(false);
   const [pause, setPauseState] = useState<Pause>(storedPause);
-  const [picker, setPicker] = useState<"sell" | "buy" | null>(null);
+  const [picker, setPicker] = useState<Side | null>(null);
   const [settings, setSettings] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -91,18 +93,6 @@ export function RouteCard({ from, to, onChange, blocked }: { from: PairId; to: P
     setTouched(true);
     setAmount(amountIn(max, { ...a, places: a.decimals }));
     input.current?.focus();
-  };
-
-  const canFlip = canRoute(routes.legs, to, from);
-  const pick = (side: "sell" | "buy") => (id: Token) => {
-    if (id === "zec") {
-      // a plain swap: sell ZEC for the coin you were getting, or buy it with the coin you were selling
-      const dir = side === "sell" ? "sell" : "buy";
-      d.chooseDirection(dir);
-      d.choosePair(side === "sell" ? to : from, dir);
-      onChange(null);
-    } else if (side === "sell" && id !== from) onChange({ from: id, to });
-    else if (side === "buy" && id !== to) onChange({ from, to: id });
   };
 
   const start = async () => {
@@ -203,7 +193,7 @@ export function RouteCard({ from, to, onChange, blocked }: { from: PairId; to: P
           <Panel
             label="Sell"
             onClick={() => input.current?.focus()}
-            pill={<CoinPill logo={<PairLogo pair={from} size={28} />} label={a.ticker} onClick={() => setPicker("sell")} ariaLabel={`You sell ${a.ticker}. Choose another coin`} />}
+            pill={<SidePill token={from} side="sell" onOpen={() => setPicker("sell")} />}
             foot={
               <>
                 {youHave(fromStatus, from)}
@@ -229,22 +219,10 @@ export function RouteCard({ from, to, onChange, blocked }: { from: PairId; to: P
               className={cn("h-12 w-full min-w-0 bg-transparent leading-none font-medium tracking-tight text-slate-900 tabular-nums placeholder:text-slate-300 focus:outline-none focus-visible:outline-none", amountSize(amount))}
             />
           </Panel>
-          <div className="relative z-10 -my-[18px] flex justify-center">
-            <button
-              type="button"
-              onClick={() => onChange({ from: to, to: from })}
-              disabled={!canFlip}
-              aria-label="Switch direction"
-              title={canFlip ? `Sell ${c.ticker} for ${a.ticker} instead` : `${c.ticker} to ${a.ticker} isn't available here`}
-              className="group flex h-10 w-10 items-center justify-center rounded-2xl border-4 border-white bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-slate-100"
-            >
-              <ArrowDown size={16} weight="bold" className="group-hover:hidden group-focus-visible:hidden group-disabled:block" aria-hidden />
-              <ArrowsDownUp size={16} weight="bold" className="hidden group-hover:block group-focus-visible:block group-disabled:hidden" aria-hidden />
-            </button>
-          </div>
+          <FlipButton onFlip={onFlip} title={`Sell ${c.ticker} for ${a.ticker} instead`} />
           <Panel
             label="Buy"
-            pill={<CoinPill logo={<PairLogo pair={to} size={28} />} label={c.ticker} onClick={() => setPicker("buy")} ariaLabel={`You get ${c.ticker}. Choose another coin`} />}
+            pill={<SidePill token={to} side="buy" onOpen={() => setPicker("buy")} />}
             foot={
               <>
                 <span className="truncate">{tokenSubtitle(to)}</span>
@@ -259,12 +237,6 @@ export function RouteCard({ from, to, onChange, blocked }: { from: PairId; to: P
         </div>
 
         <div className="mt-3 space-y-0.5 px-1 text-[13px] text-slate-500">
-          <p className="flex items-center gap-1.5">
-            <TokenLogo id="zec" size={14} />
-            <span>
-              via shielded ZEC · two swaps · {PAUSE[pause].total}
-            </span>
-          </p>
           {q ? (
             <p>
               <span className="text-slate-700 tabular-nums">
@@ -275,6 +247,7 @@ export function RouteCard({ from, to, onChange, blocked }: { from: PairId; to: P
           ) : makers.list === undefined ? (
             <p>Finding the best price…</p>
           ) : null}
+          <PathLine path={path} time={PAUSE[pause].total} />
         </div>
 
         <button
@@ -282,20 +255,16 @@ export function RouteCard({ from, to, onChange, blocked }: { from: PairId; to: P
           disabled={!q || !!problem || !!blocked || busy}
           className="mt-3 flex h-14 w-full items-center justify-center gap-2 rounded-2xl bg-slate-900 text-base font-semibold text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
         >
-          Swap privately
+          {path.button}
         </button>
         <p id="route-message" role={message ? "alert" : undefined} className={cn("mt-3 text-center text-sm", !message ? "sr-only" : message === blocked ? "text-slate-600" : "text-rose-600")}>
           {message ?? ""}
         </p>
       </form>
 
-      <p className="mt-6 flex items-start justify-center gap-2 text-center text-[13px] text-slate-500">
-        <ShieldCheck size={16} weight="regular" className="mt-px shrink-0" aria-hidden />
-        <span>Your coins pass through Zcash's shielded pool. If the second swap can't run, you keep the ZEC.</span>
-      </p>
+      <PrivacyLine text={path.privacy} />
 
-      <RoutePicker open={picker === "sell"} onClose={() => setPicker(null)} side="sell" current={from} other={to} onPick={pick("sell")} />
-      <RoutePicker open={picker === "buy"} onClose={() => setPicker(null)} side="buy" current={to} other={from} onPick={pick("buy")} />
+      <CoinPicker open={picker !== null} onClose={() => setPicker(null)} side={picker ?? "sell"} pick={pick} ctx={ctx} makers={makers} onPick={(t) => onPick(picker ?? "sell", t)} />
       {q ? <Confirm open={confirm} onClose={() => setConfirm(false)} from={from} to={to} q={q} pause={pause} busy={busy} onStart={start} /> : null}
     </>
   );

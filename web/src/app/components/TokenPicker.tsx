@@ -6,23 +6,22 @@ import { useLocal } from "../lib/daemon";
 import { bestMaker, forPair, ownQuote, quoteOf, type Makers } from "../lib/makers";
 import { FERRY_CHAIN_IDS, chainName as nearChainName, nearAmount, useNear, useRowQuote } from "../lib/near";
 import { pairName } from "../lib/pairs";
-import { canRoute, tickerOf, useRoutes } from "../lib/routes";
+import { ZEC, isNear, nearToken, present, resolvePath, storePick, tickerOf, type Pick, type PathCtx, type Side, type Token } from "../lib/paths";
 import { cn } from "../lib/utils";
-import { ChainLogo, Monogram, NearTokenLogo, PairLogo, TokenLogo, type ChainMarkId } from "./Logos";
+import { ChainLogo, Monogram, NearMark, NearTokenLogo, PairLogo, TokenLogo, type ChainMarkId } from "./Logos";
 import { Sheet, arrowKeys } from "./ui/sheet";
 
-// "Select a token": every coin Ferry can swap ZEC for, filtered by chain or by a search. A row is
-// one pair (USDC on Base, ETH on Arbitrum); pairs this server has no Ferry node for in the
-// direction on screen are listed dimmed ("only for selling ZEC here", "not available here"), so
-// people see what exists without being able to pick it.
+export { NearMark };
+
+// "Select a token": one picker for either side of the swap card. Shielded ZEC on top, then Ferry's
+// own coins (the ones this server swaps, or routes through, first; the rest dimmed, "not available
+// here"), then "More via NEAR Intents": its assets on every chain it reaches (a "More chains" chip
+// opens the rest). Filtered by chain or by a search.
 //
-// With a router (private swaps), the ZEC side of the card opens a picker too: shielded ZEC on top,
-// then the coins that can go through it to (or come from) the coin on the other side.
-//
-// With NEAR Intents on the server, the coin picker ends with "More via NEAR Intents": its assets on
-// every chain it reaches (a "More chains" chip opens the rest), each with a composed quote for the
-// amount on the card. Ferry's own coins stay first and unchanged; a NEAR row carries a small "via
-// NEAR Intents" tag, and on a server that doesn't run NEAR swaps it says they run on your own node.
+// Any coin this server does something with can be picked on either side. A row says, in a few
+// words, how it goes with the coin on the other side ("privately, through ZEC", "not with BTC
+// here"); the card says the rest. Picking the other side's coin swaps the two, as the arrow does.
+// With ZEC on the other side, a NEAR row carries a composed quote for the amount on the card.
 
 const FILTERS: { id: "all" | ChainMarkId; label: string }[] = [
   { id: "all", label: "All" },
@@ -34,8 +33,8 @@ const FILTERS: { id: "all" | ChainMarkId; label: string }[] = [
   { id: "optimism", label: "Optimism" },
 ];
 
-// a coin on the card: shielded ZEC or a pair
-export type Token = "zec" | PairId;
+// a coin on a picker row: shielded ZEC or a pair
+type RowId = "zec" | PairId;
 
 const chainMark = (id: PairId): ChainMarkId => (id === "btc" ? "bitcoin" : id === "ltc" ? "litecoin" : pairChain(id)!);
 const assetName = (id: PairId) => ({ btc: "Bitcoin", ltc: "Litecoin", usdc: "USD Coin", weth: "Wrapped Ether" })[pairCoin(id)];
@@ -45,27 +44,31 @@ export const tokenSubtitle = (id: PairId) => (pairChain(id) ? `${assetName(id)} 
 
 // One row of the sheet. `sub` replaces the coin's subtitle; `off` says why it can't be picked.
 export interface TokenRow {
-  id: Token;
+  id: RowId;
   can: boolean;
   sub?: string;
   off?: string;
   rate?: number;
 }
 
-function matches(id: Token, q: string): boolean {
+function matches(id: RowId, q: string): boolean {
   if (id === "zec") return ["zec", "zcash", "shielded"].some((s) => s.includes(q) || q.includes(s));
   const n = pairName(id);
   return [n.title, n.ticker, n.noun, assetName(id), chainName(id), pairCoin(id) === "weth" ? "eth ether" : ""].some((s) => s.toLowerCase().includes(q));
 }
 
-// NEAR Intents' assets for the coin picker: `tokens` already leave out what Ferry swaps here itself.
+// NEAR Intents' assets for the picker: `tokens` already leave out what Ferry swaps here itself.
 export interface NearSection {
   tokens: NearToken[];
-  dir: Direction;
-  // the ZEC on the card, for each row's quote
+  // a row's quote: ZEC sold (sell) or bought (buy) for it, when ZEC is on the other side; else none
+  dir: Direction | null;
   zat: number;
   selected: string | null;
+  // the other side's asset: picking it swaps the two
+  other: string | null;
   onPick: (assetId: string) => void;
+  // what a NEAR row means here, in a sentence
+  intro: string;
   // NEAR swaps don't run on this server: why, in a few words
   off: string | null;
 }
@@ -84,7 +87,7 @@ function nearMatches(t: NearToken, q: string): boolean {
   return [t.symbol, nearChainName(t.blockchain), t.blockchain, t.contractAddress ?? ""].some((s) => s.toLowerCase().includes(q));
 }
 
-export function TokenSheet({ open, onClose, rows, selected, onPick, label = "Tokens", near }: { open: boolean; onClose: () => void; rows: TokenRow[]; selected: Token | null; onPick: (id: Token) => void; label?: string; near?: NearSection | null }) {
+export function TokenSheet({ open, onClose, rows, selected, onPick, label = "Tokens", near }: { open: boolean; onClose: () => void; rows: TokenRow[]; selected: RowId | null; onPick: (id: RowId) => void; label?: string; near?: NearSection | null }) {
   const [filter, setFilter] = useState<Filter>("all");
   const [more, setMore] = useState(false);
   const [query, setQuery] = useState("");
@@ -122,7 +125,7 @@ export function TokenSheet({ open, onClose, rows, selected, onPick, label = "Tok
       .sort((a, b) => rank(a) - rank(b) || a.symbol.localeCompare(b.symbol) || nearChainName(a.blockchain).localeCompare(nearChainName(b.blockchain)));
   }, [near, filter, query]);
 
-  const pick = (id: Token) => {
+  const pick = (id: RowId) => {
     onPick(id);
     onClose();
   };
@@ -196,7 +199,7 @@ export function TokenSheet({ open, onClose, rows, selected, onPick, label = "Tok
           <p className="px-3 py-10 text-center text-sm text-slate-500">Nothing matches{query.trim() ? ` “${query.trim()}”` : " on this chain"}.</p>
         ) : (
           <>
-            {/* Ferry's own coins; with NEAR Intents here, the ones it can't swap here move below NEAR's */}
+            {/* shielded ZEC and Ferry's own coins; with NEAR Intents here, the ones it can't swap here move below NEAR's */}
             {shown.length && (!near || firstOff !== 0) ? (
               <div role="listbox" aria-label={label} data-token-list onKeyDown={arrowKeys}>
                 <div role="group" aria-label="Available">
@@ -216,7 +219,7 @@ export function TokenSheet({ open, onClose, rows, selected, onPick, label = "Tok
                   </h3>
                 </div>
                 <p className="px-3 pb-2 text-xs text-slate-500">
-                  {near.dir === "sell" ? "Ferry sells your ZEC for a coin it swaps, and NEAR Intents carries it on." : "NEAR Intents turns your coin into one Ferry swaps, and Ferry buys the ZEC."} That part is public.
+                  {near.intro} That part is public.
                   {near.off ? ` ${near.off}` : ""}
                 </p>
                 <div role="listbox" aria-label="More via NEAR Intents" onKeyDown={arrowKeys}>
@@ -270,20 +273,11 @@ function ChainDot({ chain }: { chain: string }) {
   return <Monogram symbol={sym[chain] ?? chain.toUpperCase()} size={16} />;
 }
 
-// NEAR Intents, as a small mark: an N in a dark disc (not its logo)
-export function NearMark({ size = 16, className }: { size?: number; className?: string }) {
-  return (
-    <svg viewBox="0 0 32 32" width={size} height={size} className={cn("shrink-0", className)} aria-hidden>
-      <rect width="32" height="32" rx="9" fill="#18181b" />
-      <path d="M10 23V9h2.6l6.8 9.6V9H22v14h-2.6l-6.8-9.6V23z" fill="#fff" />
-    </svg>
-  );
-}
-
-// One NEAR Intents asset: its mark and chain, a "via NEAR Intents" tag, and what the card's ZEC
-// comes to (selling) or costs (buying), from a dry quote asked once the row is on screen.
+// One NEAR Intents asset: its mark and chain, a "via NEAR Intents" tag, and, with ZEC on the other
+// side, what the card's ZEC comes to (selling) or costs (buying), from a dry quote asked once the
+// row is on screen.
 function NearRow({ token: t, near, focus, onPick }: { token: NearToken; near: NearSection; focus: boolean; onPick: (assetId: string) => void }) {
-  const q = useRowQuote(near.dir, near.zat, t.assetId);
+  const q = useRowQuote(near.dir ?? "sell", near.dir ? near.zat : 0, t.assetId);
   const selected = near.selected === t.assetId;
   const amount = q.quote ? (near.dir === "sell" ? q.quote.near.amount_out : q.quote.near.amount_in) : null;
   const zec = (near.zat / 1e8).toFixed(4).replace(/0{1,2}$/, "");
@@ -310,19 +304,21 @@ function NearRow({ token: t, near, focus, onPick }: { token: NearToken; near: Ne
         </span>
         <span className="block truncate text-[13px] text-slate-500">
           {nearChainName(t.blockchain)}
-          {near.off ? " · on your own node" : ""}
+          {near.other === t.assetId ? " · switches the two sides" : near.off ? " · on your own node" : ""}
         </span>
       </span>
-      <span className="shrink-0 text-right">
-        <span className={cn("block text-sm tabular-nums", amount ? "text-slate-900" : "text-slate-400")}>{amount ? `≈ ${nearAmount(amount, t.decimals)}` : q.error ? "–" : "…"}</span>
-        <span className="block text-xs text-slate-500">{q.error ? "no quote now" : `${near.dir === "sell" ? "for" : "buys"} ${zec} ZEC`}</span>
-      </span>
+      {near.dir ? (
+        <span className="shrink-0 text-right">
+          <span className={cn("block text-sm tabular-nums", amount ? "text-slate-900" : "text-slate-400")}>{amount ? `≈ ${nearAmount(amount, t.decimals)}` : q.error ? "–" : "…"}</span>
+          <span className="block text-xs text-slate-500">{q.error ? "no quote now" : `${near.dir === "sell" ? "for" : "buys"} ${zec} ZEC`}</span>
+        </span>
+      ) : null}
       {selected ? <Check size={18} weight="bold" className="shrink-0 text-slate-900" aria-hidden /> : <span className="w-[18px] shrink-0" aria-hidden />}
     </button>
   );
 }
 
-function Row({ row, selected, focus, phone, onPick }: { row: TokenRow; selected: boolean; focus: boolean; phone: boolean; onPick: (id: Token) => void }) {
+function Row({ row, selected, focus, phone, onPick }: { row: TokenRow; selected: boolean; focus: boolean; phone: boolean; onPick: (id: RowId) => void }) {
   const { id, can, rate } = row;
   const zec = id === "zec";
   const ticker = zec ? "ZEC" : pairName(id).ticker;
@@ -358,118 +354,113 @@ function Row({ row, selected, focus, phone, onPick }: { row: TokenRow; selected:
   );
 }
 
-// The coin side of a ZEC swap: the pairs, those with a Ferry node for the direction on screen first,
-// then NEAR Intents' assets when the server has it and `onNear` takes them. `nearSelected`: the NEAR
-// asset on the card (then no pair is the selected one).
-export function TokenPicker({
-  open,
-  onClose,
-  makers,
-  role,
-  zat = 1e8,
-  onNear,
-  onPair,
-  nearSelected = null,
-}: {
-  open: boolean;
-  onClose: () => void;
-  makers: Makers;
-  role: Role;
-  zat?: number;
-  onNear?: (assetId: string) => void;
-  onPair?: (id: PairId) => void;
-  nearSelected?: string | null;
-}) {
+// The landing page's coin picker: the coin side of a ZEC swap in the direction on screen, Ferry's
+// own coins only; the pick carries over to /app.
+export function TokenPicker({ open, onClose, makers, role }: { open: boolean; onClose: () => void; makers: Makers; role: Role }) {
   const { pairs, pair, choosePair, status, dir } = useLocal();
-  const nearCtx = useNear();
-
-  // each pair's best rate for 1 ZEC, from the partners that take swaps now
-  const rates = useMemo(() => {
-    const out: Partial<Record<PairId, number>> = {};
-    for (const id of PAIR_IDS) {
-      if (makers.list === null) {
-        if (id === pair && status) out[id] = ownQuote(status).rate;
-        continue;
-      }
-      const usable = (makers.list ?? []).filter((m) => m.available && (m.role == null || m.role !== role) && forPair(m, id, pair));
-      const best = bestMaker(usable, 1e8, role);
-      if (best) out[id] = quoteOf(best)!.rate;
-    }
-    return out;
-  }, [makers.list, pair, role, status]);
-
   const rows = useMemo(
     () =>
       PAIR_IDS.map((id): TokenRow => {
         const p = pairs.find((x) => x.id === id);
         const can = !!p?.[dir].daemon;
         const otherWay = !!p?.[dir === "sell" ? "buy" : "sell"].daemon;
-        return { id, can, rate: can ? rates[id] : undefined, off: otherWay ? `only for ${dir === "buy" ? "selling" : "buying"} ZEC here` : "not available here" };
+        let rate: number | undefined;
+        if (can && makers.list === null && id === pair && status) rate = ownQuote(status).rate;
+        else if (can && makers.list) {
+          const best = bestMaker(makers.list.filter((m) => m.available && (m.role == null || m.role !== role) && forPair(m, id, pair)), 1e8, role);
+          rate = best ? quoteOf(best)?.rate : undefined;
+        }
+        return { id, can, rate, off: otherWay ? `only for ${dir === "buy" ? "selling" : "buying"} ZEC here` : "not available here" };
       }),
-    [pairs, dir, rates],
+    [pairs, dir, makers.list, pair, status, role],
   );
-
-  // NEAR Intents' assets, without the coins Ferry swaps here itself this way (those are above)
-  const near = useMemo((): NearSection | null => {
-    if (!onNear || !nearCtx.info?.available) return null;
-    const direct = new Set(pairs.filter((p) => p[dir].daemon).map((p) => p.id));
-    const tokens = nearCtx.tokens.filter((t) => !(t.ferry && direct.has(t.ferry)));
-    if (!tokens.length) return null;
-    const off = nearCtx.runs(dir) ? null : nearCtx.info.reason === "mainnet" ? "Quotes only: NEAR Intents runs on mainnet, and this node is on a test network." : "Quotes only here: NEAR Intents swaps run on your own node, on mainnet.";
-    return { tokens, dir, zat: zat > 0 ? zat : 1e8, selected: nearSelected, onPick: onNear, off };
-  }, [onNear, nearCtx, pairs, dir, zat, nearSelected]);
-
   return (
     <TokenSheet
       open={open}
       onClose={onClose}
       rows={rows}
-      selected={nearSelected ? null : pair}
+      selected={pair}
       onPick={(id) => {
         if (id === "zec") return;
         choosePair(id);
-        onPair?.(id);
+        storePick(dir === "sell" ? { sell: ZEC, buy: id } : { sell: id, buy: ZEC });
       }}
-      near={near}
     />
   );
 }
 
-// One side of a private swap, or the ZEC side of a ZEC swap when the server has a router: shielded
-// ZEC on top (a plain ZEC swap with the coin on the other side, if this server does that one), then
-// every coin that can go through ZEC to (selling) or come from (buying) the coin on the other side.
-export function RoutePicker({
-  open,
-  onClose,
-  side,
-  current,
-  other,
-  onPick,
-}: {
-  open: boolean;
-  onClose: () => void;
-  // the panel it opened from: "sell" (Sell) or "buy" (Buy)
-  side: Direction;
-  current: Token;
-  // the coin on the other panel
-  other: PairId;
-  onPick: (id: Token) => void;
-}) {
-  const { pairs } = useLocal();
-  const { legs } = useRoutes();
-  const rows = useMemo(() => {
-    // ZEC here makes a plain swap: sell ZEC for `other` (this is Sell) or buy it with `other`
-    const p = pairs.find((x) => x.id === other);
-    const direct = !!p?.[side === "sell" ? "sell" : "buy"].daemon;
-    const zec: TokenRow = { id: "zec", can: direct, sub: "Zcash · shielded", off: `not with ${tickerOf(other)} here` };
-    const coins = PAIR_IDS.map((id): TokenRow => {
-      const ok = side === "sell" ? canRoute(legs, id, other) : canRoute(legs, other, id);
-      if (ok) return { id, can: true, sub: `${tokenSubtitle(id)} · privately, through ZEC` };
-      const ends = side === "sell" ? legs?.from.includes(id) : legs?.to.includes(id);
-      const off = id === other ? `already what you ${side === "sell" ? "get" : "sell"}` : ends && pairCoin(id) === pairCoin(other) ? `the same coin as you ${side === "sell" ? "get" : "sell"}` : `not with ${tickerOf(other)} here`;
-      return { id, can: false, off };
-    });
+// The one picker, for the side of the card it opened from (`side`), with `pick` on the card.
+// `zat`: the ZEC on the card, for the NEAR rows' quotes when ZEC is on the other side.
+export function CoinPicker({ open, onClose, side, pick, ctx, makers, zat = 1e8, onPick }: { open: boolean; onClose: () => void; side: Side; pick: Pick; ctx: PathCtx; makers?: Makers; zat?: number; onPick: (t: Token) => void }) {
+  const { pair: onScreen, status } = useLocal();
+  const nearCtx = useNear();
+  const current = side === "sell" ? pick.sell : pick.buy;
+  const other = side === "sell" ? pick.buy : pick.sell;
+  const withZec = other === ZEC;
+  const otherName = tickerOf(other, ctx);
+
+  // with ZEC on the other side, each coin's best rate for 1 ZEC from the partners that take swaps now
+  const rates = useMemo(() => {
+    const out: Partial<Record<PairId, number>> = {};
+    if (!withZec || !makers) return out;
+    // the role you take: selling ZEC (Z) when the coin is what you get, else buying it (B)
+    const role: Role = side === "buy" ? "Z" : "B";
+    for (const id of PAIR_IDS) {
+      if (makers.list === null) {
+        if (id === onScreen && status) out[id] = ownQuote(status).rate;
+        continue;
+      }
+      const usable = (makers.list ?? []).filter((m) => m.available && (m.role == null || m.role !== role) && forPair(m, id, onScreen));
+      const best = bestMaker(usable, 1e8, role);
+      if (best) out[id] = quoteOf(best)!.rate;
+    }
+    return out;
+  }, [withZec, makers, side, onScreen, status]);
+
+  // how a coin goes with the other side's, in a few words
+  const hint = (t: Token): string | null => {
+    if (t === other) return "switches the two sides";
+    const p = side === "sell" ? resolvePath(t, other, ctx) : resolvePath(other, t, ctx);
+    if (p.available === false) return `not with ${otherName} here`;
+    if (p.private) return "privately, through ZEC";
+    return null;
+  };
+
+  const rows = useMemo((): TokenRow[] => {
+    const join = (...parts: (string | null)[]) => parts.filter(Boolean).join(" · ");
+    const zec: TokenRow = { id: "zec", can: true, sub: join("Zcash · shielded", hint(ZEC)) };
+    const coins = PAIR_IDS.map((id): TokenRow => (present(ctx, id) ? { id, can: true, sub: join(tokenSubtitle(id), hint(id)), rate: rates[id] } : { id, can: false, off: "not available here" }));
     return [zec, ...coins];
-  }, [pairs, legs, side, other]);
-  return <TokenSheet open={open} onClose={onClose} rows={rows} selected={current} onPick={onPick} />;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctx, rates, side, other]);
+
+  // NEAR Intents' assets, without the coins Ferry swaps here itself (those are above)
+  const near = useMemo((): NearSection | null => {
+    if (!nearCtx.info?.available) return null;
+    const here = new Set(PAIR_IDS.filter((p) => present(ctx, p)));
+    const tokens = nearCtx.tokens.filter((t) => !(t.ferry && here.has(t.ferry)));
+    if (!tokens.length) return null;
+    const dir: Direction | null = withZec ? (side === "buy" ? "sell" : "buy") : null;
+    const runs = dir ? nearCtx.runs(dir) : !!nearCtx.info.compose?.runs;
+    const off = runs ? null : nearCtx.info.reason === "mainnet" ? "Quotes only: NEAR Intents runs on mainnet, and this node is on a test network." : "Quotes only here: NEAR Intents swaps run on your own node, on mainnet.";
+    const intro = withZec
+      ? side === "buy"
+        ? "Ferry sells your ZEC for a coin it swaps, and NEAR Intents carries it on."
+        : "NEAR Intents turns your coin into one Ferry swaps, and Ferry buys the ZEC."
+      : side === "buy"
+        ? "Your coin goes privately through shielded ZEC, then NEAR Intents carries it on."
+        : "NEAR Intents brings your coin in, then it goes privately through shielded ZEC.";
+    return {
+      tokens,
+      dir,
+      zat: zat > 0 ? zat : 1e8,
+      selected: isNear(current) ? current.slice(5) : null,
+      other: isNear(other) ? other.slice(5) : null,
+      onPick: (id) => onPick(nearToken(id)),
+      intro,
+      off,
+    };
+  }, [nearCtx, ctx, withZec, side, zat, current, other, onPick]);
+
+  return <TokenSheet open={open} onClose={onClose} rows={rows} selected={isNear(current) ? null : (current as RowId)} onPick={(id) => onPick(id)} near={near} />;
 }

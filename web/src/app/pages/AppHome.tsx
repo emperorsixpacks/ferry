@@ -1,98 +1,77 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowRight, ArrowsDownUp, GearSix, ShieldCheck } from "@phosphor-icons/react";
-import { counterBalance, pairChain, startSwap, type PairId, type Role, type RouteLegs, type RouteView, type Status, type SwapView } from "@/api";
+import { ArrowRight, GearSix } from "@phosphor-icons/react";
+import { counterBalance, pairChain, startSwap, type Role, type RouteView, type Status, type SwapView } from "@/api";
 import { CHAIN_NAMES, amountIn, coin, zec } from "@/format";
 import { Link, navigate } from "@/router";
 import { btcText } from "@/swap/shared";
 import { roughDuration, typicalSeconds } from "@/swap/timing";
+import { ComboCard } from "../components/ComboCard";
 import { Layout } from "../components/Layout";
-import { PairLogo, TokenLogo } from "../components/Logos";
 import { PartnerList } from "../components/MakerList";
 import { NearCard } from "../components/NearCard";
+import { OffCard } from "../components/OffCard";
 import { RouteCard } from "../components/RouteCard";
-import { CoinPill, Fact, Panel, Section, amountSize, capital } from "../components/SwapParts";
-import { RoutePicker, TokenPicker, tokenSubtitle, type Token } from "../components/TokenPicker";
+import { Fact, FlipButton, Panel, PathLine, PrivacyLine, Section, SidePill, amountSize, capital, minutesText } from "../components/SwapParts";
+import { CoinPicker, tokenSubtitle } from "../components/TokenPicker";
 import { Sheet } from "../components/ui/sheet";
 import { cn } from "../lib/utils";
 import { useLocal } from "../lib/daemon";
 import { capacity, counterFor, liveQuote, quoteOf, useMakers, type Makers, type Quote } from "../lib/makers";
-import { isActive as nearActive, nearSummary, storeNear, storedNear, useNear } from "../lib/near";
-import { pairName, storeRoute, storedRoute } from "../lib/pairs";
+import { comboSummary, isActive as nearActive, nearSummary, useNear } from "../lib/near";
+import { pairName } from "../lib/pairs";
+import { following, nearAssetOf, usePathCtx, useSelection, type CardProps, type Side } from "../lib/paths";
 import { plainSummary } from "../lib/progress";
 import { secondsLeft, useQuotes, withFirm } from "../lib/quotes";
-import { canRoute, isRunning, legSwapIds, routeSummary, useRoutes } from "../lib/routes";
+import { isRunning, legSwapIds, routeSummary, useRoutes } from "../lib/routes";
 
-// /app: one swap card, either way round. Selling ZEC: Sell (shielded ZEC) on top, Buy (the coin
-// picked from "Select a token") below. Buying ZEC: the arrow between them flips the card, so the
-// coin is sold on top and ZEC bought below. The amount is always the ZEC: what you sell, or what
-// you want. Swaps are denominated in ZEC end to end (the partner's limits, its liquidity, the
-// amount locked), so the number typed is exactly what moves, with no rounding, and the coin side is
-// worked out the way the partner works it out. The rate comes from the best partner for the
-// direction, and the partner and details are behind the settings pill above the card.
-//
-// With a router on the server (private swaps), both sides can be a coin: the ZEC pill opens a picker
-// too, with shielded ZEC on top and the coins that can go through it below. Picking one turns the
-// card into a private swap (RouteCard), coin → shielded ZEC → coin; picking ZEC again turns it back.
-// Without a router none of this shows: the ZEC pill stays a plain label.
-//
-// With NEAR Intents on the server, the coin picker also lists its assets ("More via NEAR Intents").
-// Picking one turns the card into a NEAR swap (NearCard): Ferry swaps the ZEC for a coin it supports
-// and NEAR Intents carries it on, or the other way round; picking one of Ferry's coins turns it back.
+// /app: one swap card for any two coins. Sell defaults to shielded ZEC and Buy to the first coin
+// this server sells it for; both pills open the same picker (shielded ZEC, Ferry's coins, then more
+// via NEAR Intents), and the arrow swaps the two sides, whatever they are. server/paths.mjs says
+// which way the two coins go, and the card follows it:
+//   ZEC ↔ a Ferry coin        one Ferry swap (SwapCard below): the amount is the ZEC, either way
+//   ZEC ↔ a NEAR asset        Ferry, then NEAR Intents, or the other way (NearCard)
+//   coin ↔ coin               a private swap through shielded ZEC (RouteCard), the default for any
+//                             two coins: Ferry's promise is a cross-chain swap that leaves no trail
+//   NEAR Intents at an end    a private swap with NEAR Intents before it, after it or both (ComboCard)
+// What this server can't run stays on the card, looking the same, with one sentence on why
+// (OffCard). Under the amounts, the path line says who runs each part and how long it takes; under
+// the card, one honest line says what stays private.
 
 // what the ZEC lock's network fee needs on top of the amount (ferry-zec's SEND_FEE_RESERVE)
 const ZEC_FEE_RESERVE = 50_000;
 // what a Bitcoin or Litecoin lock's own fee needs on top of the amount (ferryd's B keeps as much)
 const LOCK_FEE_RESERVE = 10_000;
 
-type Route = { from: PairId; to: PairId };
-
-// The private swap on the card, if any: the viewer's pick, while the server can run it.
-function useRouteChoice(legs: RouteLegs | null): [Route | null, (r: Route | null) => void] {
-  const [choice, setChoice] = useState<Route | null>(storedRoute);
-  const set = (r: Route | null) => {
-    setChoice(r);
-    storeRoute(r);
-  };
-  return [choice && canRoute(legs, choice.from, choice.to) ? choice : null, set];
-}
-
-// The NEAR Intents asset on the card, if any: the viewer's pick, while the server lists it.
-function useNearChoice(): [string | null, (asset: string | null) => void] {
-  const near = useNear();
-  const [choice, setChoice] = useState<string | null>(storedNear);
-  const set = (a: string | null) => {
-    setChoice(a);
-    storeNear(a);
-  };
-  // while the list loads, keep the pick; once it's there, only what it lists
-  const ok = !!choice && (near.info === undefined || (!!near.info && !!near.byId[choice]));
-  return [ok ? choice : null, set];
-}
-
 export function AppHome() {
   const d = useLocal();
   const routes = useRoutes();
   const near = useNear();
-  const [route, setRouteChoice] = useRouteChoice(routes.legs);
-  const [nearAsset, setNearAsset] = useNearChoice();
-  // one kind of card at a time: a private swap, a NEAR swap, or a plain one
-  const setRoute = (r: Route | null) => {
-    setRouteChoice(r);
-    if (r) setNearAsset(null);
-  };
-  const setNear = (a: string | null) => {
-    setNearAsset(a);
-    if (a) setRouteChoice(null);
-  };
+  const ctx = usePathCtx();
+  const sel = useSelection(ctx);
   // a private swap's two swaps are the private swap's: its banner, not theirs; a NEAR swap's Ferry
-  // swap likewise
+  // swap likewise, and a private swap with NEAR Intents at an end holds its route
+  const comboRoutes = new Set(near.combos.map((c) => c.route.id).filter(Boolean));
   const legs = legSwapIds(routes.list);
   for (const j of near.jobs) for (const id of [j.ferry.swap_id, ...j.ferry.earlier]) if (id) legs.add(id);
+  for (const c of near.combos) for (const id of c.route.swaps) legs.add(id);
   const live = d.list.find((s) => !s.outcome && !s.route && !legs.has(s.id));
-  const moving = routes.list.find(isRunning);
-  const holding = routes.list.find((v) => v.state === "holding");
+  const moving = routes.list.find((v) => isRunning(v) && !comboRoutes.has(v.id));
+  const holding = routes.list.find((v) => v.state === "holding" && !comboRoutes.has(v.id));
   const nearLive = near.jobs.find(nearActive);
-  const blocked = moving ? "Finish your private swap first." : live ? "Finish the swap in progress first." : null;
+  const comboLive = near.combos.find(nearActive);
+  const blocked = moving || comboLive?.state === "route" ? "Finish your private swap first." : live ? "Finish the swap in progress first." : null;
+
+  const { pick, path } = sel;
+  let card = null;
+  if (pick && path) {
+    const props: CardProps = { pick, path, ctx, onPick: sel.pickSide, onFlip: sel.flip, blocked };
+    if (!path.available) card = <OffCard {...props} />;
+    else if ((path.kind === "sell" || path.kind === "buy") && following(path, d)) card = <SwapCard key={`${path.kind}|${path.pair}`} {...props} status={d.status} />;
+    else if ((path.kind === "near-sell" || path.kind === "near-buy") && following(path, d)) card = <NearCard key={path.kind} {...props} asset={nearAssetOf(path.kind === "near-sell" ? pick.buy : pick.sell)!} />;
+    else if (path.kind === "route") card = <RouteCard {...props} />;
+    else if (path.kind === "route-near" || path.kind === "near-route" || path.kind === "near-near") card = <ComboCard key={path.kind} {...props} />;
+    else card = <OffCard {...props} />;
+  }
   return (
     <Layout>
       <div className="mx-auto w-full max-w-[480px]">
@@ -100,18 +79,14 @@ export function AppHome() {
           <RouteBanner route={moving} />
         ) : live ? (
           <LiveBanner swap={live} status={d.status} />
+        ) : comboLive ? (
+          <Banner to={`/app/combo/${comboLive.id}`} title={comboLive.state === "deposit" ? "A swap is waiting for your deposit" : comboLive.state === "holding" ? "Your private swap is waiting for you" : "You have a private swap in progress"} line={comboSummary(comboLive)} pulse={comboLive.state !== "holding"} />
         ) : nearLive ? (
           <Banner to={`/app/near/${nearLive.id}`} title={nearLive.state === "deposit" ? "A swap is waiting for your deposit" : nearLive.state === "holding" ? "Your NEAR Intents swap is waiting for you" : "You have a swap in progress"} line={nearSummary(nearLive)} pulse={nearLive.state !== "holding"} />
         ) : holding ? (
           <RouteBanner route={holding} />
         ) : null}
-        {route ? (
-          <RouteCard from={route.from} to={route.to} onChange={setRoute} blocked={blocked} />
-        ) : nearAsset ? (
-          <NearCard asset={nearAsset} onChange={setNear} blocked={blocked} />
-        ) : (
-          <SwapCard status={d.status} blocked={blocked} onRoute={routes.legs ? setRoute : null} onNear={near.info?.available ? setNear : null} />
-        )}
+        {card ?? <OffCard loading />}
       </div>
     </Layout>
   );
@@ -148,31 +123,35 @@ function RouteBanner({ route }: { route: RouteView }) {
   return <Banner to={`/app/route/${route.id}`} title={running ? "You have a private swap in progress" : "Your private swap is waiting for you"} line={routeSummary(route)} pulse={running} />;
 }
 
-function SwapCard({ status, blocked: elsewhere, onRoute, onNear }: { status: Status | null; blocked: string | null; onRoute: ((r: Route) => void) | null; onNear: ((asset: string) => void) | null }) {
-  const { role, dir, bt, daemon, pair, canFlip, chooseDirection } = useLocal();
+// ZEC for a Ferry coin, or the other way: one swap. Selling ZEC, shielded ZEC on top and the coin
+// below; buying it, the coin on top. The amount is always the ZEC: what you sell, or what you want.
+// Swaps are denominated in ZEC end to end (the partner's limits, its liquidity, the amount locked),
+// so the number typed is exactly what moves, and the coin side is worked out the way the partner
+// works it out. The rate comes from the best partner for the direction; the partner and details
+// are behind the settings pill above the card.
+function SwapCard({ status, blocked: elsewhere, pick, path, ctx, onPick, onFlip }: CardProps & { status: Status | null }) {
+  const { role, dir, bt, daemon, pair } = useLocal();
   const buying = dir === "buy";
   const makers = useMakers();
-  const [pick, setPick] = useState<string | null>(null);
+  const [partner, setPartner] = useState<string | null>(null);
   const [amount, setAmount] = useState("1.00");
   const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [fail, setFail] = useState<string | null>(null);
-  const [picker, setPicker] = useState(false);
-  // the ZEC pill's picker, with a router: another coin there makes a private swap
-  const [zecPicker, setZecPicker] = useState(false);
+  const [picker, setPicker] = useState<Side | null>(null);
   const [settings, setSettings] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   // a partner picked for one coin or direction doesn't carry over to another
   useEffect(() => {
     setFail(null);
-    setPick(null);
+    setPartner(null);
   }, [pair, dir]);
 
   const zat = Math.round(Number(amount) * 1e8);
   const valid = amount.trim() !== "" && Number.isFinite(zat) && zat > 0;
   // a firm price (lib/quotes) when a partner gives one, else the partners' indicative rates
   const quotes = useQuotes(pair, role, valid ? zat : 0);
-  const { maker, quote, usable, skipped, firm } = withFirm(liveQuote(makers, status, role, valid ? zat : 0, pick), quotes.list, makers.list, pick);
+  const { maker, quote, usable, skipped, firm } = withFirm(liveQuote(makers, status, role, valid ? zat : 0, partner), quotes.list, makers.list, partner);
 
   // a host can cap swaps below the default amount (the public demo does): start at the cap
   const cap = makers.list === null ? quote?.max : usable.length ? Math.max(...usable.map((m) => (quoteOf(m) ? capacity(quoteOf(m)!) : 0))) : undefined;
@@ -233,21 +212,14 @@ function SwapCard({ status, blocked: elsewhere, onRoute, onNear }: { status: Sta
     </button>
   );
   const youHave = (text: string | null) => <span className="truncate tabular-nums">{text == null ? "You have –" : `You have ${text}`}</span>;
+  const zecSide: Side = buying ? "buy" : "sell";
 
   const zecPanel = (
     <Panel
       key="zec"
       label={buying ? "Buy" : "Sell"}
       onClick={() => input.current?.focus()}
-      pill={
-        <CoinPill
-          logo={<TokenLogo id="zec" size={28} />}
-          label="ZEC"
-          title={buying ? "Arrives shielded" : "Your shielded ZEC"}
-          onClick={onRoute ? () => setZecPicker(true) : undefined}
-          ariaLabel={`${buying ? "You get" : "You sell"} shielded ZEC. Swap another coin privately instead`}
-        />
-      }
+      pill={<SidePill token="zec" side={zecSide} onOpen={() => setPicker(zecSide)} />}
       foot={
         buying ? (
           <>
@@ -282,11 +254,12 @@ function SwapCard({ status, blocked: elsewhere, onRoute, onNear }: { status: Sta
       />
     </Panel>
   );
+  const coinSide: Side = buying ? "sell" : "buy";
   const coinPanel = (
     <Panel
       key="coin"
       label={buying ? "Sell" : "Buy"}
-      pill={<CoinPill logo={<PairLogo pair={pair} size={28} />} label={name.label} onClick={() => setPicker(true)} ariaLabel={`${buying ? "You pay with" : "You get"} ${name.noun}. Choose another coin`} />}
+      pill={<SidePill token={pair} side={coinSide} onOpen={() => setPicker(coinSide)} name={name.noun} />}
       foot={
         buying ? (
           <>
@@ -310,21 +283,7 @@ function SwapCard({ status, blocked: elsewhere, onRoute, onNear }: { status: Sta
       </output>
     </Panel>
   );
-  const flip = (
-    <div key="flip" className="relative z-10 -my-[18px] flex justify-center">
-      <button
-        type="button"
-        onClick={() => chooseDirection(buying ? "sell" : "buy")}
-        disabled={!canFlip}
-        aria-label="Switch direction"
-        title={canFlip ? (buying ? "Sell ZEC instead" : "Buy ZEC instead") : `${buying ? "Selling" : "Buying"} ZEC isn't available here`}
-        className="group flex h-10 w-10 items-center justify-center rounded-2xl border-4 border-white bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-slate-100"
-      >
-        <ArrowDown size={16} weight="bold" className="group-hover:hidden group-focus-visible:hidden group-disabled:block" aria-hidden />
-        <ArrowsDownUp size={16} weight="bold" className="hidden group-hover:block group-focus-visible:block group-disabled:hidden" aria-hidden />
-      </button>
-    </div>
-  );
+  const flip = <FlipButton key="flip" onFlip={onFlip} title={buying ? `Sell ZEC for ${ticker} instead` : `Buy ZEC with ${ticker} instead`} />;
 
   return (
     <>
@@ -335,16 +294,16 @@ function SwapCard({ status, blocked: elsewhere, onRoute, onNear }: { status: Sta
             type="button"
             onClick={() => setSettings(true)}
             aria-haspopup="dialog"
-            aria-label={`Settings: partner ${maker?.name ?? "none"}${pick ? "" : " (best rate)"}`}
+            aria-label={`Settings: partner ${maker?.name ?? "none"}${partner ? "" : " (best rate)"}`}
             className="inline-flex h-9 items-center gap-2 rounded-full border border-slate-200 bg-white pr-2.5 pl-3.5 text-sm text-slate-700 shadow-[0_1px_2px_rgba(24,24,27,0.04)] transition-colors hover:border-slate-300 hover:text-slate-900"
           >
-            {pick ? null : <span className="text-slate-500">Auto</span>}
+            {partner ? null : <span className="text-slate-500">Auto</span>}
             <span className="max-w-[9rem] truncate font-medium text-slate-900">{maker?.name ?? (makers.list === null ? "Partner" : "No partner")}</span>
             <GearSix size={16} weight="bold" className="text-slate-500" aria-hidden />
           </button>
           <Sheet anchored open={settings} onClose={() => setSettings(false)} title="Swap settings">
             <Section title="Swap partner" note={buying ? "Partners who sell ZEC. Each sets its own rate, and none of them can take your coins." : "Partners who buy ZEC. Each sets its own rate, and none of them can take your coins."}>
-              <PartnerList makers={makers.list} role={role} zat={valid ? zat : 0} pick={pick} current={maker?.name ?? null} onPick={setPick} fetchedAt={makers.fetchedAt} now={makers.now} error={makers.error} firm={quotes.list} />
+              <PartnerList makers={makers.list} role={role} zat={valid ? zat : 0} pick={partner} current={maker?.name ?? null} onPick={setPartner} fetchedAt={makers.fetchedAt} now={makers.now} error={makers.error} firm={quotes.list} />
             </Section>
             <Section title="Details" last>
               <dl className="space-y-3 px-5 text-sm">
@@ -377,7 +336,7 @@ function SwapCard({ status, blocked: elsewhere, onRoute, onNear }: { status: Sta
       >
         <div className="flex flex-col">{buying ? [coinPanel, flip, zecPanel] : [zecPanel, flip, coinPanel]}</div>
 
-        <div className="mt-3 min-h-5 px-1 text-[13px] text-slate-500">
+        <div className="mt-3 min-h-5 space-y-0.5 px-1 text-[13px] text-slate-500">
           {quote ? (
             <p>
               <span className="text-slate-700 tabular-nums">
@@ -390,10 +349,11 @@ function SwapCard({ status, blocked: elsewhere, onRoute, onNear }: { status: Sta
             <p>Finding the best rate…</p>
           ) : null}
           {skipped && quote && maker ? (
-            <p className="mt-0.5">
+            <p>
               {skipped.name} can fill up to {zec(capacity(quoteOf(skipped)!))} ZEC right now, so {maker.name} takes this one.
             </p>
           ) : null}
+          <PathLine path={path} time={status ? minutesText(typicalSeconds(status, bt)) : undefined} />
         </div>
 
         <button
@@ -401,31 +361,16 @@ function SwapCard({ status, blocked: elsewhere, onRoute, onNear }: { status: Sta
           disabled={!status || !quote || !daemon || !!problem || !!blocked || busy}
           className="mt-3 flex h-14 w-full items-center justify-center rounded-2xl bg-slate-900 text-base font-semibold text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
         >
-          {busy ? "Starting…" : buying ? "Buy ZEC" : "Sell ZEC"}
+          {busy ? "Starting…" : path.button}
         </button>
         <p id="swap-message" role={message ? "alert" : undefined} className={cn("mt-3 text-center text-sm", !message ? "sr-only" : message === blocked ? "text-slate-600" : "text-rose-600")}>
           {message ?? ""}
         </p>
       </form>
 
-      <p className="mt-6 flex items-start justify-center gap-2 text-center text-[13px] text-slate-500">
-        <ShieldCheck size={16} weight="regular" className="mt-px shrink-0" aria-hidden />
-        <span>{buying ? `Your ZEC arrives shielded. If the swap stops, your ${ticker} comes back.` : "Your ZEC stays shielded. If the swap stops, your coins come back."}</span>
-      </p>
+      <PrivacyLine text={path.privacy} />
 
-      <TokenPicker open={picker} onClose={() => setPicker(false)} makers={makers} role={role} zat={valid ? zat : 1e8} onNear={onNear ?? undefined} />
-      {onRoute ? (
-        <RoutePicker
-          open={zecPicker}
-          onClose={() => setZecPicker(false)}
-          side={buying ? "buy" : "sell"}
-          current="zec"
-          other={pair}
-          onPick={(id: Token) => {
-            if (id !== "zec") onRoute(buying ? { from: pair, to: id } : { from: id, to: pair });
-          }}
-        />
-      ) : null}
+      <CoinPicker open={picker !== null} onClose={() => setPicker(null)} side={picker ?? "sell"} pick={pick} ctx={ctx} makers={makers} zat={valid ? zat : 1e8} onPick={(t) => onPick(picker ?? "sell", t)} />
     </>
   );
 }
