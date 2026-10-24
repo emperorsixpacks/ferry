@@ -353,24 +353,29 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             }
         };
 
-        // Ask the node first, with the same ceiling it will enforce.
+        // Ask the node first, with the same ceiling it will enforce. A package cannot be asked:
+        // Bitcoin Core's testmempoolaccept judges each transaction of it on its own fee, so it
+        // refuses exactly the parent that the child is there to lift. submitpackage applies the
+        // package feerate, and carries the same ceiling as maxfeerate.
         let package = plan.mode == SubmitMode::Package;
-        let to_test: Vec<Transaction> = if package {
-            vec![parent_tx.clone(), built.tx.clone()]
-        } else {
-            vec![built.tx.clone()]
-        };
-        let verdicts = self.rpc.test_accept(&to_test, Some(ceiling)).await?;
-        if let Some(no) = verdicts.iter().find(|v| !v.allowed) {
-            st.refused_height = Some(tip);
-            let why = no.reject_reason.clone().unwrap_or_default();
-            note_once(
-                rec,
-                st,
-                &format!("refused:{why}"),
-                format!("The node would not take the fee bump of {name} ({why}); trying again at the next block"),
-            );
-            return Ok(());
+        if !package {
+            let verdicts = self
+                .rpc
+                .test_accept(std::slice::from_ref(&built.tx), Some(ceiling))
+                .await?;
+            if let Some(no) = verdicts.iter().find(|v| !v.allowed) {
+                st.refused_height = Some(tip);
+                let why = no.reject_reason.clone().unwrap_or_default();
+                note_once(
+                    rec,
+                    st,
+                    &format!("refused:{why}"),
+                    format!(
+                        "The node would not take the fee bump of {name} ({why}); trying again at the next block"
+                    ),
+                );
+                return Ok(());
+            }
         }
 
         let child_txid = built.tx.compute_txid();

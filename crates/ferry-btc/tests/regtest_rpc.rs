@@ -461,3 +461,423 @@ async fn child_bump_primitives() {
     }
     println!("{coin}: child bump primitives verified (floors {floors:?})");
 }
+
+/// Raise the node's mempool floor to at least `sat_per_vb` by filling its mempool (start the
+/// node with `-maxmempool=5`, the lowest 28.1 takes) with big transactions at that rate: the node
+/// evicts the cheapest and the floor rises above the rate it evicted. `keep` are coins to leave
+/// alone. Returns how many fillers it took.
+async fn raise_mempool_floor(
+    rpc: &BitcoinRpc,
+    net: Network,
+    sat_per_vb: u64,
+    keep: &[OutPoint],
+) -> usize {
+    let secp = Secp256k1::new();
+    let mut sent = 0;
+    loop {
+        let floors = rpc.fee_floors().await.unwrap();
+        if floors.mempool_min >= sat_per_vb * 1000 {
+            return sent;
+        }
+        assert!(sent < 120, "the floor never rose: {floors:?}");
+        let coins: Vec<Value> = rpc
+            .wallet_call("listunspent", json!([1, 9_999_999, [], false]))
+            .await
+            .unwrap();
+        // A confirmed coin no filler or kept transaction uses yet.
+        let coin = coins
+            .iter()
+            .find(|c| {
+                let op = OutPoint {
+                    txid: c["txid"].as_str().unwrap().parse().unwrap(),
+                    vout: c["vout"].as_u64().unwrap() as u32,
+                };
+                c["spendable"] == json!(true)
+                    && !keep.contains(&op)
+                    && c["amount"].as_f64() > Some(1.0)
+            })
+            .expect("no coin left to fill the mempool with: mine more blocks");
+        // ~1500 outputs of 1000 sat: about 65 kvB, under the 100 kvB standard limit.
+        let outputs: Vec<Value> = (0..1500)
+            .map(|_| {
+                let a = Address::p2tr(&secp, BtcKey::random().xonly(), None, net);
+                json!({ a.to_string(): "0.00001" })
+            })
+            .collect();
+        let raw: String = rpc
+            .wallet_call(
+                "createrawtransaction",
+                json!([[{"txid": coin["txid"], "vout": coin["vout"]}], outputs]),
+            )
+            .await
+            .unwrap();
+        let funded: Value = rpc
+            .wallet_call(
+                "fundrawtransaction",
+                json!([raw, {
+                    "add_inputs": false,
+                    "fee_rate": sat_per_vb,
+                    "changePosition": 0,
+                }]),
+            )
+            .await
+            .unwrap();
+        let signed: Value = rpc
+            .wallet_call("signrawtransactionwithwallet", json!([funded["hex"]]))
+            .await
+            .unwrap();
+        assert_eq!(signed["complete"], json!(true), "{signed}");
+        // The one that tips the pool over may itself be the cheapest and be evicted at once
+        // ("mempool full"): the floor has risen all the same.
+        let r: Result<String, _> = rpc.call("sendrawtransaction", json!([signed["hex"]])).await;
+        if let Err(e) = r {
+            assert!(e.to_string().contains("mempool full"), "{e}");
+        }
+        sent += 1;
+    }
+}
+
+/// A parent whose own fee has fallen below the node's mempool floor is refused alone and taken
+/// with its child as a package; the child of a held parent is then replaced by the exact
+/// incremental fee; both confirm. Needs a node started with `-maxmempool=5` (the smallest 28.1
+/// takes), e.g. `FERRY_BTC_RPC=http://127.0.0.1:28445`. Bitcoin only: Litecoin has no packages.
+#[tokio::test]
+#[ignore = "needs a regtest bitcoind started with -maxmempool=5"]
+async fn package_rescues_a_parent_below_the_mempool_floor() {
+    use ferry_btc::child::{build_child, fee_for, vsize_bound, ChildLimits};
+
+    let coin = coin();
+    assert!(coin.supports_packages(), "Bitcoin only");
+    let suffix = BtcKey::random().xonly().to_string();
+    let rpc = BitcoinRpc::new(url(coin), "ferry", "ferry")
+        .with_wallet(format!("ferry-btc-it-floor-{}", &suffix[..8]))
+        .with_coin(coin);
+    rpc.ensure_wallet().await.expect("node up?");
+    let net = Network::Regtest;
+    let miner = rpc.new_address(net).await.unwrap();
+    // Plenty of mature coinbase coins: one per filler.
+    rpc.generate_to_address(140, &miner).await.unwrap();
+
+    // The parent, signed but not sent, at 2 sat/vB (it passes the static 1 sat/vB relay floor).
+    let own = rpc.new_address(net).await.unwrap();
+    let parent = rpc
+        .fund_payment(&own, Amount::from_sat(2_000_000), 2)
+        .await
+        .unwrap();
+    let parent_txid = parent.tx.compute_txid();
+    let vout = parent
+        .tx
+        .output
+        .iter()
+        .position(|o| o.script_pubkey == own.script_pubkey())
+        .unwrap() as u32;
+    let kept: Vec<OutPoint> = parent.tx.input.iter().map(|i| i.previous_output).collect();
+
+    let fillers = raise_mempool_floor(&rpc, net, 60, &kept).await;
+    let floors = rpc.fee_floors().await.unwrap();
+    println!("{coin}: {fillers} fillers raised the floor to {floors:?}");
+    assert!(floors.mempool_min >= 60_000 && floors.min_relay == 1_000);
+
+    // Alone, the parent is refused for the dynamic floor, not for the static relay fee.
+    let alone = rpc
+        .test_accept(std::slice::from_ref(&parent.tx), None)
+        .await
+        .unwrap();
+    println!("{coin}: parent alone: {alone:?}");
+    assert!(!alone[0].allowed);
+    assert_eq!(
+        alone[0].reject_reason.as_deref(),
+        Some("mempool min fee not met")
+    );
+    let sent = rpc.broadcast(&parent.tx).await;
+    assert!(sent.is_err(), "{sent:?}");
+
+    // A child that lifts the pair to 1.2 x the floor.
+    let dest = rpc.new_address(net).await.unwrap().script_pubkey();
+    let bound = vsize_bound(&own.script_pubkey(), &dest).unwrap();
+    let parent_vsize = parent.tx.vsize() as u64;
+    let want = floors.mempool_min * 12 / 10;
+    let fee = fee_for(want, parent_vsize + bound) - parent.fee.to_sat();
+    let limits = ChildLimits {
+        max_fee: Amount::from_sat(1_000_000),
+        max_fee_rate: want * 4,
+    };
+    let child = build_child(
+        &rpc,
+        &parent.tx,
+        vout,
+        &dest,
+        Amount::from_sat(fee),
+        coin,
+        &limits,
+    )
+    .await
+    .unwrap();
+    // The child alone is not enough: its parent is not there.
+    let orphan = rpc
+        .test_accept(std::slice::from_ref(&child.tx), None)
+        .await
+        .unwrap();
+    assert_eq!(orphan[0].reject_reason.as_deref(), Some("missing-inputs"));
+    let both = rpc
+        .test_accept(
+            &[parent.tx.clone(), child.tx.clone()],
+            Some(limits.max_fee_rate),
+        )
+        .await
+        .unwrap();
+    // Bitcoin Core 28.1's testmempoolaccept judges each transaction of a package on its own fee,
+    // so it cannot vouch for a child-pays-for-parent package: it refuses this one for the
+    // parent's fee. Only submitpackage applies the package feerate. Recorded, not asserted.
+    println!("{coin}: testmempoolaccept on the package (recorded, not asserted): {both:?}");
+    let pkg = rpc
+        .submit_package(
+            &[parent.tx.clone(), child.tx.clone()],
+            Some(limits.max_fee_rate),
+        )
+        .await
+        .unwrap();
+    println!("{coin}: package: {pkg:?}");
+    assert!(pkg.success, "{pkg:?}");
+    let held = rpc.mempool_entry(&parent_txid).await.unwrap().unwrap();
+    assert_eq!(held.spent_by, vec![child.tx.compute_txid()]);
+    assert_eq!(held.descendant_fee, parent.fee + child.fee);
+
+    // The parent is held now, so its child is judged alone: it clears the floor by itself, and a
+    // replacement adds exactly the incremental fee.
+    let dest2 = rpc.new_address(net).await.unwrap().script_pubkey();
+    let fee2 = fee + fee_for(floors.incremental, child.vsize);
+    let child2 = build_child(
+        &rpc,
+        &parent.tx,
+        vout,
+        &dest2,
+        Amount::from_sat(fee2),
+        coin,
+        &limits,
+    )
+    .await
+    .unwrap();
+    let verdict = rpc
+        .test_accept(std::slice::from_ref(&child2.tx), None)
+        .await
+        .unwrap();
+    assert!(verdict[0].allowed, "{verdict:?}");
+    rpc.broadcast_capped(&child2.tx, limits.max_fee_rate)
+        .await
+        .unwrap();
+    assert_eq!(
+        rpc.mempool_entry(&child.tx.compute_txid()).await.unwrap(),
+        None
+    );
+
+    rpc.generate_to_address(1, &miner).await.unwrap();
+    assert_eq!(rpc.confirmations(&parent_txid).await.unwrap(), Some(1));
+    assert_eq!(
+        rpc.confirmations(&child2.tx.compute_txid()).await.unwrap(),
+        Some(1)
+    );
+    println!(
+        "{coin}: parent below the mempool floor rescued by a package, child replaced, both mined"
+    );
+}
+
+/// The race at T1, against a counterparty who plays to win. B holds the presigned, fixed-fee
+/// tx_cancel and may broadcast it the moment the lock has T1 confirmations; Z holds the
+/// presigned tx_redeem and bumps it with a child of its own output. Checks, on a real node:
+/// the cancel is refused before T1; once valid it cannot replace the in-mempool redeem and its
+/// child (it would have to pay their fees too, and it is fixed); when the redeem and child are
+/// evicted by a rising mempool floor the cancel cannot get in either, and Z puts the redeem
+/// back with a new child as a package; the redeem confirms and the cancel is dead; after a
+/// reorg the redeem and its child return to the mempool together.
+///
+/// Needs a node started with `-maxmempool=5 -blockmintxfee=0.0010 -mintxfee=0.0011` (blocks
+/// leave out packages under 100 sat/vB, and the wallet pays at least that), e.g.
+/// `FERRY_BTC_RPC=http://127.0.0.1:28446`. Bitcoin only.
+#[tokio::test]
+#[ignore = "needs a regtest bitcoind started with -maxmempool=5 -blockmintxfee=0.0010 -mintxfee=0.0011"]
+async fn t1_race_a_bumped_redeem_cannot_be_displaced_by_the_fixed_fee_cancel() {
+    use ferry_btc::child::{build_child, fee_for, vsize_bound, ChildLimits};
+    use ferry_btc::{Spend, SwapScripts, SwapTxs};
+
+    const T1: u16 = 6;
+    let coin = Coin::Btc;
+    let suffix = BtcKey::random().xonly().to_string();
+    let rpc = BitcoinRpc::new(url(coin), "ferry", "ferry")
+        .with_wallet(format!("ferry-btc-it-race-{}", &suffix[..8]))
+        .with_coin(coin);
+    rpc.ensure_wallet().await.expect("node up?");
+    let net = Network::Regtest;
+    let miner = rpc.new_address(net).await.unwrap();
+    rpc.generate_to_address(140, &miner).await.unwrap();
+
+    // The swap's lock, funded by B's wallet and confirmed, and the four presigned spends. Both
+    // keys are the test's, so it can sign what each party would.
+    let (kb, kz) = (BtcKey::random(), BtcKey::random());
+    let scripts = SwapScripts::new(kb.xonly(), kz.xonly(), T1, 20, false);
+    let lock_addr = scripts.lock.address(net);
+    let funded = rpc
+        .fund_lock(&lock_addr, Amount::from_sat(1_000_000))
+        .await
+        .unwrap();
+    let lock_txid = rpc.broadcast(&funded.tx).await.unwrap();
+    rpc.generate_to_address(1, &miner).await.unwrap();
+    assert_eq!(rpc.confirmations(&lock_txid).await.unwrap(), Some(1));
+    let redeem_to = rpc.new_address(net).await.unwrap();
+    let txs = SwapTxs::new(
+        coin,
+        scripts,
+        OutPoint {
+            txid: lock_txid,
+            vout: funded.vout,
+        },
+        Amount::from_sat(1_000_000),
+        Amount::from_sat(2_000),
+        redeem_to.script_pubkey(), // Z's own wallet address: the output Z bumps from
+        rpc.new_address(net).await.unwrap().script_pubkey(),
+        rpc.new_address(net).await.unwrap().script_pubkey(),
+    )
+    .unwrap();
+    let signed = |spend: Spend| {
+        let h = txs.sighash(spend);
+        txs.complete(spend, &kb.sign(&h), &kz.sign(&h)).unwrap()
+    };
+    let (cancel, redeem) = (signed(Spend::Cancel), signed(Spend::Redeem));
+    let redeem_txid = redeem.compute_txid();
+
+    // Before T1 the cancel is not valid.
+    let early = rpc.broadcast(&cancel).await.unwrap_err().to_string();
+    println!("cancel before T1: {early}");
+    assert!(early.contains("non-BIP68-final"), "{early}");
+
+    // Z broadcasts the redeem at its presigned fee (12 sat/vB: the node takes it, a miner
+    // asking for 100 does not), then lifts the pair to 90 sat/vB with a child of its own output.
+    rpc.broadcast(&redeem).await.unwrap();
+    let limits = ChildLimits {
+        max_fee: Amount::from_sat(1_000_000),
+        max_fee_rate: 1_000_000,
+    };
+    let dest = rpc.new_address(net).await.unwrap().script_pubkey();
+    let vsize_redeem = redeem.vsize() as u64;
+    let vsize_child = vsize_bound(&redeem_to.script_pubkey(), &dest).unwrap();
+    let fee1 = fee_for(90_000, vsize_redeem + vsize_child) - 2_000;
+    let child1 = build_child(
+        &rpc,
+        &redeem,
+        0,
+        &dest,
+        Amount::from_sat(fee1),
+        coin,
+        &limits,
+    )
+    .await
+    .unwrap();
+    rpc.broadcast_capped(&child1.tx, limits.max_fee_rate)
+        .await
+        .unwrap();
+
+    // The lock reaches T1 confirmations; the pair is below the miners' 100 sat/vB and stays.
+    rpc.generate_to_address(u64::from(T1) - 1, &miner)
+        .await
+        .unwrap();
+    assert_eq!(
+        rpc.confirmations(&lock_txid).await.unwrap(),
+        Some(u32::from(T1))
+    );
+    assert_eq!(rpc.confirmations(&redeem_txid).await.unwrap(), Some(0));
+
+    // B plays the cancel. It conflicts with the redeem and would have to pay for the redeem and
+    // its child as well; it is fixed at 2000 sat, so it is refused and nothing is displaced.
+    let try_cancel = rpc
+        .test_accept(std::slice::from_ref(&cancel), None)
+        .await
+        .unwrap();
+    println!("cancel against the bumped redeem: {try_cancel:?}");
+    assert!(!try_cancel[0].allowed);
+    assert!(rpc.broadcast(&cancel).await.is_err());
+    let held = rpc.mempool_entry(&redeem_txid).await.unwrap().unwrap();
+    assert_eq!(held.spent_by, vec![child1.tx.compute_txid()]);
+
+    // The mempool floor rises past the pair (150 sat/vB fillers): redeem and child are evicted.
+    // The cancel, at 12 sat/vB, cannot get in over that floor either.
+    let fillers = raise_mempool_floor(&rpc, net, 150, &[]).await;
+    let floors = rpc.fee_floors().await.unwrap();
+    println!("{fillers} fillers: floors {floors:?}");
+    assert_eq!(
+        rpc.mempool_entry(&redeem_txid).await.unwrap(),
+        None,
+        "evicted"
+    );
+    let no_cancel = rpc
+        .test_accept(std::slice::from_ref(&cancel), None)
+        .await
+        .unwrap();
+    println!("cancel over the raised floor: {no_cancel:?}");
+    assert!(!no_cancel[0].allowed);
+    assert_eq!(
+        no_cancel[0].reject_reason.as_deref(),
+        Some("mempool min fee not met")
+    );
+    let alone = rpc
+        .test_accept(std::slice::from_ref(&redeem), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        alone[0].reject_reason.as_deref(),
+        Some("mempool min fee not met")
+    );
+
+    // Z puts the redeem back with a new child, as a package, at 1.2 x the floor. The child it
+    // had is gone with its parent, so nothing is replaced.
+    let want = floors.mempool_min * 12 / 10;
+    let fee2 = fee_for(want, vsize_redeem + vsize_child) - 2_000;
+    assert!(fee2 > fee1);
+    let child2 = build_child(
+        &rpc,
+        &redeem,
+        0,
+        &dest,
+        Amount::from_sat(fee2),
+        coin,
+        &limits,
+    )
+    .await
+    .unwrap();
+    let pkg = rpc
+        .submit_package(
+            &[redeem.clone(), child2.tx.clone()],
+            Some(limits.max_fee_rate),
+        )
+        .await
+        .unwrap();
+    println!("package: {pkg:?}");
+    assert!(pkg.success, "{pkg:?}");
+    let held = rpc.mempool_entry(&redeem_txid).await.unwrap().unwrap();
+    assert_eq!(held.spent_by, vec![child2.tx.compute_txid()]);
+    // B still cannot displace it.
+    let again = rpc
+        .test_accept(std::slice::from_ref(&cancel), None)
+        .await
+        .unwrap();
+    assert!(!again[0].allowed, "{again:?}");
+
+    // The next block takes the package (above the miners' 100 sat/vB): the redeem is final and
+    // the cancel's input is spent.
+    rpc.generate_to_address(1, &miner).await.unwrap();
+    assert_eq!(rpc.confirmations(&redeem_txid).await.unwrap(), Some(1));
+    assert_eq!(
+        rpc.confirmations(&child2.tx.compute_txid()).await.unwrap(),
+        Some(1)
+    );
+    assert!(rpc.broadcast(&cancel).await.is_err());
+
+    // A reorg of that block returns the redeem and its child to the mempool together.
+    let tip: String = rpc.call("getbestblockhash", json!([])).await.unwrap();
+    let _: Value = rpc.call("invalidateblock", json!([tip])).await.unwrap();
+    let back = rpc.mempool_entry(&redeem_txid).await.unwrap().unwrap();
+    assert_eq!(back.spent_by, vec![child2.tx.compute_txid()]);
+    assert_eq!(back.descendant_fee, Amount::from_sat(2_000 + fee2));
+    let _: Value = rpc.call("reconsiderblock", json!([tip])).await.unwrap();
+    assert_eq!(rpc.confirmations(&redeem_txid).await.unwrap(), Some(1));
+    println!("T1 race: the fixed-fee cancel never displaced the bumped redeem");
+}
