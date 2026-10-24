@@ -1720,6 +1720,10 @@ async fn bump_stuck_redeem_is_packaged_replaced_and_mined() {
         })
         .await;
     assert_eq!((state(&z), state(&b)), ("BtcRedeemed", "ZecSwept"));
+    // The narration says what the bump took out of the payout.
+    let done = entry(&z, "swap_complete")["label"].as_str().unwrap();
+    assert!(done.contains("and the fee bump took"), "{done}");
+    println!("swap_complete: {done}");
     let all = bumps(&z);
     for e in &all {
         println!("bump: {}", e["label"]);
@@ -2008,4 +2012,42 @@ async fn bump_off_and_the_kill_file_stop_all_bumping() {
         "{}",
         kinds(&z)
     );
+}
+
+/// A presigned fee below the node's STATIC minimum relay fee cannot be rescued by a package (Core
+/// 28.1 refuses the parent for its own fee, whatever the child pays), so ferryd says so once and
+/// does not try. Z's redeem (2000 sat, about 18 sat/vB) never gets in; nothing is bumped.
+/// Needs a regtest bitcoind started with `-minrelaytxfee=0.0003` (30 sat/vB).
+#[tokio::test]
+#[ignore = "needs a regtest bitcoind started with -minrelaytxfee=0.0003"]
+async fn bump_says_so_when_the_presigned_fee_is_below_the_static_relay_fee() {
+    let w = World::start_full(2, Role::B, &[], &["--bump", "on"]).await;
+    let id = w.start_swap(100_000_000).await;
+    let (z, _) = w
+        .run_until(&id, 300, 40, |z, _| kinds(z).contains("fee_bump_note"))
+        .await;
+    let note = entry(&z, "fee_bump_note");
+    println!("note: {}", note["label"]);
+    assert!(
+        note["label"]
+            .as_str()
+            .unwrap()
+            .contains("minimum relay fee"),
+        "{note}"
+    );
+    // A few more blocks and ticks: the note is written once and nothing is bumped.
+    for _ in 0..3 {
+        w.mine().await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    let z = w.swap(&w.z.url, &id).await;
+    let notes = z["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "fee_bump_note")
+        .count();
+    assert_eq!(notes, 1, "{}", kinds(&z));
+    assert!(bumps(&z).is_empty(), "{}", kinds(&z));
+    assert_eq!(state(&z), "Redeeming");
 }
