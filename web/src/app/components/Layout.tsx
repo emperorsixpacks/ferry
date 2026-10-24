@@ -39,16 +39,17 @@ export function Layout({ children, wide }: { children: ReactNode; wide?: boolean
   );
 }
 
-export function SiteHeader() {
+// `night`: the landing's dark header
+export function SiteHeader({ night = false }: { night?: boolean } = {}) {
   const path = usePath().replace(/\/+$/, "") || "/";
   const d = useLocal();
   const online = d.connected || !!d.status;
-  const tabs = nav.map((n) => ({ ...n, active: n.match(path) }));
+  const tabs = nav.map((n) => ({ ...n, active: n.match(path), night }));
   return (
-    <header className="sticky top-0 z-40 border-b border-slate-200/80 bg-white/85 backdrop-blur-md">
+    <header className={cn("sticky top-0 z-40 border-b backdrop-blur-md", night ? "border-white/10 bg-[#070a1f]/80" : "border-slate-200/80 bg-white/85")}>
       <div className="mx-auto flex h-16 max-w-6xl items-center gap-6 px-4 sm:px-6">
         <Link to="/" className="flex shrink-0 items-center rounded-lg" aria-label="Ferry, home">
-          <Wordmark size={26} />
+          <Wordmark size={26} night={night} />
         </Link>
         <nav aria-label="Main" className="hidden items-center gap-1 md:flex">
           {tabs.map((t) => (
@@ -56,11 +57,11 @@ export function SiteHeader() {
           ))}
         </nav>
         <div className="ml-auto flex min-w-0 items-center gap-2">
-          <TestPill status={d.status} />
-          <BalanceChip online={online} name={d.status?.name ?? null} status={d.status} />
+          <TestPill status={d.status} night={night} />
+          <BalanceChip online={online} name={d.status?.name ?? null} status={d.status} night={night} />
         </div>
       </div>
-      <nav aria-label="Main" className="flex items-center justify-center gap-1 border-t border-slate-100 px-4 py-1.5 md:hidden">
+      <nav aria-label="Main" className={cn("flex items-center justify-center gap-1 border-t px-4 py-1.5 md:hidden", night ? "border-white/10" : "border-slate-100")}>
         {tabs.map((t) => (
           <Tab key={t.to} {...t} />
         ))}
@@ -69,14 +70,20 @@ export function SiteHeader() {
   );
 }
 
-function Tab({ to, label, active }: { to: string; label: string; active: boolean }) {
+function Tab({ to, label, active, night }: { to: string; label: string; active: boolean; night?: boolean }) {
   return (
     <Link
       to={to}
       aria-current={active ? "page" : undefined}
       className={cn(
         "rounded-full px-3.5 py-1.5 text-sm whitespace-nowrap transition-colors",
-        active ? "bg-slate-100 font-medium text-slate-900" : "text-slate-500 hover:text-slate-900",
+        night
+          ? active
+            ? "bg-white/10 font-medium text-white"
+            : "text-white/70 hover:text-white"
+          : active
+            ? "bg-slate-100 font-medium text-slate-900"
+            : "text-slate-500 hover:text-slate-900",
       )}
     >
       {label}
@@ -85,7 +92,7 @@ function Tab({ to, label, active }: { to: string; label: string; active: boolean
 }
 
 // "Test network" when either chain isn't a main network; the networks themselves on a tap.
-function TestPill({ status }: { status: Status | null }) {
+function TestPill({ status, night }: { status: Status | null; night?: boolean }) {
   if (!status) return null;
   const counterNet = status.chains.btc.network;
   const zecNet = status.chains.zec.network;
@@ -95,7 +102,10 @@ function TestPill({ status }: { status: Status | null }) {
   return (
     <Popover
       label={`Test network: ${names.join(" and ")}`}
-      className="inline-flex h-8 items-center gap-1.5 rounded-full bg-slate-100 px-3 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-200"
+      className={cn(
+        "inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-xs font-medium transition-colors",
+        night ? "bg-white/10 text-white/85 hover:bg-white/15" : "bg-slate-100 text-slate-700 hover:bg-slate-200",
+      )}
       trigger={
         <>
           <Flask size={13} weight="bold" aria-hidden />
@@ -112,7 +122,7 @@ function TestPill({ status }: { status: Status | null }) {
 }
 
 // Your Ferry node and its balances: the name and ZEC on the chip, the other coin on lg+ and on a tap.
-function BalanceChip({ online, name, status }: { online: boolean; name: string | null; status: Status | null }) {
+function BalanceChip({ online, name, status, night }: { online: boolean; name: string | null; status: Status | null; night?: boolean }) {
   const { pair, dir } = useLocal();
   if (!online) {
     return (
@@ -128,19 +138,25 @@ function BalanceChip({ online, name, status }: { online: boolean; name: string |
   return (
     <Popover
       label={`Your Ferry node${name ? ` ${name}` : ""}: ${zecBal} ZEC and ${other} ${ticker}`}
-      className="inline-flex h-9 min-w-0 items-center gap-2 rounded-full border border-slate-200 bg-white pr-3 pl-1 text-sm shadow-[0_1px_2px_rgba(24,24,27,0.04)] transition-colors hover:border-slate-300"
+      className={cn(
+        "inline-flex h-9 min-w-0 items-center gap-2 rounded-full border pr-3 pl-1 text-sm transition-colors",
+        night ? "border-white/15 bg-white/5 hover:border-white/30" : "border-slate-200 bg-white shadow-[0_1px_2px_rgba(24,24,27,0.04)] hover:border-slate-300",
+      )}
       trigger={
         <>
-          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-900 text-xs font-semibold text-white uppercase" aria-hidden>
+          <span
+            className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold uppercase", night ? "bg-white text-slate-900" : "bg-slate-900 text-white")}
+            aria-hidden
+          >
             {(name ?? "?").slice(0, 1)}
           </span>
-          <span className="hidden max-w-[7rem] truncate font-medium text-slate-900 sm:inline">{name ?? "…"}</span>
+          <span className={cn("hidden max-w-[7rem] truncate font-medium sm:inline", night ? "text-white" : "text-slate-900")}>{name ?? "…"}</span>
           {/* what you spend shows on every screen (ZEC when selling, the coin when buying); both on lg+ */}
-          <span className={cn("items-center gap-1.5 text-slate-700 tabular-nums", dir === "buy" ? "hidden lg:flex" : "flex")}>
+          <span className={cn("items-center gap-1.5 tabular-nums", night ? "text-white/80" : "text-slate-700", dir === "buy" ? "hidden lg:flex" : "flex")}>
             <TokenLogo id="zec" size={14} />
             {zecBal}
           </span>
-          <span className={cn("items-center gap-1.5 text-slate-700 tabular-nums", dir === "buy" ? "flex" : "hidden lg:flex")}>
+          <span className={cn("items-center gap-1.5 tabular-nums", night ? "text-white/80" : "text-slate-700", dir === "buy" ? "flex" : "hidden lg:flex")}>
             <PairLogo pair={pair} size={14} />
             {other}
           </span>
