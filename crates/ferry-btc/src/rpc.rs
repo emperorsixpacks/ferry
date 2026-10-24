@@ -763,6 +763,17 @@ impl BitcoinRpc {
         Ok(v["feerate"].as_f64().and_then(per_kvb_to_sat_vb))
     }
 
+    /// The node's fee estimate for confirmation within `blocks` blocks, in satoshis per 1000
+    /// vbytes (the node's unit, not rounded to a whole sat/vB); None when it has none (a regtest
+    /// node, a fresh one).
+    pub async fn estimate_fee_rate_kvb(&self, blocks: u16) -> Result<Option<u64>, RpcError> {
+        let v: Value = self.call("estimatesmartfee", json!([blocks])).await?;
+        Ok(v["feerate"]
+            .as_f64()
+            .and_then(sat_per_kvb)
+            .filter(|rate| *rate > 0))
+    }
+
     /// The lowest fee rate the node's mempool takes now, in sat/vB (rounded up): the larger of
     /// `mempoolminfee` and `minrelaytxfee`.
     pub async fn min_fee_rate(&self) -> Result<u64, RpcError> {

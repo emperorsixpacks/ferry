@@ -25,6 +25,8 @@ use crate::rebroadcast::{RebroadcastDecision, Rebroadcaster};
 use crate::record::{fvk_from_hex, Pending, Rebroadcast, Store, SwapRecord};
 use crate::view::{self, StatusView};
 
+mod bumper;
+
 /// An HTTP-facing error: status code and message.
 #[derive(Debug)]
 pub struct ApiError(pub u16, pub String);
@@ -2222,6 +2224,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 self.exchange(rec).await;
             }
             self.rebroadcast(rec).await;
+            self.bump(rec).await;
             crate::tower::arm(&self.cli, rec).await;
         }
         self.maybe_timeout(rec).await;

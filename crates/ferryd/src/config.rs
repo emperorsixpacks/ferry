@@ -30,6 +30,15 @@ impl From<RoleArg> for Role {
     }
 }
 
+/// `--bump`: whether ferryd raises the fee of its own stuck presigned spend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum BumpMode {
+    /// Never bump: the presigned fee is all a spend ever pays. The default, and the kill switch.
+    Off,
+    /// Bump our own stuck tx_redeem, tx_refund or tx_punish (see docs/THREAT-MODEL.md).
+    On,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum ZecBackend {
     /// File-backed stand-in chain shared by both daemons (see --zec-mock-file).
@@ -226,9 +235,32 @@ pub struct Cli {
     pub zec_confs: u32,
     #[arg(long, default_value_t = 1)]
     pub cancel_confs: u32,
-    /// Fixed fee per presigned BTC transaction (sats).
+    /// Baseline fee of each presigned BTC transaction (sats), fixed when the swap starts. Nothing
+    /// raises a presigned fee; --bump lets the party that needs a spend confirmed pay more in a
+    /// child of it, out of its own payout.
     #[arg(long, default_value_t = 2_000)]
     pub fee_sat: u64,
+    /// Raise the fee of our own stuck tx_redeem (Z), tx_refund (B) or tx_punish (Z) by spending
+    /// its payout in a child that pays more (CPFP), and replace that child by a better one as the
+    /// deadline nears. Off by default; `--bump off` stops all bumping at once, and so does a file
+    /// named `bump-off` in --data-dir, checked every tick. tx_cancel is never bumped. Bitcoin and
+    /// Litecoin stay off mainnet until the review in docs/THREAT-MODEL.md is done.
+    #[arg(long, value_enum, env = "FERRY_BUMP", default_value = "off")]
+    pub bump: BumpMode,
+    /// --bump: the most a child may pay while more than --bump-urgent-blocks blocks are left,
+    /// in percent of the payout it spends. Past that, up to the payout less dust.
+    #[arg(long, env = "FERRY_BUMP_SOFT_CAP_PERCENT",
+          default_value_t = crate::bump::DEFAULT_SOFT_CAP_PERCENT,
+          value_parser = clap::value_parser!(u64).range(1..=100))]
+    pub bump_soft_cap_percent: u64,
+    /// --bump: at or below this many blocks left before the deadline, the urgent cap applies.
+    #[arg(long, default_value_t = crate::bump::DEFAULT_URGENT_BLOCKS)]
+    pub bump_urgent_blocks: u32,
+    /// --bump: at most one replacement of our child per this many blocks, unless the wanted rate
+    /// jumped by a quarter or the deadline is near.
+    #[arg(long, default_value_t = crate::bump::DEFAULT_MIN_INTERVAL_BLOCKS,
+          value_parser = clap::value_parser!(u64).range(1..=144))]
+    pub bump_min_interval_blocks: u64,
     /// Chain polling and peer exchange interval.
     #[arg(long, default_value_t = 1_000)]
     pub poll_ms: u64,
@@ -586,6 +618,28 @@ pub struct Delivery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fee bumping moves funds, so it is off unless asked for, and its caps are bounded.
+    #[test]
+    fn fee_bumping_is_off_unless_asked_for() {
+        let cli = |extra: &[&str]| {
+            let base = ["ferryd", "--role", "z", "--name", "n", "--data-dir", "/nonexistent"];
+            Cli::try_parse_from(base.iter().chain(extra))
+        };
+        let off = cli(&[]).unwrap();
+        assert_eq!(off.bump, BumpMode::Off);
+        assert_eq!(off.bump_soft_cap_percent, 10);
+        assert_eq!(off.bump_urgent_blocks, 2);
+        assert_eq!(off.bump_min_interval_blocks, 1);
+        assert_eq!(cli(&["--bump", "off"]).unwrap().bump, BumpMode::Off);
+        assert_eq!(cli(&["--bump", "on"]).unwrap().bump, BumpMode::On);
+        assert!(cli(&["--bump", "maybe"]).is_err());
+        // The soft cap is a percentage of the payout: 1 to 100, never 0 and never more.
+        assert!(cli(&["--bump-soft-cap-percent", "0"]).is_err());
+        assert!(cli(&["--bump-soft-cap-percent", "101"]).is_err());
+        assert_eq!(cli(&["--bump-soft-cap-percent", "100"]).unwrap().bump_soft_cap_percent, 100);
+        assert!(cli(&["--bump-min-interval-blocks", "0"]).is_err());
+    }
 
     /// On mainnet (the counter-chain's or Zcash's) a maker that follows a price feed keeps at
     /// least 1% for itself; a fixed rate, a taker and the test networks are left alone.

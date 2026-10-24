@@ -170,4 +170,23 @@ mod tests {
         assert_eq!(decide(&f, &[(lock, 30), (cancel, 11)], Spend::Punish), Wait);
         assert_eq!(decide(&f, &[(lock, 30), (cancel, 12)], Spend::Punish), Send);
     }
+
+    /// A fee bump (crate::bump) spends the spend's output in a child; the rebroadcaster neither
+    /// sees nor sends that child and never sends the spend a second time while the node holds it.
+    /// A spend the node dropped is re-sent only inside its window: past it, only the bump (which
+    /// requires the node to have taken it before) may bring it back.
+    #[test]
+    fn a_spend_with_a_bumped_child_is_left_alone() {
+        let f = fixture();
+        let (txs, lock) = (&f.1, f.2);
+        let (redeem, refund) = (txs.txid(Spend::Redeem), txs.txid(Spend::Refund));
+        let cancel = txs.txid(Spend::Cancel);
+        assert_eq!(decide(&f, &[(lock, 5), (redeem, 0)], Spend::Redeem), Wait);
+        assert_eq!(decide(&f, &[(lock, 5)], Spend::Redeem), Send);
+        assert_eq!(decide(&f, &[(lock, 9)], Spend::Redeem), Wait);
+        assert_eq!(
+            decide(&f, &[(lock, 20), (cancel, 2), (refund, 0)], Spend::Refund),
+            Wait
+        );
+    }
 }

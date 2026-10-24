@@ -23,8 +23,6 @@
 //! [`Params::urgent_blocks`] blocks are left and at `payout - dust` after that: losing the swap
 //! costs the whole stake, so urgency may pay more than the 5% baseline rule.
 
-#![allow(dead_code)] // wired into the daemon by the next change
-
 use std::fmt;
 
 use ferry_btc::bitcoin::Txid;
@@ -164,6 +162,11 @@ impl fmt::Display for HoldReason {
 pub enum ExhaustedReason {
     /// No valid child fits within what the output can pay while keeping its output above dust.
     NoRoom,
+    /// The parent is not in the mempool and pays less than the node's static `minrelaytxfee`
+    /// by itself. A package lifts a parent over the mempool's rising floor, not over this one
+    /// (Bitcoin Core 28.1: "min relay fee not met"), so no child can bring it back. Only a
+    /// higher presigned fee, fixed at the start of a swap, would have helped.
+    ParentBelowMinRelay,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -250,6 +253,9 @@ pub fn decide(i: &BumpInput) -> BumpDecision {
     let parent_in_mempool = i.parent.mempool.is_some();
     if !parent_in_mempool && !i.packages {
         return Hold(HoldReason::NeedsPackage);
+    }
+    if !parent_in_mempool && i.parent.base_fee < fee_for(i.floors.min_relay, i.parent.vsize) {
+        return Exhausted(ExhaustedReason::ParentBelowMinRelay);
     }
     let blocks_left = i.deadline.blocks_left();
     let urgent = blocks_left <= i.params.urgent_blocks;
@@ -640,6 +646,37 @@ mod tests {
     }
 
     #[test]
+    fn a_parent_below_the_static_relay_floor_cannot_be_rescued_by_a_package() {
+        // Recorded on Bitcoin Core 28.1 (regtest, -minrelaytxfee=0.0003): submitpackage of a
+        // 2000-sat, 111 vB parent with a 20000-sat child failed with the parent's own
+        // "min relay fee not met, 2000 < 3330" and the child with "bad-txns-inputs-missingorspent".
+        let mut i = base();
+        i.parent.mempool = None;
+        i.floors = FeeFloors {
+            min_relay: 30_000,
+            mempool_min: 30_000,
+            incremental: 1_000,
+        };
+        i.estimate = Some(60_000);
+        assert_eq!(decide(&i), Exhausted(ExhaustedReason::ParentBelowMinRelay));
+        // Exactly at the relay floor is enough (2000 sat over 111 vB is 18.02 sat/vB).
+        i.floors.min_relay = 18_018;
+        i.floors.mempool_min = 18_018;
+        assert!(matches!(decide(&i), Bump(_)));
+        i.floors.min_relay = 18_019;
+        assert_eq!(decide(&i), Exhausted(ExhaustedReason::ParentBelowMinRelay));
+        // A parent the mempool holds is a different matter: it already passed that check.
+        let mut held = base();
+        held.floors.min_relay = 30_000;
+        held.floors.mempool_min = 30_000;
+        held.estimate = Some(60_000);
+        assert!(matches!(decide(&held), Bump(_)));
+        // And without packages the answer is the earlier one: wait for the parent.
+        i.packages = false;
+        assert_eq!(decide(&i), Hold(HoldReason::NeedsPackage));
+    }
+
+    #[test]
     fn a_dropped_child_with_a_held_parent_is_sent_again_never_cheaper() {
         let mut i = base();
         i.estimate = Some(60_000);
@@ -986,6 +1023,13 @@ mod tests {
                 }
                 if i.parent.mempool.is_none() && !i.packages && i.parent_confirmations == 0 {
                     prop_assert_eq!(d, Hold(HoldReason::NeedsPackage));
+                }
+                if i.parent.mempool.is_none()
+                    && i.packages
+                    && i.parent_confirmations == 0
+                    && i.parent.base_fee < fee_for(i.floors.min_relay, i.parent.vsize)
+                {
+                    prop_assert_eq!(d, Exhausted(ExhaustedReason::ParentBelowMinRelay));
                 }
                 if let Bump(p) = d {
                     prop_assert!(p.mode != SubmitMode::Package || i.packages);
