@@ -307,6 +307,14 @@ const testAddress = (blockchain, a) => (blockchain === "btc" && /^(bcrt1|tb1)[02
 const INT = /^(0|[1-9][0-9]{0,39})$/;
 export const big = (v) => (typeof v === "string" && INT.test(v) ? BigInt(v) : typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? BigInt(v) : null);
 
+// "0.0041035 BTC": base units as a decimal, trailing zeros dropped
+export function unitsText(v, t) {
+  const d = t.decimals;
+  const s = BigInt(v).toString().padStart(d + 1, "0");
+  const n = d ? `${s.slice(0, s.length - d)}.${s.slice(s.length - d)}`.replace(/\.?0+$/, "") : s;
+  return `${n} ${t.symbol}`;
+}
+
 // Three significant digits, down (or up): a dry quote for 0.0123456 BTC asks about 0.0123, so one
 // cached answer serves everyone near that amount, and the exact amount stays here until a swap.
 export function roundSig(n, up = false, digits = 3) {
@@ -819,7 +827,9 @@ export function nearDesk({
         gross = (BigInt(zat) * BigInt(firm.rate) + 50_000_000n) / 100_000_000n;
       }
     }
-    const fee = v.leg.fee;
+    // what the payout loses on the way: a UTXO redeem's presigned fee, or an EVM claim's relayer tip
+    // (at most the lock's max_tip; 0 with default daemons)
+    const fee = v.leg.fee + (isEvm(v.pair) ? (big(directory.offerOf?.(makerIndex)?.terms?.max_tip) ?? 0n) : 0n);
     const units = dir === "sell" ? gross - fee : buyNeed(gross, v.pair);
     const now = Date.now();
     const req =
@@ -887,7 +897,8 @@ export function nearDesk({
       problem: null,
       timeline: [],
     };
-    note(j, "near_quote", `NEAR Intents quoted ${dir === "sell" ? `at least ${minOut} units of ${asset.symbol} for ${units} of ${v.token.symbol}` : `${units} units of ${v.token.symbol} for ${amountIn} of ${asset.symbol}`} (signed, ${verifySignatures ? "signature checked" : "signature not checked"})`);
+    const sell = dir === "sell";
+    note(j, "near_quote", `NEAR Intents quoted ${sell ? `at least ${unitsText(minOut, asset)} for ${unitsText(units, v.token)}` : `${unitsText(units, v.token)} for ${unitsText(amountIn, asset)}`} (signed by 1Click; ${verifySignatures ? "signature checked" : "signature not checked"})`);
 
     if (dir === "sell") {
       // the Ferry payout never falls below what 1Click needs to start (its minAmountIn)

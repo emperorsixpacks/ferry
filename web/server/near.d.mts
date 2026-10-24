@@ -42,6 +42,7 @@ export function pairOfAsset(assetId: string): string | null;
 export function addressProblem(blockchain: string, address: unknown): string | null;
 export function big(v: unknown): bigint | null;
 export function roundSig(n: bigint, up?: boolean, digits?: number): bigint;
+export function unitsText(v: bigint | string, t: { decimals: number; symbol: string }): string;
 export function pairOfStatus(s: unknown): string;
 export function mainnet(s: unknown): boolean;
 export function ferrySecs(pair: string): number;
