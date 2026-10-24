@@ -77,3 +77,52 @@ EIP-712 `Ready(id)` signature after N ZEC confirmations, Z claims (publishing z)
 t1 B refunds (publishing b) and Z reclaims; from t2 Z punishes. See [EVM.md](EVM.md);
 `infra/evm-demo.sh` runs all three stories on anvil.
 
+## Firm quotes
+
+**What it is.** You say what you want ("sell 0.7 ZEC for BTC"). The partners your Ferry server lists
+answer with a firm price; the best one is taken; and the swap itself is the same atomic swap as
+always. That is the difference from most intent systems: no solver, partner or server ever holds your
+coins, and either side can still walk away with its own.
+
+1. The app asks its own UI server for prices. The server rounds your amount **up** to a bucket (0.1,
+   0.25, 0.5, 1, 2.5, 5, 10, 25, 50 or 100 ZEC) and asks each partner its operator allowlisted,
+   directly and all at once.
+2. Each partner answers with a price, the range it covers (the bucket, within its own limits and
+   balance) and an expiry (45 seconds by default), signed with a key published in its offer.
+3. The server checks every signature, drops prices that don't cover your exact amount, and shows the
+   best: "1 ZEC = 0.0041235 BTC · firm for 28 s · from Kestrel". Without one, the app shows the
+   partners' everyday (indicative) rates, as before.
+4. **Swap** starts the swap for your exact amount and names that price. Your Ferry node checks the
+   signature and terms again, then proposes. The partner must honour the price if the proposal names
+   it, stays within its range and arrives in time; a price is good for one swap.
+
+**Privacy.** Asking for a price says something, so the design keeps it small:
+- Requests never go to a public order book or mempool, only from your server to the partners it
+  lists, directly.
+- Partners see a bucket ("between 0.5 and 1 ZEC"), not your amount. Buckets grow 2 to 2.5 times per
+  step, so that is roughly an order of magnitude.
+- A request carries nothing about you: no address, account, swap id, cookie or browser IP. It comes
+  from the server, not your browser, and the server doesn't log amounts.
+
+**What a partner still learns, and why that is acceptable.**
+- The bucket, the direction (selling or buying ZEC), the pair, the time, and the server's IP address.
+  If you run your own server, that address is yours; run the server over Tor or a VPN if it matters.
+- The partner you swap with learns your exact amount when you propose. It must: it locks the coins
+  on the other side. That was already true without firm quotes.
+- The partners that didn't win learn only that someone using that server looked at roughly that size
+  at that time. While the page is open prices refresh about every 25 seconds, and each bucket you
+  try is one more data point; prices are shared per bucket on the server, so how many people ask
+  doesn't change what a partner hears.
+- Nothing changes on chain: the ZEC stays shielded and nothing links the two chains.
+
+**Limits.**
+- Firm, within limits: ferryd runs one swap at a time, so a partner gives no prices while it is busy,
+  and if two of its open prices are taken at the same moment the second is refused as busy; the app
+  then falls back. A partner that restarts forgets its open prices and refuses them (it never fills
+  one at a different rate).
+- Partners limit requests (20 a minute from one address, 240 in all; 6 open prices per address, 32
+  in all), and so does the public demo's server (30 a minute per visitor, 600 in all).
+- No firm prices above 100 ZEC, or from a partner whose live rate has paused; the everyday rate
+  applies there.
+
+Endpoints, the signed format and the error messages: [API.md](API.md#firm-quotes).

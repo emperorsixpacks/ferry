@@ -67,6 +67,10 @@ Z has ZEC and wants bitcoin. B has bitcoin and wants ZEC. B always locks first.
   check does catch the leak.
 - **Not your wallet.** They never see your balance, your other addresses or your history.
 - **Your IP address**, because the two Ferry daemons talk directly. Use Tor or a VPN if that matters.
+- **With firm prices, a size bucket.** Every listed partner your server asks for a price learns
+  roughly how much (0.5 to 1 ZEC, say), which way, and when, with the server's address but nothing
+  about you; only the one you swap with learns the exact amount
+  ([ARCHITECTURE.md](ARCHITECTURE.md#firm-quotes)).
 
 ## What everyone else sees
 

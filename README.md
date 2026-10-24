@@ -111,6 +111,10 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
   B arms only its own tower.
 - Makers: ferryd can quote the median of Kraken/CoinGecko plus a spread and pauses when the feed is
   stale; the app lists the operator's allowlisted makers with rate, age, range and liquidity.
+- Firm quotes, intent-style: you state the swap, partners answer with signed firm prices for 45 s,
+  the best is taken, and an atomic swap settles it, so nobody holds funds in between. Only a rounded-up
+  size bucket leaves your server, and only to its own partners
+  ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#firm-quotes)).
 - **Real shielded ZEC, end to end.** `infra/e2e-real.sh` starts a fresh regtest Bitcoin + Zebra +
   Zaino stack and runs all three stories with real Ironwood notes. In the happy story, a stranger also
   sends small notes to the joint address while B waits to sweep. A fourth story checks that a wallet

@@ -75,6 +75,8 @@ pub struct Daemon<L> {
     pub policy: Policy,
     /// Recent proposals received as maker (rate limit).
     proposals: std::sync::Mutex<VecDeque<Instant>>,
+    /// Our firm quotes, when making offers (crate::quote).
+    pub quotes: Option<crate::quote::QuoteBook>,
 }
 
 /// At most this many proposals per minute reach the maker's negotiation code.
@@ -211,9 +213,14 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             state.swaps.insert(rec.id.clone(), rec);
         }
         let (events, _) = broadcast::channel(256);
+        let quotes = crate::quote::maker_book(&cli)?;
         Ok(Arc::new(Daemon {
             role: cli.role.into(),
-            offer: cli.offer(),
+            offer: Offer {
+                quote_key: quotes.as_ref().map(|q| q.public_key()),
+                ..cli.offer()
+            },
+            quotes,
             price: cli.live_rate().map(Arc::new),
             cli,
             rpc,
@@ -317,8 +324,13 @@ impl<L: ZecLeg + 'static> Daemon<L> {
 
     // ------------------------------------------------------------------ negotiation
 
-    /// Taker: propose a swap to `maker`.
-    pub async fn create_swap(&self, maker: String, zec_zat: u64) -> Result<String, ApiError> {
+    /// Taker: propose a swap to `maker`, at its offer's rate or at a firm quote it signed.
+    pub async fn create_swap(
+        &self,
+        maker: String,
+        zec_zat: u64,
+        quote: Option<crate::quote::SignedQuote>,
+    ) -> Result<String, ApiError> {
         let maker = maker.trim_end_matches('/').to_string();
         if maker.is_empty() {
             return Err(ApiError::bad("maker URL is required"));
@@ -363,9 +375,17 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 zec_str(offer.max_zat)
             )));
         }
-        let params = offer
-            .terms
-            .params(self.chain(), zec_zat, offer.btc_for(zec_zat));
+        // Firm quote (crate::quote): signed by this maker's key, for its market, our side and this
+        // amount; its rate replaces the offer's.
+        let rate = match &quote {
+            Some(q) => crate::quote::check_for_taker(q, &offer.quote_ref(), self.role, zec_zat)
+                .map_err(|e| ApiError::bad(e.to_string()))?,
+            None => offer.rate_sat_per_zec,
+        };
+        let params =
+            offer
+                .terms
+                .params(self.chain(), zec_zat, crate::config::btc_for(zec_zat, rate));
         params
             .check_policy(&self.policy)
             .map_err(|e| ApiError::bad(format!("The maker's terms are not acceptable: {e}")))?;
@@ -387,6 +407,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             .json(&ProposeRequest {
                 envelope: propose,
                 taker_url: self.cli.public_url(),
+                quote_id: quote.map(|q| q.quote.quote_id),
             })
             .send()
             .await
@@ -580,11 +601,22 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         if Terms::of(params) != self.offer.terms {
             return Err(ApiError::bad("timelock/fee terms differ from the offer"));
         }
-        if params.zec_amount < self.offer.min_zat || params.zec_amount > self.offer.max_zat {
-            return Err(ApiError::bad("amount outside the offer's range"));
-        }
-        if !self.rate_matches(params.zec_amount, params.btc_amount) {
-            return Err(ApiError::bad("BTC amount does not match the offer's rate"));
+        // Firm quote (crate::quote): a proposal naming one is held to the quote's rate and range
+        // instead of the offer's, and takes it (one quote, one swap; given back if this fails).
+        let quote = self.claim_quote(
+            req.quote_id.as_deref(),
+            &id,
+            setup.role,
+            params.zec_amount,
+            params.btc_amount,
+        )?;
+        if quote.is_none() {
+            if params.zec_amount < self.offer.min_zat || params.zec_amount > self.offer.max_zat {
+                return Err(ApiError::bad("amount outside the offer's range"));
+            }
+            if !self.rate_matches(params.zec_amount, params.btc_amount) {
+                return Err(ApiError::bad("BTC amount does not match the offer's rate"));
+            }
         }
         params
             .check_policy(&self.policy)
@@ -628,6 +660,9 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         self.save(&rec);
         st.swaps.insert(id, rec);
         self.publish(&mut st);
+        if let Some(q) = quote {
+            q.commit();
+        }
         Ok(reply)
     }
 

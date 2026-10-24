@@ -11,11 +11,13 @@
 // Env: MOCK_SPEED (default 1, higher is faster), MOCK_Z_PORT, MOCK_B_PORT, MOCK_WALLET_LAG_MS,
 // MOCK_BTC_NETWORK / MOCK_ZEC_NETWORK (labels only; the mock still mines fast).
 //
-// B also serves the peer offers of a few mock makers (mock/makers.mjs) for the maker list.
+// B also serves the peer offers of a few mock makers (mock/makers.mjs) for the maker list, and
+// their firm quotes (POST /peer/quote, signed like ferryd's; MOCK_QUOTE_SECS, default 45).
 
 import http from "node:http";
-import { randomBytes } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { MOCK_MAKERS, mockMakerAt, mockMakerByUrl } from "./makers.mjs";
+import { bucketFor, signingText } from "../server/quotes.mjs";
 
 const SPEED = Number(process.env.MOCK_SPEED ?? 1) || 1;
 const Z_PORT = Number(process.env.MOCK_Z_PORT ?? 7101);
@@ -97,8 +99,9 @@ function mine(chain) {
 
 const rateOf = (makerUrl) => mockMakerByUrl(makerUrl)?.rate ?? RATE;
 
-function newSwap(taker, makerUrl, zec_zat) {
-  const btc_sat = Math.round((zec_zat / 1e8) * rateOf(makerUrl));
+// `rate`: a firm quote's, else the maker's offer
+function newSwap(taker, makerUrl, zec_zat, rate = rateOf(makerUrl)) {
+  const btc_sat = Math.round((zec_zat / 1e8) * rate);
   const pts = { Z: { p: hex(32), s: point() }, B: { p: hex(32), s: point() } };
   const s = {
     id: hex(16),
@@ -500,7 +503,70 @@ function peerOffer(m) {
     rate_source: m.source,
     ...(updated != null ? { rate_updated_at: updated } : {}),
     liquidity: { zec_zat: Math.min(liquidity, m.max) },
+    quote_key: quoteKey(m).public,
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// firm quotes, as ferryd's crate::quote: one key per mock maker, a quote per bucket, one swap each
+
+const QUOTE_SECS = Number(process.env.MOCK_QUOTE_SECS ?? 45);
+const keys = new Map();
+const quotes = new Map(); // quote_id -> { q, slug, expires, used }
+
+function quoteKey(m) {
+  if (!keys.has(m.slug)) {
+    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "secp256k1" });
+    const der = publicKey.export({ format: "der", type: "spki" });
+    const pt = der.subarray(der.length - 65); // 04 || x || y
+    const compressed = Buffer.concat([Buffer.from([pt[64] & 1 ? 3 : 2]), pt.subarray(1, 33)]);
+    keys.set(m.slug, { privateKey, public: compressed.toString("hex") });
+  }
+  return keys.get(m.slug);
+}
+
+const busy = () => swaps.some((s) => !(s.views.Z.outcome && s.views.B.outcome));
+
+// POST /peer/quote {pair, taker_role, bucket_zat} for mock maker m: [status, body]
+function peerQuote(m, body) {
+  const b = bucketFor(Number(body?.bucket_zat));
+  if (!b || b.bucket !== body.bucket_zat) return [400, { error: "firm quotes are asked for by bucket, not by amount" }];
+  if (body.pair !== "ZEC/BTC") return [400, { error: "this maker swaps ZEC/BTC" }];
+  if (body.taker_role !== "Z") return [400, { error: "this maker quotes takers with role Z" }];
+  if (m.paused) return [403, { error: "not making offers" }];
+  if (busy()) return [409, { error: "busy with another swap; ask again when it is done" }];
+  const offer = peerOffer(m);
+  if (b.bucket < m.min || b.lower >= m.max) return [400, { error: "outside this maker's range" }];
+  const min = Math.max(b.lower, m.min);
+  const max = Math.min(b.bucket, m.max, offer.liquidity.zec_zat);
+  if (max < min || (b.lower > 0 && max <= b.lower)) return [409, { error: "not enough liquidity for this bucket right now" }];
+  const t = Math.floor(now() / 1000);
+  const q = {
+    v: 1,
+    quote_id: hex(16),
+    pair: "ZEC/BTC",
+    market: `btc:${chains.btc.network}`,
+    maker_role: "B",
+    taker_role: "Z",
+    rate_sat_per_zec: m.rate,
+    min_zat: min,
+    max_zat: max,
+    issued_at: t,
+    expires_at: t + QUOTE_SECS,
+  };
+  const sig = sign("sha256", Buffer.from(signingText(q)), { key: quoteKey(m).privateKey, dsaEncoding: "ieee-p1363" });
+  quotes.set(q.quote_id, { q, slug: m.slug, expires: now() + QUOTE_SECS * 1000, used: false });
+  return [200, { ...q, maker_key: quoteKey(m).public, sig: sig.toString("hex") }];
+}
+
+// A swap start that names a quote: its rate, or why the maker refuses it (as ferryd words it).
+function honour(quote, maker, zat) {
+  const e = quotes.get(quote?.quote_id);
+  if (!e || e.slug !== maker.slug) return { error: "The maker refused: unknown firm quote (it expired a while ago, or the maker restarted); get a new one" };
+  if (e.used) return { error: "The maker refused: the firm quote was already used for another swap" };
+  if (now() >= e.expires) return { error: "The maker refused: the firm quote expired; get a new one" };
+  if (zat < e.q.min_zat || zat > e.q.max_zat) return { error: "the amount is outside the firm quote's range" };
+  return { rate: e.q.rate_sat_per_zec, take: () => (e.used = true) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -583,6 +649,13 @@ function handler(role) {
     const maker = role === "B" && req.method === "GET" ? mockMakerAt(path) : undefined;
     if (maker === null) return send(res, 404, { error: "not found" });
     if (maker) return maker.offline ? send(res, 503, { error: "offline" }) : send(res, 200, peerOffer(maker));
+    const quoting = role === "B" && req.method === "POST" ? mockMakerAt(path, "quote") : undefined;
+    if (quoting === null) return send(res, 404, { error: "not found" });
+    if (quoting) {
+      if (quoting.offline) return send(res, 503, { error: "offline" });
+      const [code, body] = peerQuote(quoting, await readBody(req));
+      return send(res, code, body);
+    }
 
     // mock only, for screenshot and film scripts: forget every swap and restore the starting
     // balances, so each story starts from the same wallet. Chains keep their heights.
@@ -610,8 +683,13 @@ function handler(role) {
       if (zat < maker.min || zat > maker.max) return send(res, 400, { error: `Amount must be between ${zecAmount(maker.min)} and ${zecAmount(maker.max)}` });
       if (swaps.some((s) => !(s.views.Z.outcome && s.views.B.outcome))) return send(res, 409, { error: "A swap is already in progress" });
       if (parties.Z.balances.zec_shielded_zat < zat) return send(res, 400, { error: "Z does not have enough shielded ZEC" });
-      if (parties.B.balances.btc_sat < Math.round((zat / 1e8) * maker.rate)) return send(res, 400, { error: "B does not have enough BTC" });
-      const s = newSwap(role, body.maker ?? null, zat);
+      // a firm quote holds the swap to its rate
+      const firm = body.quote ? honour(body.quote, maker, zat) : null;
+      if (firm?.error) return send(res, 400, { error: firm.error });
+      const rate = firm?.rate ?? maker.rate;
+      if (parties.B.balances.btc_sat < Math.round((zat / 1e8) * rate)) return send(res, 400, { error: "B does not have enough BTC" });
+      firm?.take();
+      const s = newSwap(role, body.maker ?? null, zat, rate);
       return send(res, 201, { id: s.id });
     }
 

@@ -30,6 +30,7 @@ export interface MakerSummary {
 export interface MakerDirectory {
   makers: MakerEntry[];
   list(): Promise<MakerSummary[]>;
+  offerOf(index: number): Record<string, unknown> | null;
   resolve(ref: unknown): MakerEntry | null;
 }
 

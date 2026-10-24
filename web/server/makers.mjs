@@ -201,6 +201,10 @@ export function makerDirectory(makers, { timeoutMs = 2500, ttlMs = 10_000, fetch
       const at = Date.now();
       return makers.map((m, i) => (cache[i].offer ? summarize(m, i, cache[i].offer, at) : offline(m, i, cache[i].error)));
     },
+    // maker i's last offer as it sent it (for its firm-quote key and market; quotes.mjs), or null
+    offerOf(i) {
+      return cache[i]?.offer ?? null;
+    },
     // undefined/null: the first maker. An integer (or its string): that index. Otherwise a name.
     resolve(ref) {
       if (ref === undefined || ref === null) return makers[0] ?? null;

@@ -20,9 +20,10 @@ export const mockMakerUrl = (bPort, m) => `http://127.0.0.1:${bPort}${m.slug ? `
 export const mockMakersEnv = (bPort) => JSON.stringify(MOCK_MAKERS.map((m) => ({ name: m.name, url: mockMakerUrl(bPort, m), pair: m.pair })));
 
 // the maker a mock peer path belongs to: "/peer/offer" → Bram, "/m/heron/peer/offer" → Heron
-export function mockMakerAt(path) {
-  const m = path.match(/^(?:\/m\/([a-z]+))?\/peer\/offer$/);
-  if (!m) return undefined;
+// (`what` "quote": its /peer/quote)
+export function mockMakerAt(path, what = "offer") {
+  const m = path.match(/^(?:\/m\/([a-z]+))?\/peer\/(offer|quote)$/);
+  if (!m || m[2] !== what) return undefined;
   return MOCK_MAKERS.find((x) => x.slug === (m[1] ?? null)) ?? null;
 }
 
