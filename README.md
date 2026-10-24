@@ -65,6 +65,8 @@ infra/demo.sh down
 infra/demo-watchtower.sh run    # a party is killed mid-swap; its watchtower refunds or punishes
 infra/demo-ltc.sh up            # the same demo against litecoind regtest (ZEC/LTC)
 infra/evm-demo.sh test          # ZEC/USDC on anvil: happy, refund and punish
+infra/evm-testnet.sh fork test  # ZEC/USDC rehearsal on a Base Sepolia fork; without `fork`, the
+                                # real Base Sepolia + Zcash testnet run (docs/EVM.md)
 ```
 
 ## Deploying
