@@ -408,7 +408,9 @@ impl Cli {
         };
         if favour < MAINNET_MIN_SPREAD_BPS {
             return Err(format!(
-                "--maker-spread-bps {}: on mainnet a maker following a price feed keeps at least                  {MAINNET_MIN_SPREAD_BPS} bps of it (a {} maker: --maker-spread-bps={want} or                  {}), for the price risk it carries until the other side locks",
+                "--maker-spread-bps {}: on mainnet a maker following a price feed keeps at least \
+                 {MAINNET_MIN_SPREAD_BPS} bps of it (a {} maker: --maker-spread-bps={want} or \
+                 {}), for the price risk it carries until the other side locks",
                 self.maker_spread_bps,
                 Role::from(self.role).as_str(),
                 if want > 0 { "more" } else { "less" }
