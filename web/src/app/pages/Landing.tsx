@@ -1,10 +1,13 @@
+import { useEffect, useState } from "react";
 import { ArrowRight, GithubLogo } from "@phosphor-icons/react";
 import { Link } from "@/router";
+import { coin } from "@/format";
 import { btcText } from "@/swap/shared";
 import { CipherGrid } from "../components/CipherGrid";
 import { CipherSwarm } from "../components/CipherSwarm";
 import { LogoMark } from "../components/LogoMark";
 import { Reveal } from "../components/Reveal";
+import { ScrambleText } from "../components/ScrambleText";
 import { useLocal } from "../lib/daemon";
 
 // `/`: SealPad's landing pattern, told for Ferry.
@@ -59,8 +62,27 @@ function Navbar() {
   );
 }
 
+// The coins Ferry swaps shielded ZEC for. The hero's second line cycles through them; with
+// reduced motion it stays on the first.
+const counters = [
+  { ticker: "BTC", asset: "Bitcoin" },
+  { ticker: "LTC", asset: "Litecoin" },
+  { ticker: "USDC", asset: "USDC" },
+];
+
+function useCycle(n: number, ms: number) {
+  const [i, setI] = useState(0);
+  useEffect(() => {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const id = setInterval(() => setI((k) => (k + 1) % n), ms);
+    return () => clearInterval(id);
+  }, [n, ms]);
+  return i;
+}
+
 function Hero() {
   const d = useLocal();
+  const out = counters[useCycle(counters.length, 3200)].asset;
   const settled = d.list.filter((s) => s.outcome === "swapped").length;
   const offer = d.status?.offer;
   return (
@@ -69,11 +91,13 @@ function Hero() {
       <div className="relative mx-auto max-w-7xl px-6 pt-32 pb-24 md:px-8 lg:pt-40 lg:pb-32">
         <div className="lg:grid lg:grid-cols-12 lg:gap-16">
           <div className="lg:col-span-7">
-            <p className="font-mono text-[11px] tracking-[0.18em] text-brand-500 uppercase">Shielded ZEC ⇄ BTC · Atomic swaps</p>
+            <p className="font-mono text-[11px] tracking-[0.18em] text-brand-500 uppercase">Shielded ZEC ⇄ BTC · LTC · USDC</p>
             <h1 className="mt-10 text-5xl leading-[1.02] font-medium tracking-tight text-slate-900 md:text-6xl lg:text-[5.25rem]">
               Shielded ZEC in.
               <br />
-              Bitcoin out.
+              <span className="whitespace-nowrap">
+                <ScrambleText text={out} duration={700} /> out.
+              </span>
               <br />
               <span className="text-slate-400">No middleman.</span>
             </h1>
@@ -100,11 +124,23 @@ function Hero() {
             <dl className="mt-16 space-y-7 border-t border-slate-200 pt-8">
               <div>
                 <dt className="font-mono text-[10px] tracking-[0.18em] text-slate-400 uppercase">Network</dt>
-                <dd className="mt-1.5 text-sm text-slate-900 capitalize">{d.status ? `${d.status.chains.btc.network} Bitcoin, ${d.status.chains.zec.network} Zcash` : "–"}</dd>
+                <dd className="mt-1.5 text-sm text-slate-900 capitalize">{d.status ? `${coin().kind === "evm" ? coin().name : `${d.status.chains.btc.network} ${coin().name}`}, ${d.status.chains.zec.network} Zcash` : "–"}</dd>
               </div>
               <div>
                 <dt className="font-mono text-[10px] tracking-[0.18em] text-slate-400 uppercase">Rate</dt>
-                <dd className="mt-1.5 font-mono text-sm text-slate-900">{offer ? `1 ZEC = ${btcText(offer.rate_sat_per_zec)} BTC` : "–"}</dd>
+                <dd className="mt-1.5 font-mono text-sm text-slate-900">{offer ? `1 ZEC = ${btcText(offer.rate_sat_per_zec)} ${coin().ticker}` : "–"}</dd>
+              </div>
+              <div>
+                <dt className="font-mono text-[10px] tracking-[0.18em] text-slate-400 uppercase">Pairs</dt>
+                <dd className="mt-1.5 font-mono text-sm text-slate-400">
+                  ZEC ⇄{" "}
+                  {counters.map((c, i) => (
+                    <span key={c.ticker}>
+                      {i > 0 && " · "}
+                      <span className={d.status && c.ticker === coin().ticker ? "text-slate-900" : undefined}>{c.ticker}</span>
+                    </span>
+                  ))}
+                </dd>
               </div>
             </dl>
           </div>
@@ -138,7 +174,7 @@ function Narrative() {
 const guarantees = [
   { n: "01", title: "No custodian", desc: "Nobody holds your coins in between. Both sides lock their own coins in a way only the swap can open, and the way back is signed before anything moves." },
   { n: "02", title: "Never unshielded", desc: "Your ZEC goes from shielded address to shielded address. Its amount and addresses never appear on chain, before, during or after the swap." },
-  { n: "03", title: "An ordinary payment", desc: "On Bitcoin a finished swap is a single-signature payment, like millions of others. Nothing on it points to your Zcash wallet." },
+  { n: "03", title: "Nothing points back", desc: "On Bitcoin and Litecoin a finished swap is a single-signature payment, like millions of others. On Base it is a call to the swap contract. Nothing on either points to your Zcash wallet." },
 ];
 
 function Guarantees() {
@@ -171,9 +207,9 @@ function Guarantees() {
 }
 
 const phases = [
-  { n: "01", title: "Bitcoin locked", desc: "The other side locks their bitcoin first, in a way only you can claim." },
+  { n: "01", title: "Their coins locked", desc: "The other side locks their bitcoin, litecoin or USDC first, in a way only you can claim." },
   { n: "02", title: "ZEC sealed", desc: "Your ZEC moves to a shielded address made for this swap, which needs both halves of a key to open." },
-  { n: "03", title: "You claim", desc: "Claiming the bitcoin shows your half of the key, which is exactly what lets them open the ZEC." },
+  { n: "03", title: "You claim", desc: "Claiming their coins shows your half of the key, which is exactly what lets them open the ZEC." },
   { n: "04", title: "Settled", desc: "They sweep the ZEC into their own shielded wallet. If anyone vanishes, a deadline sends every coin home." },
 ];
 
@@ -212,7 +248,7 @@ function FinalCTA() {
         <Reveal>
           <p className="font-mono text-[11px] tracking-[0.18em] text-brand-500 uppercase">Get started</p>
           <h2 className="mt-10 text-4xl leading-[1.02] font-medium tracking-tight text-slate-900 md:text-5xl lg:text-[4rem]">Shielded by default.</h2>
-          <p className="mx-auto mt-8 max-w-prose text-lg leading-relaxed text-slate-600">Start a swap or read how it works. Regtest only: no real coins at stake.</p>
+          <p className="mx-auto mt-8 max-w-prose text-lg leading-relaxed text-slate-600">Start a swap or read how it works. Test networks only: no real coins at stake.</p>
           <div className="mt-12 flex flex-wrap items-center justify-center gap-8">
             <Link to="/app" className="bg-slate-900 px-7 py-3.5 text-sm font-medium tracking-tight text-white transition-colors hover:bg-slate-800">
               Launch app
@@ -242,7 +278,7 @@ function Footer() {
             <span className="font-bold tracking-wider text-slate-900">FERRY</span>
           </div>
           <p className="max-w-xs text-sm leading-relaxed text-slate-500">
-            Atomic swaps between shielded ZEC and bitcoin.
+            Atomic swaps between shielded ZEC and bitcoin, litecoin or USDC.
             <br />
             No bridge, no custodian, nothing unshielded.
           </p>
@@ -277,6 +313,8 @@ function Footer() {
         <div className="flex flex-wrap gap-6">
           <span>Zcash shielded pool</span>
           <span>Bitcoin</span>
+          <span>Litecoin</span>
+          <span>Base</span>
         </div>
       </div>
     </footer>
