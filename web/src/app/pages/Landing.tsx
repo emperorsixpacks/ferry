@@ -26,6 +26,7 @@ const links = [
   { to: "#guarantees", label: "GUARANTEES" },
   { to: "#flow", label: "HOW IT WORKS" },
   { to: "/how-it-works", label: "DOCS" },
+  { to: "/safety", label: "SAFETY" },
   { to: "/inspect", label: "INSPECT" },
 ];
 
@@ -230,7 +231,7 @@ function FinalCTA() {
 function Footer() {
   const cols = [
     { title: "PROTOCOL", links: [["Guarantees", "#guarantees"], ["Lifecycle", "#flow"], ["Swap", "/app"]] },
-    { title: "RESOURCES", links: [["How it works", "/how-it-works"], ["Protocol inspector", "/inspect"]] },
+    { title: "RESOURCES", links: [["How it works", "/how-it-works"], ["What could go wrong", "/safety"], ["Protocol inspector", "/inspect"]] },
   ];
   return (
     <footer className="border-t border-slate-200 bg-slate-50 px-6 pt-24 pb-12 md:px-8">

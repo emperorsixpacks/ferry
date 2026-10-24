@@ -35,6 +35,8 @@ Monero had the same problem: no scripts, so no HTLCs. Its answer was the adaptor
 If anything stalls, timelocks take over: after T1 the BTC can be cancelled and refunded (which hands
 Z the other share, so Z reclaims its ZEC), and after T2 a silent BTC holder is punished.
 Full protocol, abort cases and timing rules: [docs/PROTOCOL.md](docs/PROTOCOL.md).
+Who you trust, what can go wrong and what each side learns, in plain language:
+[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) (also in the app at `/safety`).
 
 ## What each chain sees
 
@@ -104,6 +106,9 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
   lock and logs any violation loudly.
 
 ## Known gaps
+
+Plain-language versions of these, with what happens in every abort case, are in
+[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
 - The joint viewing key is built from an arbitrary `ak`, so it is not quantum-recoverable under
   ZIP 2005 (the same constructor FROST setups use today). The address is single-use and short-lived.

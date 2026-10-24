@@ -12,6 +12,7 @@ import { Wordmark } from "./LogoMark";
 const nav = [
   { to: "/app", label: "Swap" },
   { to: "/how-it-works", label: "How it works" },
+  { to: "/safety", label: "Safety" },
   { to: "/inspect", label: "Inspect" },
 ];
 

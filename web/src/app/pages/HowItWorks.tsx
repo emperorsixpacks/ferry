@@ -127,7 +127,10 @@ export function HowItWorks() {
                   Try a swap
                   <ArrowRight size={14} weight="bold" />
                 </Link>
-                <p>
+                <p className="flex flex-wrap justify-center gap-x-6 gap-y-2">
+                  <Link to="/safety" className="font-mono text-[11px] tracking-widest text-slate-500 uppercase underline-offset-4 hover:text-brand-600 hover:underline">
+                    What could go wrong
+                  </Link>
                   <Link to="/inspect" className="font-mono text-[11px] tracking-widest text-slate-500 uppercase underline-offset-4 hover:text-brand-600 hover:underline">
                     For developers: watch the protocol live
                   </Link>
@@ -141,7 +144,7 @@ export function HowItWorks() {
   );
 }
 
-function Section({ id, n, eyebrow, icon, title, children }: { id: string; n: string; eyebrow: string; icon: ReactNode; title: string; children: ReactNode }) {
+export function Section({ id, n, eyebrow, icon, title, children }: { id: string; n: string; eyebrow: string; icon: ReactNode; title: string; children: ReactNode }) {
   return (
     <section id={id} className="scroll-mt-24 space-y-4">
       <div className="flex items-center gap-2">
@@ -156,7 +159,7 @@ function Section({ id, n, eyebrow, icon, title, children }: { id: string; n: str
   );
 }
 
-function Box({ label, children, hot }: { label: string; children: ReactNode; hot?: boolean }) {
+export function Box({ label, children, hot }: { label: string; children: ReactNode; hot?: boolean }) {
   return (
     <div className={`rounded border p-4 ${hot ? "border-brand-300 bg-brand-50/40" : "border-slate-200 bg-white"}`}>
       <Label className="mb-2">{label}</Label>
