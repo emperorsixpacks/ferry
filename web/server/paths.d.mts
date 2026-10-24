@@ -14,10 +14,14 @@ export interface NearTokenInfo {
   ferry?: string | null;
 }
 
+export type NetKind = "main" | "test" | "local";
+
 export interface PathCtx {
   ready: boolean;
   sell: string[];
   buy: string[];
+  // the kind of network each pair's daemons run on (swapNet); a pair missing shows no time
+  nets?: Partial<Record<string, NetKind>>;
   routes: { from: string[]; to: string[] } | null;
   near:
     | undefined
@@ -76,7 +80,9 @@ export function isToken(t: string): t is Token;
 export function tickerOf(t: string, ctx?: PathCtx | null): string;
 export function familyOf(t: string, ctx?: PathCtx | null): string;
 export function symbolFamily(symbol: string): string;
-export function ferryMinutes(pair: string): number;
+export function netKind(network: string | null | undefined): NetKind | null;
+export function swapNet(counterNetwork: string | null | undefined, zecNetwork: string | null | undefined): NetKind | null;
+export function ferryMinutes(pair: string, net?: NetKind): [number, number];
 export function aboutText(minutes: [number, number]): string;
 export function resolvePath(sell: string, buy: string, ctx: PathCtx | null, opts?: { pause?: Pause; public?: boolean }): Path;
 export function stepWords(steps: Step[], ctx?: PathCtx | null): string;

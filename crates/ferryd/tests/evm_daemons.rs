@@ -48,7 +48,27 @@ fn anvil_binary() -> Option<PathBuf> {
     })
 }
 
+/// A free local port: one the OS picks, or with FERRY_TEST_PORTS=FROM-TO the next free one in
+/// that range, round and round (a port still in use is skipped), for a machine where tests must
+/// stay in a range.
 fn free_port() -> u16 {
+    use std::sync::atomic::{AtomicU16, Ordering::SeqCst};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let range = std::env::var("FERRY_TEST_PORTS").ok().and_then(|r| {
+        let (a, b) = r.split_once('-')?;
+        let (a, b) = (a.trim().parse::<u16>().ok()?, b.trim().parse::<u16>().ok()?);
+        (a <= b).then_some((a, b))
+    });
+    if let Some((from, to)) = range {
+        let span = to - from + 1;
+        for _ in 0..span {
+            let p = from + NEXT.fetch_add(1, SeqCst) % span;
+            if TcpListener::bind(("127.0.0.1", p)).is_ok() {
+                return p;
+            }
+        }
+        panic!("FERRY_TEST_PORTS {from}-{to}: no free port");
+    }
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -368,7 +388,14 @@ async fn slow_lock_maker_answers_at_once_and_still_refunds() {
         return;
     };
     let http = api_client();
-    let maker = chain.ferryd("b", "bram", "b.key", &["--maker-offer", &format!("{RATE}")]);
+    let rate = format!("{RATE}");
+    // One swap at a time here, so the second proposal below is refused as busy.
+    let maker = chain.ferryd(
+        "b",
+        "bram",
+        "b.key",
+        &["--maker-offer", &rate, "--max-swaps", "1"],
+    );
     maker.ready(&http).await;
     let before = chain.usdc_of(KEY_B).await;
     let offer: Value = http
@@ -427,12 +454,22 @@ async fn slow_lock_maker_answers_at_once_and_still_refunds() {
         .send()
         .await
         .unwrap();
+    let status = r.status().as_u16();
+    let body: Value = r.json().await.unwrap_or_default();
     assert_eq!(
-        r.status().as_u16(),
-        409,
-        "{}",
-        r.text().await.unwrap_or_default()
+        (status, body["code"].as_str()),
+        (409, Some("busy")),
+        "{body}"
     );
+    let offer: Value = http
+        .get(format!("{}/peer/offer", maker.peer))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(offer["free_slots"], 0, "{offer}");
 
     // The lock lands from the tick loop.
     let v = maker
@@ -502,8 +539,10 @@ async fn buy_zec_b_taker_with_a_z_maker() {
     );
     assert!(
         started.elapsed() < Duration::from_secs(2),
-        "the start waited for the chain: {:?}",
-        started.elapsed()
+        "the start waited for the chain: {:?}\ntaker:\n{}\nmaker:\n{}",
+        started.elapsed(),
+        tail(&taker.log),
+        tail(&maker.log)
     );
     let id = r.json::<Value>().await.unwrap()["id"]
         .as_str()
@@ -568,7 +607,9 @@ async fn slow_maker(target: String, delay: Duration) -> String {
         let status = r.status();
         (status, r.bytes().await.unwrap()).into_response()
     }
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", free_port()))
+        .await
+        .unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let app = axum::Router::new()
         .fallback(forward)
@@ -665,8 +706,9 @@ async fn route_leg_one_buys_zec_into_another_wallet() {
     }
     assert_eq!(api_get(&http, &user, "/api/swaps").await, json!([]));
 
-    // A start that takes a while: the same label again gets 409 with the label code, any other
-    // start a plain 409, and the first one still creates its swap.
+    // A start that takes a while: the same label again gets 409 with the label code; any other
+    // start waits for its turn (several swaps run at once, but one start checks its funds at a
+    // time), and the first one still creates its swap.
     let slow = slow_maker(maker.peer.clone(), Duration::from_secs(3)).await;
     let leg = json!({"maker": slow, "zec_zat": one_zec, "route": "r1/1",
                      "sweep_to": to, "max_counter": RATE});
@@ -689,8 +731,31 @@ async fn route_leg_one_buys_zec_into_another_wallet() {
         (409, Some("route_label_in_use")),
         "{body}"
     );
-    let (code, body) = post_swap(&http, &user, with(&base, json!({"route": "r2/1"}))).await;
-    assert_eq!((code, body["code"].as_str()), (409, None), "{body}");
+    // This one names a maker that isn't there, so it creates nothing; it is answered only once
+    // the first start's turn is over (about 2 s from now), and not with a 409.
+    let queued = Instant::now();
+    let (code, body) = post_swap(
+        &http,
+        &user,
+        with(
+            &base,
+            json!({"route": "r2/1", "maker": "http://127.0.0.1:9"}),
+        ),
+    )
+    .await;
+    assert_eq!(code, 502, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("maker unreachable"),
+        "{body}"
+    );
+    assert!(
+        queued.elapsed() > Duration::from_millis(1_500),
+        "it waited for its turn: {:?}",
+        queued.elapsed()
+    );
     let (code, body) = first.await.unwrap();
     assert_eq!(code, 201, "{body}\n{}", tail(&user.log));
     let id = body["id"].as_str().unwrap().to_string();

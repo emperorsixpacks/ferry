@@ -7,9 +7,9 @@ import { useOnScreen, useReducedMotion } from "./motion";
 
 // Three proof points as white cards with hairline borders, each with a small, slow loop in ink: a
 // shield outlining itself round ciphertext (private), two coins trading places over a lock (no
-// middleman), coins circling shielded ZEC (any chain). The loops pause off screen. Facts as
-// THREAT-MODEL.md and the NEAR Intents integration state them: the ZEC side is always shielded; a
-// NEAR leg is public.
+// middleman), coins circling shielded ZEC (other chains). The loops pause off screen. Facts as
+// THREAT-MODEL.md and WHAT-IS-REAL.md state them: the ZEC side is always shielded; Ferry's own
+// chains are Bitcoin, Litecoin and Base; a NEAR leg is public and mainnet only.
 
 const delay = (ms: number) => ({ "--lp-delay": `${ms}ms` }) as CSSProperties;
 
@@ -29,13 +29,13 @@ export function Proof() {
         i={1}
         title="No middleman"
         art={<SwapArt />}
-        body="Ferry's swaps are atomic: each side locks its own coins, and the swap releases both together. If anything fails, a deadline sends your coins back."
+        body="Ferry's swaps are atomic: each side locks its own coins, and the swap releases both together. If the other side stops, a deadline ends the swap, and you get your coins back or theirs."
       />
       <Card
         i={2}
-        title="Any chain"
+        title="Other chains"
         art={<OrbitArt />}
-        body="Bitcoin, Litecoin, ETH and USDC swap directly across six chains. 200+ more assets on 37 chains come through NEAR Intents, which settles that leg in public. Your ZEC never goes to NEAR."
+        body="Bitcoin and Litecoin, and ETH and USDC on Base, swap directly. On mainnet, NEAR Intents can carry the other coin on to more chains, and settles that leg in public. Your ZEC never goes to NEAR."
       />
     </div>
   );

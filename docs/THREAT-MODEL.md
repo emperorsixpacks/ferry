@@ -116,9 +116,12 @@ Every trustless swap needs someone who holds the other coin and is there to answ
 - **What is still open.** Today the only partners are ours: one per pair on the public demo. No
   outside partner is listed for nodes (`infra/node/makers.txt` is empty), so a node swaps between
   its own two wallets. Outside nodes can't reach the demo's partner yet
-  ([DEPLOY.md](DEPLOY.md#9-firewall)). Each partner takes one swap at a time, so one taker who
-  walks away keeps it busy until the first deadline.
-  <!-- update after many-swaps / safer-settings merge -->
+  ([DEPLOY.md](DEPLOY.md#9-firewall)). Each partner runs several swaps at once (4 on test
+  networks and 2 on mainnet by default, as far as its free funds go), so one taker who walks away
+  no longer keeps it busy. That swap still holds one of its slots, and its coins until the first
+  deadline; if the taker never locked anything, not even the slot once 30 minutes have passed
+  ([Several swaps at once](#several-swaps-at-once)). When every slot is taken, the app says the
+  partner is busy.
 
 ### Either side can walk away, and no chain can fine them
 
@@ -249,7 +252,7 @@ This is a known critique of this design, so here it is exactly:
 
 Ferry can also swap shielded ZEC for USDC on Base ([details](EVM.md)); it has run locally and on
 Base Sepolia with real Zcash testnet notes ([log](evidence/evm-base-sepolia-live-2026-10-20.txt)). The same protections apply. It differs from the Bitcoin version in
-four ways:
+these ways:
 
 - **Every step on Base is visible as a swap**, not only the abort paths. The lock and the claim
   or refund are public calls to the Ferry contract, with the USDC amount and the deadlines. The
@@ -258,7 +261,13 @@ four ways:
 - **The halves of the key are revealed publicly** rather than only to the other side. This is
   safe: one half opens nothing, and nobody else can find the shared ZEC note.
 - **You also trust USDC's issuer**, which can freeze transfers, and Base's sequencer to include
-  transactions on time. Ferry leaves a margin for that before each deadline.
+  transactions on time. Ferry leaves a margin for that before each deadline: 2 hours on Base
+  mainnet, as long as Base's longest stop so far.
+- **The deadlines on Base mainnet**, from the start: Z's last claim at 2 h 15 min, B's refund from
+  4 h 15 min, and B has 24 hours for it (until 28 h 15 min); after that, at 30 h 15 min, Z may
+  take B's USDC. So if you are buying ZEC and the swap is called off, your node (or your own
+  watchtower) must run at some point in that day
+  ([details](EVM.md#timing-rules-the-daemon-enforces-these-not-the-chain)).
 - **A watchtower works differently.** There is nothing to sign in advance: the tower calls the
   swap contract's refund or penalty itself and pays the fee from its own account. The contract
   pays only the swap's own two parties, whoever calls. The ZEC side's package holds no secret. The
@@ -428,6 +437,64 @@ joint-address concern behind sweeping with `--discard-ovk` does not arise. The d
 Ferry shows (`GET /api/addresses`) has a shielded receiver only, so whatever a wallet sends there
 arrives shielded. On Bitcoin, Litecoin and EVM chains a withdrawal is an ordinary public payment
 from the node's wallet to your address.
+
+## Several swaps at once
+
+A Ferry node runs several swaps at the same time, as maker and taker together, up to a cap
+(`--max-swaps`: 4 on test networks, 2 on mainnet by default) and only as far as its free funds go
+([API.md](API.md#several-swaps-at-once)). One person's slow swap no longer stops everyone else.
+
+**Each swap keeps what it still needs.** Until its lock is out, a swap holds the lock amount and
+its fees; on Base it also holds the gas of the calls it may still have to make. A new swap, a
+withdrawal and the amount a maker says it can take ("Takes up to … right now") only count what is
+left. The holds are worked out from the saved swaps every time, so they are right after a restart
+too. A new swap that the free funds can't cover is turned down as busy before anyone locks
+anything; it is never half started.
+
+**No two swaps spend the same coins:**
+
+- **Zcash.** Ferry builds, signs and sends one lock at a time from its wallet, and the wallet
+  records which notes a lock spends before it is broadcast. Change only becomes spendable after it
+  confirms, and Ferry re-reads the balance right after each send. A wallet spends whole notes, so
+  when several locks are still to be sent, Ferry counts that each may take up to one note more
+  than it needs, and turns a new swap down if the notes can't cover every lock at once. A node
+  whose ZEC sits in one big note therefore takes one swap at a time until the change of its last
+  lock confirms; splitting the ZEC into a few notes lets it take more.
+- **Bitcoin and Litecoin.** Locks are funded one at a time, and the wallet locks the coins a
+  funded lock picked until that lock is broadcast, so nothing else it funds (another swap, a
+  withdrawal) can pick them. The node forgets these locks when it restarts, so Ferry locks them
+  again before it funds anything; a swap called off before its lock went out gives its coins back.
+- **Base.** The node's account sends one transaction at a time, so its nonces follow each other,
+  and a lock's approval and the lock itself go out together, so two swaps can't use each other's
+  approval.
+- **Withdrawals** keep working while swaps run, from the free funds only, and are still recorded
+  before they are broadcast.
+
+**Swaps that are abandoned.** Anyone can propose a swap and walk away, and with a cap that could
+fill every slot. Ferry keeps its limit of 6 proposals a minute, still calls off a swap where
+nothing is locked after the negotiation timeout (30 minutes by default), and adds one rule: a swap
+whose partner has locked nothing by that timeout no longer counts against the cap. It keeps its
+funds held until its own deadline and refund, but it no longer keeps a real user out. At most
+twice the cap are kept in all. Nothing about who proposed is recorded or compared: there is no
+identity to go on, and adding one would cost privacy.
+
+**What remains possible (known limits):**
+
+- Someone who keeps proposing at the rate limit can keep a node full, or its free funds tied up,
+  and new swaps are turned down as busy until the timeouts and refunds run their course. Swaps
+  already in progress are never affected. The proposal limit is shared by everyone, so it can
+  be used the same way.
+- A taker who signs and then never locks its ZEC still makes a bitcoin (or USDC) maker lock first:
+  the maker's coins stay locked until its refund deadline, and it pays the lock, call-off and
+  refund fees. This is the protocol's "B locks first" rule and was true before; with several slots
+  one such taker no longer blocks the node, but several can tie up more of its funds (at most what
+  is free, and at most twice the cap).
+- A maker's offer says how many more swaps it takes right now, so anyone who watches it learns
+  when its swaps start and end. Its "takes up to" amount already changed with every swap, so this
+  adds little, but it is a timing signal.
+- On the public demo, ZEC a private swap has bought waits in the node's wallet between its two
+  swaps, and the node counts it as free; the demo server turns down direct sales on that pair until
+  the private swap is done.
 
 ## How we checked
 

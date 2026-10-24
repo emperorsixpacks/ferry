@@ -9,6 +9,12 @@ use ferry_btc::{Chain, Coin};
 use ferry_core::{Envelope, Role, SwapParams};
 use serde::{Deserialize, Serialize};
 
+/// What a maker following a price feed on mainnet keeps for itself, in basis points of the market
+/// price (1%). It is paid for the free option the side that locks second holds: on Base, with its
+/// 2 h claim window, about 0.48% of the amount at 80% yearly volatility. The rest covers the price
+/// sources' error, up to 1% within [`crate::pricefeed::MAX_SOURCE_GAP_BPS`].
+pub const MAINNET_MIN_SPREAD_BPS: i32 = 100;
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum RoleArg {
     Z,
@@ -78,9 +84,16 @@ pub struct Cli {
     /// confirmation minimums drop to 1.
     #[arg(long)]
     pub dev_policy: bool,
-    /// A swap that has locked nothing after this long is aborted, freeing the maker's slot.
+    /// A swap that has locked nothing after this long is aborted, freeing the maker's slot. A
+    /// swap whose counterparty has locked nothing by then no longer counts against
+    /// --max-swaps (crate::capacity).
     #[arg(long, default_value_t = 1800)]
     pub negotiation_timeout_secs: u64,
+    /// How many swaps this node runs at once, as maker and taker together (default: 4 on test
+    /// networks, 2 on a main network). A Propose or a start beyond it, or one whose funds are
+    /// held by swaps in progress, is refused as busy (409, "code": "busy").
+    #[arg(long, env = "FERRY_MAX_SWAPS", value_parser = crate::capacity::parse_max_swaps)]
+    pub max_swaps: Option<u32>,
     /// URL the counterparty uses to reach our peer listener (default http://<listen>).
     #[arg(long)]
     pub public_url: Option<String>,
@@ -166,10 +179,17 @@ pub struct Cli {
     #[arg(long, requires = "maker_offer")]
     pub maker_price_feed: Option<crate::pricefeed::FeedArg>,
     /// Spread over the feed price, in basis points (50 = +0.5%). May be negative: a B maker buying
-    /// ZEC quotes below the market, a Z maker selling ZEC above it.
+    /// ZEC quotes below the market, a Z maker selling ZEC above it. On mainnet a maker that
+    /// follows a feed keeps at least 100 bps for itself (a Z maker +100 or more, a B maker -100 or
+    /// less), or ferryd refuses to start.
     #[arg(long, default_value_t = 0, allow_negative_numbers = true,
           value_parser = clap::value_parser!(i32).range(-5_000..=5_000))]
     pub maker_spread_bps: i32,
+    /// Pause the offer while the feeds that answered are further apart than this, in basis points
+    /// (default 200: the median then sits within 1% of each).
+    #[arg(long, default_value_t = crate::pricefeed::MAX_SOURCE_GAP_BPS,
+          value_parser = clap::value_parser!(u32).range(1..=5_000))]
+    pub maker_price_max_gap_bps: u32,
     /// The pair the price feed quotes (BASE/QUOTE: ZEC/BTC, ZEC/LTC, ZEC/USD, ZEC/USDC, ZEC/ETH
     /// for WETH). A BTC or LTC quote follows --chain, so `--chain ltc` quotes ZEC/LTC. With
     /// --counter evm the quote's decimals must be the token's (ferryd refuses to start otherwise).
@@ -340,6 +360,7 @@ impl Cli {
             rate_source: None,
             rate_updated_at: None,
             liquidity: None,
+            free_slots: None,
             paused: false,
             quote_key: None,
             features: vec![crate::route::PAYOUT_FEATURE.into()],
@@ -373,7 +394,37 @@ impl Cli {
             refresh: Duration::from_secs(self.maker_price_refresh_secs.max(1)),
             stale_after: Duration::from_secs(self.maker_price_stale_secs.max(1)),
             grace: GRACE,
+            max_gap_bps: self.maker_price_max_gap_bps,
         }))
+    }
+
+    /// A maker that follows a price feed on mainnet (`counter_mainnet`, or Zcash mainnet) keeps
+    /// at least [`MAINNET_MIN_SPREAD_BPS`] of the market price for itself: a Z maker asks that much
+    /// above it, a B maker pays that much under it.
+    pub fn check_maker_spread(&self, counter_mainnet: bool) -> Result<(), String> {
+        let mainnet = counter_mainnet || self.zec_network == "main";
+        let follows_feed = self
+            .maker_price_feed
+            .as_ref()
+            .is_some_and(|f| !f.0.is_empty());
+        if !mainnet || self.maker_offer.is_none() || !follows_feed {
+            return Ok(());
+        }
+        let (favour, want) = match Role::from(self.role) {
+            Role::Z => (self.maker_spread_bps, MAINNET_MIN_SPREAD_BPS),
+            Role::B => (-self.maker_spread_bps, -MAINNET_MIN_SPREAD_BPS),
+        };
+        if favour < MAINNET_MIN_SPREAD_BPS {
+            return Err(format!(
+                "--maker-spread-bps {}: on mainnet a maker following a price feed keeps at least \
+                 {MAINNET_MIN_SPREAD_BPS} bps of it (a {} maker: --maker-spread-bps={want} or \
+                 {}), for the price risk it carries until the other side locks",
+                self.maker_spread_bps,
+                Role::from(self.role).as_str(),
+                if want > 0 { "more" } else { "less" }
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -447,9 +498,13 @@ pub struct Offer {
     /// Unix seconds of the price a live rate comes from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_updated_at: Option<u64>,
-    /// How much the maker can fill right now, from its balance (capped at `max_zat`).
+    /// How much the maker can fill right now, from its free balance (what its swaps in
+    /// progress don't hold), capped at `max_zat`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liquidity: Option<Liquidity>,
+    /// How many more swaps the maker takes right now (crate::capacity); 0: busy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_slots: Option<u32>,
     /// The live rate went stale: `making` is false until a feed answers again.
     #[serde(default)]
     pub paused: bool,
@@ -527,6 +582,66 @@ pub struct Delivery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On mainnet (the counter-chain's or Zcash's) a maker that follows a price feed keeps at
+    /// least 1% for itself; a fixed rate, a taker and the test networks are left alone.
+    #[test]
+    fn mainnet_makers_keep_a_spread() {
+        let cli = |extra: &[&str]| {
+            let base = ["ferryd", "--name", "n", "--data-dir", "/nonexistent"];
+            Cli::try_parse_from(base.iter().chain(extra)).unwrap()
+        };
+        let maker = |role: &str, spread: &str| {
+            cli(&[
+                "--role",
+                role,
+                "--maker-offer",
+                "410000:1000000:2000000",
+                "--maker-price-feed",
+                "all",
+                &format!("--maker-spread-bps={spread}"),
+            ])
+        };
+        // a Z maker asks at least 1% over the market, a B maker pays at least 1% under it
+        for (role, ok, short) in [("z", "100", "99"), ("b", "-100", "-99")] {
+            assert_eq!(maker(role, ok).check_maker_spread(true), Ok(()));
+            assert_eq!(maker(role, "0").check_maker_spread(false), Ok(()), "test network");
+            for bad in [short, "0", &format!("{}", -ok.parse::<i32>().unwrap())] {
+                let err = maker(role, bad).check_maker_spread(true).unwrap_err();
+                assert!(err.contains(&format!("--maker-spread-bps={ok} or")), "{err}");
+            }
+        }
+        assert_eq!(maker("z", "250").check_maker_spread(true), Ok(()));
+        assert_eq!(maker("b", "-250").check_maker_spread(true), Ok(()));
+        // Zcash mainnet counts even when the counter-chain is a test network.
+        let zmain = |spread: &str| {
+            cli(&[
+                "--role",
+                "z",
+                "--zec-network",
+                "main",
+                "--maker-offer",
+                "410000",
+                "--maker-price-feed",
+                "kraken",
+                &format!("--maker-spread-bps={spread}"),
+            ])
+        };
+        assert!(zmain("0").check_maker_spread(false).is_err());
+        assert_eq!(zmain("100").check_maker_spread(false), Ok(()));
+        // nothing to keep a spread from: a fixed rate, the feed turned off, or a taker
+        for extra in [
+            &["--role", "z", "--maker-offer", "410000"][..],
+            &["--role", "z", "--maker-offer", "410000", "--maker-price-feed", "off"],
+            &["--role", "z"],
+        ] {
+            assert_eq!(cli(extra).check_maker_spread(true), Ok(()), "{extra:?}");
+        }
+        assert_eq!(
+            cli(&["--role", "b"]).maker_price_max_gap_bps,
+            crate::pricefeed::MAX_SOURCE_GAP_BPS
+        );
+    }
 
     #[test]
     fn litecoin_cli() {

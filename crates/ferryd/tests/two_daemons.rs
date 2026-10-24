@@ -24,7 +24,27 @@ fn rpc_url() -> String {
     std::env::var("FERRY_BTC_RPC").unwrap_or_else(|_| "http://127.0.0.1:18543".into())
 }
 
+/// A free local port: one the OS picks, or with FERRY_TEST_PORTS=FROM-TO the next free one in
+/// that range, round and round (a port still in use is skipped), for a machine where tests must
+/// stay in a range.
 fn free_port() -> u16 {
+    use std::sync::atomic::{AtomicU16, Ordering::SeqCst};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let range = std::env::var("FERRY_TEST_PORTS").ok().and_then(|r| {
+        let (a, b) = r.split_once('-')?;
+        let (a, b) = (a.trim().parse::<u16>().ok()?, b.trim().parse::<u16>().ok()?);
+        (a <= b).then_some((a, b))
+    });
+    if let Some((from, to)) = range {
+        let span = to - from + 1;
+        for _ in 0..span {
+            let p = from + NEXT.fetch_add(1, SeqCst) % span;
+            if TcpListener::bind(("127.0.0.1", p)).is_ok() {
+                return p;
+            }
+        }
+        panic!("FERRY_TEST_PORTS {from}-{to}: no free port");
+    }
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -166,6 +186,16 @@ impl World {
 
     /// `maker` makes at 410000 sat/ZEC, with `maker_extra`; the other party takes.
     async fn start_as(zec_confs: u32, maker: Role, maker_extra: &[&str]) -> World {
+        Self::start_full(zec_confs, maker, maker_extra, &[]).await
+    }
+
+    /// [`World::start_as`], with `taker_extra` for the taker.
+    async fn start_full(
+        zec_confs: u32,
+        maker: Role,
+        maker_extra: &[&str],
+        taker_extra: &[&str],
+    ) -> World {
         let dir = tempfile::tempdir().unwrap();
         let zec_file = dir.path().join("zec-chain.json");
         let tag = format!("{:08x}", OsRng.next_u32());
@@ -190,7 +220,11 @@ impl World {
         let offer = [&["--maker-offer", "410000"], maker_extra].concat();
         let z_extra = [
             &["--zec-mock-balance", "500000000"][..],
-            if maker == Role::Z { &offer } else { &[] },
+            if maker == Role::Z {
+                &offer
+            } else {
+                taker_extra
+            },
         ]
         .concat();
         z.args = party_args(
@@ -218,7 +252,11 @@ impl World {
             &zec_file,
             &b.wallet,
             zec_confs,
-            if maker == Role::B { &offer } else { &[] },
+            if maker == Role::B {
+                &offer
+            } else {
+                taker_extra
+            },
         );
         z.spawn();
         b.spawn();
@@ -814,7 +852,9 @@ async fn taker_refuses_out_of_policy_terms() {
         "/peer/offer",
         axum::routing::get(move || async move { axum::Json(offer) }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", free_port()))
+        .await
+        .unwrap();
     let fake = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -868,7 +908,7 @@ fn propose(sid: [u8; 32]) -> (ferry_core::Proposal, Value) {
 #[tokio::test]
 #[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
 async fn silent_taker_times_out_and_peer_input_is_bounded() {
-    let w = World::start_with(2, &["--negotiation-timeout-secs", "3"]).await;
+    let w = World::start_with(2, &["--negotiation-timeout-secs", "3", "--max-swaps", "1"]).await;
     let peer = w.b.peer_url();
     let http = reqwest::Client::new();
     let post = |path: String, body: Value, token: Option<String>| {
@@ -892,10 +932,11 @@ async fn silent_taker_times_out_and_peer_input_is_bounded() {
     let (swap1, _) = p1.on_accept(&mut OsRng, &accept).unwrap();
     let token = swap1.session().peer_token().unwrap();
     let id1 = hex::encode([1u8; 32]);
+    let (code, busy) = post("/peer/swaps".into(), propose([2; 32]).1, None).await;
     assert_eq!(
-        post("/peer/swaps".into(), propose([2; 32]).1, None).await.0,
-        409,
-        "slot taken"
+        (code, busy["code"].as_str()),
+        (409, Some("busy")),
+        "the only slot is taken: {busy}"
     );
 
     // Garbage envelopes: refused, not remembered, and capped.
@@ -936,6 +977,98 @@ async fn silent_taker_times_out_and_peer_input_is_bounded() {
     .map(|(c, _)| c)
     .collect();
     assert!(codes.contains(&429), "{codes:?}");
+}
+
+/// Several swaps at once (crates/ferryd/src/capacity.rs). A B maker with `--max-swaps 2` takes
+/// two swaps from one Z taker at once: each BTC lock is funded from its own coins (the wallet
+/// keeps the coins of a funded lock locked until it goes out) and both complete. A third start
+/// while both run is refused as busy (409, "code": "busy"), the maker's offer says it takes no
+/// more right now, and once both are done it takes swaps again.
+#[tokio::test]
+#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+async fn two_swaps_at_once_and_a_third_is_busy() {
+    use std::collections::HashSet;
+    let w = World::start_full(2, Role::B, &["--max-swaps", "2"], &[]).await;
+    // B's wallet gets three more coins, each enough for one lock.
+    let b_rpc = BitcoinRpc::new(rpc_url(), "ferry", "ferry").with_wallet(w.b.wallet.clone());
+    for _ in 0..3 {
+        let to = b_rpc.new_address(Network::Regtest).await.unwrap();
+        let _: Value = w
+            .rpc
+            .wallet_call("sendtoaddress", json!([to.to_string(), 0.01]))
+            .await
+            .unwrap();
+    }
+    w.mine().await;
+    let status = w.get(&w.b.url, "/api/status").await;
+    assert_eq!(status["capacity"]["max_swaps"], 2, "{status}");
+
+    let one = w.start_swap(100_000_000).await;
+    let two = w.start_swap(100_000_000).await;
+    assert_ne!(one, two);
+
+    // The third: the maker is full, and says so.
+    let (code, body) = w
+        .post(
+            &w.z.url,
+            "/api/swaps",
+            json!({"maker": w.b.peer_url(), "zec_zat": 100_000_000}),
+        )
+        .await;
+    assert_eq!((code, body["code"].as_str()), (409, Some("busy")), "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("--max-swaps 2"),
+        "{body}"
+    );
+    let offer = w.get(&w.b.peer_url(), "/peer/offer").await;
+    assert_eq!(offer["free_slots"], 0, "{offer}");
+    // The taker runs both too, under its own (regtest default) cap of 4.
+    let z = w
+        .status_until(&w.z.url, |s| s["capacity"]["live"] == 2)
+        .await;
+    assert_eq!(z["capacity"]["free_slots"], 2, "{z}");
+    assert_eq!(z["capacity"]["max_swaps"], 4, "{z}");
+
+    // Both run to the end, side by side.
+    let swapped = |z: &Value, b: &Value| z["outcome"] == "swapped" && b["outcome"] == "swapped";
+    let (_, b1) = w.run_until(&one, 1_000, 60, swapped).await;
+    let (_, b2) = w.run_until(&two, 1_000, 60, swapped).await;
+
+    // Their BTC locks spent different coins.
+    let inputs = |v: &Value| {
+        let txid = entry(v, "btc_lock_broadcast")["txid"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let rpc = w.rpc.clone();
+        async move {
+            let tx: Value = rpc
+                .call("getrawtransaction", json!([txid, true]))
+                .await
+                .unwrap();
+            tx["vin"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| (i["txid"].as_str().unwrap().to_string(), i["vout"].as_u64()))
+                .collect::<HashSet<_>>()
+        }
+    };
+    let (in1, in2) = (inputs(&b1).await, inputs(&b2).await);
+    assert!(!in1.is_empty() && !in2.is_empty());
+    assert!(
+        in1.is_disjoint(&in2),
+        "the two locks share a coin: {in1:?} {in2:?}"
+    );
+
+    // Both done: the maker takes swaps again.
+    let b = w
+        .status_until(&w.b.url, |s| s["capacity"]["live"] == 0)
+        .await;
+    assert_eq!(b["capacity"]["free_slots"], 2, "{b}");
+    let offer = w.get(&w.b.peer_url(), "/peer/offer").await;
+    assert_eq!(offer["free_slots"], 2, "{offer}");
+    w.start_swap(100_000_000).await;
 }
 
 /// A 1-zat note at the joint address before Z locks must not make Z skip its own ZEC lock.

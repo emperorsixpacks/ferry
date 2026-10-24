@@ -4,7 +4,7 @@
 //! used here; only addresses are written differently, see [`BitcoinRpc::with_coin`].
 
 use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
-use bitcoin::{Address, Amount, BlockHash, Network, Transaction, Txid};
+use bitcoin::{Address, Amount, BlockHash, Network, OutPoint, Transaction, Txid};
 
 use crate::chain::{Chain, Coin};
 use serde::de::DeserializeOwned;
@@ -45,6 +45,18 @@ impl RpcError {
 fn per_kvb_to_sat_vb(per_kvb: f64) -> Option<u64> {
     let sat_per_kvb = Amount::from_btc(per_kvb).ok()?.to_sat();
     (sat_per_kvb > 0).then(|| sat_per_kvb.div_ceil(1000))
+}
+
+/// `{"txid", "vout"}` as `listunspent` and `listlockunspent` write it.
+fn outpoint_of(v: &Value) -> Option<OutPoint> {
+    Some(OutPoint {
+        txid: v["txid"].as_str()?.parse().ok()?,
+        vout: u32::try_from(v["vout"].as_u64()?).ok()?,
+    })
+}
+
+fn outpoint_json(op: &OutPoint) -> Value {
+    json!({"txid": op.txid.to_string(), "vout": op.vout})
 }
 
 /// A funded and wallet-signed lock transaction that has not been broadcast.
@@ -412,18 +424,47 @@ impl BitcoinRpc {
 
     /// Fund and sign a transaction paying `amount` to `to` from the wallet, without
     /// broadcasting it. Only segwit inputs are accepted, so the txid is final.
+    ///
+    /// The wallet locks the coins it picks (`lockUnspents`): until this transaction is
+    /// broadcast, nothing else the wallet funds (another swap's lock, a withdrawal) can pick
+    /// them, and [`BitcoinRpc::spendable_balance`] leaves them out. If anything after the
+    /// funding fails they are unlocked again. The node keeps these locks in memory only, so a
+    /// caller holding an unbroadcast lock across a node restart locks its inputs again
+    /// ([`BitcoinRpc::lock_coins`]).
     pub async fn fund_lock(&self, to: &Address, amount: Amount) -> Result<FundedLock, RpcError> {
-        let decode = |detail: String| RpcError::Decode {
-            method: "fund_lock".into(),
-            detail,
-        };
         let raw: String = self
             .wallet_call(
                 "createrawtransaction",
                 json!([[], {self.addr_str(to): amount.to_btc()}]),
             )
             .await?;
-        let funded: Value = self.wallet_call("fundrawtransaction", json!([raw])).await?;
+        let funded: Value = self
+            .wallet_call("fundrawtransaction", json!([raw, {"lockUnspents": true}]))
+            .await?;
+        let picked: Vec<OutPoint> =
+            deserialize_hex::<Transaction>(funded["hex"].as_str().unwrap_or_default())
+                .map(|tx| tx.input.iter().map(|i| i.previous_output).collect())
+                .unwrap_or_default();
+        let signed = self.sign_lock(&funded, to, amount).await;
+        if signed.is_err() {
+            // Best effort: a lock that stays behind only keeps these coins idle until the node
+            // restarts, and the daemon's next funding releases nothing it still needs.
+            let _ = self.unlock_coins(&picked).await;
+        }
+        signed
+    }
+
+    /// The rest of [`BitcoinRpc::fund_lock`]: sign the funded transaction and check it.
+    async fn sign_lock(
+        &self,
+        funded: &Value,
+        to: &Address,
+        amount: Amount,
+    ) -> Result<FundedLock, RpcError> {
+        let decode = |detail: String| RpcError::Decode {
+            method: "fund_lock".into(),
+            detail,
+        };
         let signed: Value = self
             .wallet_call("signrawtransactionwithwallet", json!([funded["hex"]]))
             .await?;
@@ -453,6 +494,87 @@ impl BitcoinRpc {
             tx,
             vout: vout as u32,
         })
+    }
+
+    /// What the wallet can fund right now: its safe unspent coins (confirmed, or change of our
+    /// own unconfirmed transactions), less every coin it has locked. Unlike `getbalance`, the
+    /// coins of a lock that is funded but not broadcast yet are left out, as coin selection
+    /// leaves them out.
+    pub async fn spendable_balance(&self) -> Result<Amount, RpcError> {
+        let decode = |detail: String| RpcError::Decode {
+            method: "listunspent".into(),
+            detail,
+        };
+        let locked = self.locked_coins().await?;
+        // minconf 0, any confirmations, any address, include_unsafe = false
+        let coins: Vec<Value> = self
+            .wallet_call("listunspent", json!([0, 9_999_999, [], false]))
+            .await?;
+        let mut sat = 0u64;
+        for c in &coins {
+            if c["spendable"].as_bool() == Some(false) || c["safe"].as_bool() == Some(false) {
+                continue;
+            }
+            let op = outpoint_of(c).ok_or_else(|| decode(format!("no outpoint in {c}")))?;
+            if locked.contains(&op) {
+                continue;
+            }
+            let value = c["amount"]
+                .as_f64()
+                .and_then(|a| Amount::from_btc(a).ok())
+                .ok_or_else(|| decode(format!("no amount in {c}")))?;
+            sat = sat.saturating_add(value.to_sat());
+        }
+        Ok(Amount::from_sat(sat))
+    }
+
+    /// The coins the wallet has locked (`listlockunspent`).
+    pub async fn locked_coins(&self) -> Result<Vec<OutPoint>, RpcError> {
+        let list: Vec<Value> = self.wallet_call("listlockunspent", json!([])).await?;
+        list.iter()
+            .map(|v| {
+                outpoint_of(v).ok_or_else(|| RpcError::Decode {
+                    method: "listlockunspent".into(),
+                    detail: v.to_string(),
+                })
+            })
+            .collect()
+    }
+
+    /// Lock each of `coins` the wallet has not locked yet, so coin selection leaves them alone.
+    /// Each is locked on its own, so one that can't be (already spent, unknown to the wallet)
+    /// doesn't stop the others; those come back with the node's error.
+    pub async fn lock_coins(
+        &self,
+        coins: &[OutPoint],
+    ) -> Result<Vec<(OutPoint, RpcError)>, RpcError> {
+        let locked = self.locked_coins().await?;
+        let mut failed = vec![];
+        for op in coins.iter().filter(|op| !locked.contains(op)) {
+            if let Err(e) = self
+                .wallet_call::<Value>("lockunspent", json!([false, [outpoint_json(op)]]))
+                .await
+            {
+                failed.push((*op, e));
+            }
+        }
+        Ok(failed)
+    }
+
+    /// Unlock those of `coins` the wallet has locked (the others are left as they are).
+    pub async fn unlock_coins(&self, coins: &[OutPoint]) -> Result<(), RpcError> {
+        let locked = self.locked_coins().await?;
+        let mine: Vec<Value> = coins
+            .iter()
+            .filter(|op| locked.contains(op))
+            .map(outpoint_json)
+            .collect();
+        if mine.is_empty() {
+            return Ok(());
+        }
+        self.wallet_call::<Value>("lockunspent", json!([true, mine]))
+            .await
+            .map(|_| ())
     }
 
     /// The node's fee estimate for confirmation within `blocks` blocks, in sat/vB (rounded

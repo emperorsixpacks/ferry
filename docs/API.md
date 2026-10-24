@@ -40,25 +40,35 @@ A maker quotes the fixed `--maker-offer RATE[:MIN:MAX]` rate, or follows the mar
 ferryd asks each source (no API keys, 5 s timeout per call), takes the median of the ones that
 answered with a fresh positive price, and sets rate = median × (1 + N/10000), in the quote's smallest
 unit per ZEC. If no source has answered for 5 minutes the offer pauses (`making: false`,
-`paused: true`) rather than quote a stale price. A proposal at the previous rate is still accepted for
-2 minutes after a change (a taker's quote in flight). `/peer/offer` (and `offer` in `/api/status`)
+`paused: true`) rather than quote a stale price. It also pauses while the sources that answered are
+more than 2% apart (`--maker-price-max-gap-bps`, default 200), until a refresh finds them close
+again: with two sources the median is their midpoint, so within 2% it is at most 1% from either one.
+On mainnet (Zcash's or the counter-chain's) a maker that follows a feed keeps at least 1% for
+itself: a Z maker needs `--maker-spread-bps=100` or more, a B maker `-100` or less, or ferryd refuses
+to start. That pays for the free option the side that locks second holds (about 0.5% of the amount
+over a 2-hour claim window) and for the price sources' error. A proposal at the previous rate is
+still accepted for 2 minutes after a change (a taker's quote in flight). `/peer/offer` (and `offer` in `/api/status`)
 then carry:
 
 ```json
 { "rate_source": "median(kraken,coingecko) +50bps",  // or "fixed"
   "rate_updated_at": 1792404387,                     // unix seconds of the price; absent when fixed
-  "liquidity": { "zec_zat": 240000000 },             // the largest ZEC amount the maker's balance
-                                                     // covers now, capped at max_zat
+  "liquidity": { "zec_zat": 240000000 },             // the largest ZEC amount the maker's free
+                                                     // balance covers now, capped at max_zat
+  "free_slots": 3,                                   // how many more swaps it takes right now
   "paused": false }
 ```
 
-All four are optional for a taker: an older maker leaves them out. A Bitcoin or Litecoin daemon's
+All five are optional for a taker: an older maker leaves them out. `liquidity` counts only the
+maker's free balance (what its swaps in progress don't hold), and `free_slots` is `0` when it is
+running as many swaps as it takes at once; see [Several swaps at once](#several-swaps-at-once). A Bitcoin or Litecoin daemon's
 offer also lists `"features": ["payout"]`: it takes a Propose whose Z names a payout address (see
 [Payout address](#payout-address-payout_to)); an older maker leaves the list out, and a Z taker
 with a `payout_to` won't propose to it. A maker (any daemon started with
 `--maker-offer`) also publishes `"quote_key": "02…"`, the key it signs firm quotes with. In
 `/api/status`, `offer.maker` says whether the daemon was started with `--maker-offer` (paused or
-not); a Z maker's `liquidity` is its spendable shielded ZEC less the lock fee.
+not); a Z maker's `liquidity` is its free shielded ZEC (what its swaps in progress and their notes
+leave) less the lock fee.
 
 ## Maker directory (UI server, not ferryd)
 
@@ -71,16 +81,24 @@ fetched server-side (2.5 s timeout, 16 KB cap, cached 10 s):
 { "makers": [ { "index": 0, "name": "Kestrel", "pair": "ZEC/BTC", "online": true, "available": true,
   "paused": false, "role": "B", "rate_sat_per_zec": 412350, "min_zat": 5000000, "max_zat": 500000000,
   "fee_sat": 2000, "liquidity_zat": 240000000, "rate_source": "median(kraken,coingecko) +50bps",
-  "rate_updated_at": 1792404387, "rate_age_s": 20 } ] }
+  "rate_updated_at": 1792404387, "rate_age_s": 20, "free_slots": 3, "busy": false } ] }
 ```
+
+`free_slots` is the maker's own figure (null from an older ferryd); `busy` is true for a maker that
+makes offers but has no free slot, and `available` (online, making, not paused) is false then too.
 
 The browser starts a swap with `POST /daemon/z/api/swaps {"maker": "Kestrel" | 0, "zec_zat": …}`;
 the UI server replaces `maker` with that entry's allowlisted URL (leaving it out picks the first
 maker). Any other value, a URL included, is refused with `400`, so a client can never make a daemon
 fetch a URL of its choosing. Buying ZEC is the same call on a B daemon (`/daemon/b`, or
 `/daemon/b-<pair>`), naming a maker whose `role` is `Z`; `prod.mjs` puts it through the same guard
-(the per-swap cap, both rate limits, the allowlist, firm quotes, and one live swap per pair across
-both of its daemons).
+(the per-swap cap, both rate limits, the allowlist and firm quotes). Several swaps run on a pair at
+once: the daemons decide how many ([Several swaps at once](#several-swaps-at-once)), and a start
+they can't take reaches the browser as `409 {"error": "Every partner is busy right now. Try again
+once one of their swaps finishes.", "code": "busy"}` (the app adds a swap's usual time for the pair,
+from `web/server/paths.mjs`). While a private swap is moving, a direct sell on the pair it
+sells ZEC on is refused (`409`): the ZEC its first swap bought waits in that daemon's wallet, which
+the daemon counts as free.
 
 `GET /api/pairs` says which of the user's daemons the server fronts:
 
@@ -136,8 +154,9 @@ the amounts from the bucket below it (0 for the first) up to the bucket, within 
   plain tokens (`[A-Za-z0-9/:._-]`), so no two quotes share a text. The key is `<data-dir>/quote-key`
   (mode 0600), made on first start; it signs quotes only and holds no funds.
 - Refusals (`{"error"}`): `400` not a bucket, another pair, the same side as the maker, outside the
-  maker's range; `403` not making offers; `409` busy with another swap (ferryd runs one at a time, so
-  it quotes none meanwhile), not enough liquidity for the bucket, too many open quotes (6 per
+  maker's range; `403` not making offers; `409` busy (no free slot: it runs as many swaps as it
+  takes at once, so it quotes none meanwhile), not enough free liquidity for the bucket, too many
+  open quotes (6 per
   requesting address, 32 in all); `429` more than 20 requests a minute from one address, or 240 in
   all. Behind a reverse proxy every request has the proxy's address, so the per-address limits act
   as one more overall limit.
@@ -250,6 +269,12 @@ per pair, the router idle); quotes are limited to `DEMO_NEAR_QUOTES_PER_MIN` (40
   "role": "Z",                      // "Z" holds ZEC, "B" holds BTC
   "name": "zoe",
   "balances": { "zec_shielded_zat": 500000000, "btc_sat": 0 },
+  // what new swaps and withdrawals may use: the balances less what live swaps hold (see
+  // "Several swaps at once"); an EVM daemon's also has token_units and eth_wei
+  "free": { "zec_shielded_zat": 399950000, "btc_sat": 0 },
+  // --max-swaps, the swaps not over yet, those of them whose partner never locked (they no longer
+  // count against the cap), and how many more swaps this node takes now
+  "capacity": { "max_swaps": 4, "live": 1, "late": 0, "free_slots": 3 },
   "chains": {
     "btc": { "coin": "btc", "ticker": "BTC", "network": "regtest", "height": 412 },
     "zec": { "network": "regtest", "height": 233, "pool": "ironwood" }
@@ -257,7 +282,8 @@ per pair, the router idle); quotes are limited to `DEMO_NEAR_QUOTES_PER_MIN` (40
   "offer": { "pair": "ZEC/BTC", "rate_sat_per_zec": 410000, "min_zat": 10000000, "max_zat": 1000000000,
              "fee_sat": 2000, "t1_blocks": 12, "t2_blocks": 24, "btc_lock_confs": 2, "zec_confs": 3 },
   // fee_sat: the fixed fee of each presigned BTC transaction (the redeem pays one; the refund
-  // path pays two: cancel + refund). t1/t2 in BTC blocks; confirmations Z/B wait for.
+  // path pays two: cancel + refund). t1/t2 in BTC blocks; confirmations Z/B wait for. A maker's
+  // offer also has liquidity_zat and free_slots, as in /peer/offer.
   "features": ["route", "payout", "withdraw"]
   // What this ferryd supports beyond the base API. "route": POST /api/swaps takes the route
   // fields (see "Route legs"). ferry-route starts a leg only on a daemon that lists it: an older
@@ -396,9 +422,11 @@ swap's BTC/token lock (BTC: plus a 10000 sat fee reserve) until it is made; on E
 the actions a live swap may still send (B: lock and refund; Z: claim and penalty), priced at
 twice the node's current max fee per gas. ZEC notes are spent whole and change takes
 confirmations, so a ZEC withdrawal whose notes would leave a pending lock short until its change
-confirms is refused (`409`) before anything is broadcast. A BTC withdrawal waits (`409`) while a
-B swap's lock is funded but not yet broadcast. Withdrawals and swap starts never run together:
-one waits (`409`) for the other, and a maker takes no proposal meanwhile.
+confirms is refused (`409`) before anything is broadcast. A B swap's lock that is funded but not
+yet broadcast keeps its coins locked in the wallet, so a BTC withdrawal can't pick them; it waits
+(`409`) only if the wallet can't keep them aside. Swaps in progress keep running meanwhile.
+Withdrawals and swap starts never run together: one waits (`409`) for the other, and a maker takes
+no proposal meanwhile.
 
 **Recorded before broadcast, never sent twice.** Each withdrawal is built and signed first, so its
 txid is fixed, and saved to `<data-dir>/withdrawals/<id>.json` (with the signed transaction for
@@ -426,9 +454,10 @@ Every withdrawal, newest first, in the shape above. `status`:
 
 - `400`: a bad body, asset, amount or address (`to: …`), dust, a fee above the amount, or more
   than is free
-- `409`: a swap is being started, another withdrawal is being sent, a B swap's lock is funded but
-  not out, fees above the cap, ZEC still waiting for confirmations or a withdrawal that would tie
-  up a pending lock's notes, or the node refused the transaction (nothing was sent)
+- `409`: a swap is being started, another withdrawal is being sent, a B swap's funded lock whose
+  coins the wallet can't keep aside, fees above the cap, ZEC still waiting for confirmations or a
+  withdrawal that would leave the pending locks short of notes, or the node refused the
+  transaction (nothing was sent)
 - `500 could not save the withdrawal; nothing was sent`; `503`: a node or wallet did not answer
   (nothing was sent)
 
@@ -448,7 +477,7 @@ Start a swap as taker against a maker.
 Either role can take, against a maker of the other role. On a Z daemon this sells `zec_zat` of
 shielded ZEC to a B maker; on a B daemon it **buys** `zec_zat` from a Z maker (a Z daemon started
 with `--maker-offer`, whose offer has `"role": "Z"`, quotes what it asks per ZEC, and has its
-spendable shielded ZEC, less the lock fee, as `liquidity`). The amount is the ZEC either way; the
+free shielded ZEC, less the lock fee, as `liquidity`). The amount is the ZEC either way; the
 counter amount is the maker's rate (or a firm quote's) applied to it. The call returns once the
 maker has accepted and the swap is saved; the swap's own transactions (a B taker's lock, for one)
 go out from the daemon's loop right after, never from inside the request, so a caller that gives up
@@ -463,8 +492,49 @@ role gets `400 the counterparty also has role B`.
 An optional `quote` (a firm quote from that maker) fixes the rate: see
 [POST /api/swaps with a quote](#post-apiswaps-with-a-quote-taker).
 
-One start at a time: while a `POST /api/swaps` is being handled, another one gets `409 Another
-swap is being started`, and a maker takes no proposal meanwhile.
+Several swaps run at once, up to `--max-swaps` ([Several swaps at once](#several-swaps-at-once)).
+Starts on one daemon take turns: a second `POST /api/swaps` waits until the first has its answer
+(a few seconds), then runs its own checks. A start this node can't take now, because it runs as
+many swaps as it takes at once, its free funds are held by swaps in progress, or the maker said
+the same, gets `409 {"error": "Busy: …", "code": "busy"}`.
+
+## Several swaps at once
+
+A node runs as many swaps at once, as maker and taker together, as its free funds allow, up to
+`--max-swaps N` (env `FERRY_MAX_SWAPS`; 1 to 64). The default is **4 on a test network** (regtest,
+testnet, signet, the EVM test chains) and **2 on a main network** (Bitcoin or Litecoin mainnet,
+Ethereum, Base, Optimism, Arbitrum, or `--zec-network main`): real funds, a small blast radius while
+the code is new, one slot open while another swap runs long.
+
+- **Free funds.** Every live swap reserves what it will still spend, until it is spent or released:
+  a Z swap its ZEC lock (amount plus the 50000 zat fee reserve) until the lock is sent; a B swap
+  its BTC/LTC lock (amount plus a 10000 sat fee reserve) until funded, after which the wallet keeps
+  that lock's coins locked until it is broadcast; an EVM B swap its tokens until its lock is made;
+  on EVM, the gas of the calls a live swap may still send (B: lock and refund; Z: claim and punish)
+  at twice the current max fee per gas. A new swap (maker or taker), a withdrawal, and the maker's
+  `liquidity` use the free balance: what the wallet can spend less those reservations. They are
+  worked out from the swap records each time, so after a restart they are what the persisted swaps
+  say, and the wallet's coin locks are put back.
+- **ZEC notes.** A wallet spends whole notes and change waits for confirmations. With several ZEC
+  locks still to send, ferryd counts that each may take up to one note more than it needs: a new
+  swap is taken only if the spendable balance covers every pending lock plus the largest notes they
+  may overshoot into. A Z node whose ZEC is in one big note takes one swap at a time until the
+  change of a sent lock confirms; split the ZEC into several notes for more.
+- **The cap counts** every swap that isn't over, except a **late** one: its counterparty has locked
+  nothing by `--negotiation-timeout-secs` (default 30 min). One where nothing is locked at all is
+  aborted then anyway; one where we locked first (a B whose Z never locks) only waits for its
+  deadline and refund, with its funds still held, and no longer keeps a new swap out. At most
+  twice the cap are kept in all.
+- **Busy.** A Propose (`POST /peer/swaps`) or a start (`POST /api/swaps`) beyond the cap, or one
+  whose funds or notes are held by swaps in progress, is refused with
+  `409 {"error": "Busy: …", "code": "busy"}`. A taker whose maker answers busy (or answers `429`,
+  or an older maker's `409 A swap is already in progress`) answers busy too. A wallet that is
+  simply short, with nothing held, still gets the plain `400` "does not have enough".
+- **One funds check at a time.** Starts queue for their turn; a Propose that arrives while a start
+  or another Propose has the turn is answered busy at once (try again in a moment); a withdrawal
+  and a start exclude each other. So two checks never count the same free coins.
+- **Shown:** `free_slots` in `/peer/offer` and in `/api/status` (`offer.free_slots`), and
+  `capacity` and `free` in `/api/status`.
 
 ### Payout address (`payout_to`)
 
@@ -675,13 +745,15 @@ Every non-2xx response has a JSON body `{ "error": "Human-readable sentence" }`.
 
 - `400`: bad body, amount outside the offer's `min_zat`/`max_zat`, insufficient funds, a bad
   route field or `payout_to`, or the maker's price past `max_counter` / `min_counter`
-- `409`: a swap is already in progress or being started; with `"code": "route_label_in_use"`,
-  the route label is taken (by a swap, or by a start still in progress)
+- `409` with `"code": "busy"`: this node, or the maker, takes no more swaps right now (see
+  [Several swaps at once](#several-swaps-at-once)); with `"code": "route_label_in_use"`, the route
+  label is taken (by a swap, or by a start still in progress); without a code, a withdrawal is
+  being sent
 - `500 could not save the swap`: the record could not be written; no swap was created (nothing is
   left in memory or on disk to resume)
 
 A body may carry a machine-readable `code` next to `error` where a caller must tell errors apart
-(today only `route_label_in_use`).
+(`busy`, `route_label_in_use`).
 
 ## POST /api/swaps/:id/fault (demo only)
 

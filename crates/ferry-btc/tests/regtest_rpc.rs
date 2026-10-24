@@ -95,3 +95,79 @@ async fn wallet_lock_and_watch_wallet() {
         chain.encode_address(&lock)
     );
 }
+
+/// Two locks funded before either is broadcast never pick the same coin: the wallet locks what
+/// each one picked, the spendable balance leaves those coins out, a lock lost across a node
+/// restart can be locked again, and an unlocked coin is spendable again.
+#[tokio::test]
+#[ignore = "needs a regtest node (spikes/btc/scripts/regtest.sh or infra/ltc/regtest.sh)"]
+async fn unbroadcast_locks_never_share_coins() {
+    use std::collections::HashSet;
+    let coin = coin();
+    let suffix = BtcKey::random().xonly().to_string();
+    let rpc = BitcoinRpc::new(url(coin), "ferry", "ferry")
+        .with_wallet(format!("ferry-btc-it-locks-{}", &suffix[..8]))
+        .with_coin(coin);
+    rpc.ensure_wallet().await.expect("node up?");
+    let miner = rpc.new_address(Network::Regtest).await.unwrap();
+    let elsewhere = || {
+        Address::p2tr(
+            &Secp256k1::new(),
+            BtcKey::random().xonly(),
+            None,
+            Network::Regtest,
+        )
+    };
+    // Three coinbase coins of its own, matured by blocks paying someone else.
+    rpc.generate_to_address(3, &miner).await.unwrap();
+    rpc.generate_to_address(100, &elsewhere()).await.unwrap();
+    let before = rpc.spendable_balance().await.unwrap();
+    assert!(before > Amount::ZERO);
+    assert!(rpc.locked_coins().await.unwrap().is_empty());
+
+    let amount = Amount::from_sat(1_000_000);
+    let a = rpc.fund_lock(&elsewhere(), amount).await.unwrap();
+    let b = rpc.fund_lock(&elsewhere(), amount).await.unwrap();
+    let ins = |t: &ferry_btc::bitcoin::Transaction| -> HashSet<_> {
+        t.input.iter().map(|i| i.previous_output).collect()
+    };
+    assert!(
+        ins(&a.tx).is_disjoint(&ins(&b.tx)),
+        "two locks share a coin"
+    );
+    let locked: HashSet<_> = rpc.locked_coins().await.unwrap().into_iter().collect();
+    assert!(locked.is_superset(&ins(&a.tx)) && locked.is_superset(&ins(&b.tx)));
+    // getbalance still counts the locked coins; the spendable balance does not.
+    assert_eq!(rpc.balance().await.unwrap(), before);
+    assert!(rpc.spendable_balance().await.unwrap() < before);
+
+    // Lost locks (a node restart) come back, and locking or unlocking twice is harmless.
+    let a_in: Vec<_> = ins(&a.tx).into_iter().collect();
+    rpc.unlock_coins(&a_in).await.unwrap();
+    rpc.unlock_coins(&a_in).await.unwrap();
+    assert!(rpc.lock_coins(&a_in).await.unwrap().is_empty());
+    assert!(rpc.lock_coins(&a_in).await.unwrap().is_empty());
+    // A third lock now has one coin left, which neither of the others uses.
+    let c = rpc.fund_lock(&elsewhere(), amount).await.unwrap();
+    assert!(ins(&c.tx).is_disjoint(&ins(&a.tx)) && ins(&c.tx).is_disjoint(&ins(&b.tx)));
+    assert_eq!(rpc.spendable_balance().await.unwrap(), Amount::ZERO);
+    assert!(
+        rpc.fund_lock(&elsewhere(), amount).await.is_err(),
+        "a fourth lock finds no free coin"
+    );
+
+    // B's lock goes out (its coins are spent, its change is ours); A and C are abandoned and
+    // unlocked, so their coins are spendable again.
+    rpc.broadcast(&b.tx).await.unwrap();
+    rpc.unlock_coins(&a_in).await.unwrap();
+    rpc.unlock_coins(&ins(&c.tx).into_iter().collect::<Vec<_>>())
+        .await
+        .unwrap();
+    assert!(rpc.locked_coins().await.unwrap().is_empty());
+    let after = rpc.spendable_balance().await.unwrap();
+    assert!(
+        after < before && after + amount * 2 > before,
+        "{after} vs {before}"
+    );
+    println!("{coin}: three unbroadcast locks used disjoint coins; spendable {before} -> {after}");
+}

@@ -239,6 +239,28 @@ impl EvmRecord {
         state_label(&self.swap.state_name())
     }
 
+    /// This swap's place in the cap (crate::capacity): whether the counterparty has locked yet.
+    pub fn load(&self) -> crate::capacity::Load {
+        let state = self.state();
+        let partner_locked = match self.role() {
+            // B's tokens are in FerryLock once we have seen the lock (or anything after it).
+            Role::Z => !matches!(state.as_str(), "Negotiated" | "Aborted"),
+            // Z's ZEC lock note, seen with the joint viewing key.
+            Role::B => {
+                self.zec_lock_txid.is_some()
+                    || matches!(
+                        state.as_str(),
+                        "ZecSeen" | "ReadySigning" | "ReadySent" | "Claimed" | "ZecSwept"
+                    )
+            }
+        };
+        crate::capacity::Load {
+            finished: self.swap.is_final(),
+            partner_locked,
+            created_ms: self.created_ms,
+        }
+    }
+
     pub fn log(&mut self, chain: &str, kind: &str, label: impl Into<String>, txid: Option<String>) {
         self.timeline.push(TimelineEntry {
             at: humantime::format_rfc3339_seconds(std::time::SystemTime::now()).to_string(),

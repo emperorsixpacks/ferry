@@ -3,14 +3,15 @@ import type { Maker, Role } from "@/api";
 import { coin, zec } from "@/format";
 import { btcText } from "@/swap/shared";
 import { cn } from "../lib/utils";
-import { ago, capacity, fits, quoteOf, selectable, swappable } from "../lib/makers";
+import { ago, capacity, fits, quoteOf, selectable, slotsText, swappable } from "../lib/makers";
 import { secondsLeft, type FirmQuote } from "../lib/quotes";
 import { arrowKeys } from "./ui/sheet";
 
 // The swap partners this server lists for the coin on screen, in the swap settings: "Best rate"
 // (Ferry picks for the amount) or one partner. Partners for the direction on screen come first
-// (buying ZEC: the ones who sell it); one that is offline, paused, can't take the amount or only
-// swaps the other way is listed but can't be picked.
+// (buying ZEC: the ones who sell it); one that is offline, paused, busy (running as many swaps as it
+// takes at once), can't take the amount or only swaps the other way is listed but can't be picked.
+// One that can says how many more swaps it takes right now, when it says.
 
 export function PartnerList({
   makers,
@@ -84,16 +85,21 @@ function PartnerRow({ m, role, zat, active, onPick, age, firm, now }: { m: Maker
   let meta: string;
   if (!m.online) meta = "Offline";
   else if (m.paused) meta = `Paused${age != null && !fixed ? ` · rate from ${ago(age)}` : ""}`;
+  // running as many swaps as it takes at once: it has room again when one of them finishes
+  else if (m.busy) meta = "Busy · full for now";
   else if (!m.available) meta = "Not taking swaps";
   else if (!takes) meta = m.role === "Z" ? "Only sells ZEC" : m.role === "B" ? "Only buys ZEC" : "Swaps the same side as you";
   else if (q && !fitsAmount) meta = zat < q.min ? `Takes at least ${zec(q.min)} ZEC` : `Takes up to ${zec(capacity(q))} ZEC right now`;
   else meta = q ? `Takes ${zec(q.min)}–${zec(capacity(q))} ZEC` : "Taking swaps";
   // a firm price covers the amount on screen: its countdown says more than the partner's range
   if (firm && can) meta = `Firm price for ${secondsLeft(firm, now)} s`;
-  return <Option active={active} can={can} onClick={() => can && onPick(m.name)} title={m.name} rate={rate} meta={meta} dot={m.online && !m.paused ? "bg-emerald-500" : "bg-slate-300"} />;
+  // how many more swaps it takes right now, when it says: a line of its own, so neither is cut short
+  const slots = can ? slotsText(m) : null;
+  const sub = slots ? slots.charAt(0).toUpperCase() + slots.slice(1) : null;
+  return <Option active={active} can={can} onClick={() => can && onPick(m.name)} title={m.name} rate={rate} meta={meta} sub={sub} dot={m.online && !m.paused && !m.busy ? "bg-emerald-500" : "bg-slate-300"} />;
 }
 
-function Option({ active, can, onClick, title, rate, meta, dot }: { active: boolean; can: boolean; onClick: () => void; title: string; rate?: string | null; meta: string; dot?: string }) {
+function Option({ active, can, onClick, title, rate, meta, sub, dot }: { active: boolean; can: boolean; onClick: () => void; title: string; rate?: string | null; meta: string; sub?: string | null; dot?: string }) {
   return (
     <button
       type="button"
@@ -111,6 +117,7 @@ function Option({ active, can, onClick, title, rate, meta, dot }: { active: bool
           <span className={cn("truncate font-medium", can || active ? "text-slate-900" : "text-slate-500")}>{title}</span>
         </span>
         <span className="mt-0.5 block truncate text-[13px] text-slate-500">{meta}</span>
+        {sub ? <span className="block truncate text-[13px] text-slate-500">{sub}</span> : null}
       </span>
       {rate ? <span className={cn("shrink-0 text-sm tabular-nums", can || active ? "text-slate-900" : "text-slate-500")}>{rate}</span> : null}
       {active ? <Check size={16} weight="bold" className="shrink-0 text-slate-900" aria-hidden /> : <span className="w-4 shrink-0" aria-hidden />}

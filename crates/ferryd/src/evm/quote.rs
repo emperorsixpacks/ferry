@@ -36,13 +36,8 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
     ) -> Result<SignedQuote, ApiError> {
         let book = self.quotes.as_ref().ok_or(QuoteError::NotMaking)?;
         let offer = self.offer_now().await;
-        let busy = self
-            .state
-            .lock()
-            .await
-            .swaps
-            .values()
-            .any(|r| !r.swap.is_final());
+        // No free slot: no quote it could honour now (crate::capacity).
+        let busy = offer.free_slots == Some(0);
         let m = MakerState {
             pair: offer.pair(),
             market: offer.market(),
@@ -113,6 +108,7 @@ mod tests {
             rate_source: None,
             rate_updated_at: None,
             liquidity: None,
+            free_slots: None,
             paused: false,
             quote_key: None,
         }

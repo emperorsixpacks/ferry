@@ -85,6 +85,7 @@ services:
       # listed. It is reachable on this node's private network only.
       - --maker-offer=${USDC_RATE:-40000000}:${USDC_MIN_ZAT:-1000000}:${USDC_MAX_ZAT:-25000000}
       - --maker-price-feed=${PRICE_FEED:-off}
+      - --maker-spread-bps=${Z_SPREAD_BPS:-0}
       - --maker-price-pair=ZEC/USDC
       - --data-dir=/data
       - --evm-rpc-file=/run/secrets/evm-rpc
@@ -126,6 +127,7 @@ services:
       # Your B makes an offer too, so your own Z can sell ZEC to it (private network only).
       - --maker-offer=${USDC_RATE:-40000000}:${USDC_MIN_ZAT:-1000000}:${USDC_MAX_ZAT:-25000000}
       - --maker-price-feed=${PRICE_FEED:-off}
+      - --maker-spread-bps=${B_SPREAD_BPS:-0}
       - --maker-price-pair=ZEC/USDC
       - --data-dir=/data
       - --evm-rpc-file=/run/secrets/evm-rpc
@@ -169,6 +171,7 @@ services:
       # wei per ZEC: 12000000000000000 is 0.012 WETH per ZEC
       - --maker-offer=${WETH_RATE:-12000000000000000}:${WETH_MIN_ZAT:-1000000}:${WETH_MAX_ZAT:-25000000}
       - --maker-price-feed=${PRICE_FEED:-off}
+      - --maker-spread-bps=${Z_SPREAD_BPS:-0}
       - --maker-price-pair=ZEC/ETH
       - --data-dir=/data
       - --evm-rpc-file=/run/secrets/evm-rpc
@@ -209,6 +212,7 @@ services:
       - --public-url=http://ferryd-b-weth-base:7112
       - --maker-offer=${WETH_RATE:-12000000000000000}:${WETH_MIN_ZAT:-1000000}:${WETH_MAX_ZAT:-25000000}
       - --maker-price-feed=${PRICE_FEED:-off}
+      - --maker-spread-bps=${B_SPREAD_BPS:-0}
       - --maker-price-pair=ZEC/ETH
       - --data-dir=/data
       - --evm-rpc-file=/run/secrets/evm-rpc
@@ -302,6 +306,7 @@ services:
       # sat per ZEC; swaps of 0.1 to 0.25 ZEC (the 1500 sat fee may be at most 5% of the BTC)
       - --maker-offer=${BTC_RATE:-410000}:${BTC_MIN_ZAT:-10000000}:${BTC_MAX_ZAT:-25000000}
       - --maker-price-feed=${PRICE_FEED:-off}
+      - --maker-spread-bps=${Z_SPREAD_BPS:-0}
       - --data-dir=/data
       - --network=${BTC_CHAIN:-signet}
       - --btc-rpc=http://bitcoind:38332
@@ -341,6 +346,7 @@ services:
       - --public-url=http://ferryd-b-btc:7112
       - --maker-offer=${BTC_RATE:-410000}:${BTC_MIN_ZAT:-10000000}:${BTC_MAX_ZAT:-25000000}
       - --maker-price-feed=${PRICE_FEED:-off}
+      - --maker-spread-bps=${B_SPREAD_BPS:-0}
       - --data-dir=/data
       - --network=${BTC_CHAIN:-signet}
       - --btc-rpc=http://bitcoind:38332
@@ -433,6 +439,7 @@ services:
       - --public-url=http://ferryd-z-ltc:7111
       - --maker-offer=${LTC_RATE:-100000000}:${LTC_MIN_ZAT:-1000000}:${LTC_MAX_ZAT:-25000000}
       - --maker-price-feed=${PRICE_FEED:-off}
+      - --maker-spread-bps=${Z_SPREAD_BPS:-0}
       - --data-dir=/data
       - --btc-rpc=http://litecoind:19332
       - --btc-rpc-user=ferry
@@ -473,6 +480,7 @@ services:
       - --public-url=http://ferryd-b-ltc:7112
       - --maker-offer=${LTC_RATE:-100000000}:${LTC_MIN_ZAT:-1000000}:${LTC_MAX_ZAT:-25000000}
       - --maker-price-feed=${PRICE_FEED:-off}
+      - --maker-spread-bps=${B_SPREAD_BPS:-0}
       - --data-dir=/data
       - --btc-rpc=http://litecoind:19332
       - --btc-rpc-user=ferry

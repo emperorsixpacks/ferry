@@ -7,7 +7,14 @@
 // refused, and the quote rate limit. SHOOT_OUT=dir puts the screenshots elsewhere, SHOOT_THEME=dark
 // takes them in dark mode.
 //
-// Ports (override with SHOOT_PORT_BASE): mock Z base+11, B base+12, Vite base+51, prod base+52.
+// Several swaps at once: the card says how many more swaps its partner takes ("Partner online ·
+// can take 4 more swaps"), a full partner is listed as busy and another one quotes, every partner
+// full is said calmly, three swaps in progress are listed together (and the card still starts
+// another), and through the production server a sell runs beside a buy until the node's cap
+// (MOCK_MAX_SWAPS, 4), where the next start is "Every partner is busy right now".
+//
+// Ports (override with SHOOT_PORT_BASE): mock Z base+11, B base+12, Vite base+51, prod base+52;
+// SHOOT_VITE_PORT and SHOOT_PROD_PORT set those two on their own.
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { chromium } from "playwright";
@@ -16,8 +23,12 @@ import { mockMakersEnv } from "../mock/makers.mjs";
 const BASE_PORT = Number(process.env.SHOOT_PORT_BASE ?? 7800);
 const Z = BASE_PORT + 11;
 const B = BASE_PORT + 12;
-const VITE = BASE_PORT + 51;
-const PROD = BASE_PORT + 52;
+const VITE = Number(process.env.SHOOT_VITE_PORT ?? BASE_PORT + 51);
+const PROD = Number(process.env.SHOOT_PROD_PORT ?? BASE_PORT + 52);
+// the UI server says no time (it doesn't know the pair); the app adds a swap's own time from
+// server/paths.mjs, here the local range
+const BUSY_TEXT = "Every partner is busy right now. Try again once one of their swaps finishes.";
+const UI_BUSY = "Every partner is busy right now. A swap takes about 1–5 min, so one usually has room again within that.";
 const OUT = (process.env.SHOOT_OUT ?? new URL("../screenshots/app/makers/", import.meta.url).pathname).replace(/\/?$/, "/");
 mkdirSync(OUT, { recursive: true });
 
@@ -35,7 +46,7 @@ const env = {
 const procs = [
   spawn(process.execPath, ["mock/server.mjs"], { env, stdio: "ignore" }),
   spawn("pnpm", ["exec", "vite", "--port", String(VITE), "--strictPort"], { env: { ...env, PORT: String(VITE) }, stdio: "ignore" }),
-  spawn(process.execPath, ["server/prod.mjs"], { env: { ...env, PORT: String(PROD), HOST: "127.0.0.1", DEMO_MAX_ZAT: "200000000", DEMO_QUOTES_PER_MIN: "20", DEMO_RATE_PER_HOUR: "6" }, stdio: "inherit" }),
+  spawn(process.execPath, ["server/prod.mjs"], { env: { ...env, PORT: String(PROD), HOST: "127.0.0.1", DEMO_MAX_ZAT: "200000000", DEMO_QUOTES_PER_MIN: "20", DEMO_RATE_PER_HOUR: "10", DEMO_SWAPS_PER_HOUR: "20" }, stdio: "inherit" }),
 ];
 const cleanup = () => procs.forEach((p) => p.kill("SIGTERM"));
 process.on("exit", cleanup);
@@ -99,6 +110,8 @@ check(true, "the swap card picks the best rate by itself (Kestrel)");
 // ...and, a moment later, Kestrel's firm price for the 1 ZEC bucket
 await rateLine(desk, "0.0041235", "Kestrel", true);
 check(true, "the rate line shows Kestrel's firm price with its countdown");
+await text(desk, "Partner online · can take 4 more swaps");
+check(true, "the card says how many more swaps the partner takes (Kestrel: 4)");
 await sleep(400);
 await shot(desk, "01-swap-1440");
 
@@ -178,6 +191,88 @@ await capped.waitForFunction(() => document.querySelector("input[inputmode=decim
 check(true, "partners capped below 1 ZEC set the starting amount (0.50)");
 await capped.close();
 
+// ------------------------------------------------------------------------------ several swaps at once
+// A partner that is full (it already runs as many swaps as it takes at once) says so in the list,
+// and the next best partner quotes; with every partner full the card says so calmly. The maker
+// list is edited on its way to the page, as a full partner's offer would make it.
+async function withFull(width, full) {
+  const p = await page(width);
+  await p.route("**/api/makers", async (r) => {
+    const { makers } = await (await r.fetch()).json();
+    for (const m of makers) if (full(m)) Object.assign(m, { busy: true, available: false, free_slots: 0 });
+    await r.fulfill({ json: { makers } });
+  });
+  await p.goto(DEV + "/app");
+  return p;
+}
+const message = (p) => p.evaluate(() => {
+  const el = document.getElementById("swap-message");
+  return { text: el?.textContent ?? "", calm: !!el?.className.includes("text-slate-600") };
+});
+await reset();
+await sleep(400);
+const oneFull = await withFull(1440, (m) => m.name === "Kestrel");
+await rateLine(oneFull, "0.0041", "Bram");
+await text(oneFull, "Partner online · can take 4 more swaps");
+check(true, "Kestrel full: Bram quotes, and says it can take 4 more swaps");
+// a firm price from the full partner isn't used either: Bram's own firm price comes in
+await rateLine(oneFull, "0.0041", "Bram", true);
+await sleep(1500);
+await rateLine(oneFull, "0.0041", "Bram", true);
+check(true, "...at Bram's firm price, never the full partner's");
+await settings(oneFull).click();
+await oneFull.getByRole("radiogroup", { name: "Swap partner" }).waitFor();
+const kestrelRow = await partner(oneFull, /Kestrel/).textContent();
+check(/Busy · full for now/.test(kestrelRow) && (await partner(oneFull, /Kestrel/).getAttribute("aria-disabled")) === "true", `the settings list Kestrel as busy, not pickable (${kestrelRow})`);
+check(/can take 4 more swaps/i.test(await partner(oneFull, /^Bram/).textContent()), "...and Bram with its free slots");
+await sleep(300);
+await shot(oneFull, "08-partner-busy-1440");
+await oneFull.close();
+for (const width of [1440, 390]) {
+  const allFull = await withFull(width, (m) => m.role === "B");
+  await text(allFull, UI_BUSY);
+  const m = await message(allFull);
+  check(m.text === UI_BUSY && m.calm, `every partner full (${width}): "${m.text}", calm, not as an error`);
+  check(await allFull.locator("form button[type=submit]").isDisabled(), `...and nothing to press (${width})`);
+  await sleep(300);
+  await shot(allFull, `09-all-busy-${width}`);
+  await allFull.close();
+}
+
+// three swaps in progress at once: all listed in Recent activity, and the card still starts one
+await reset();
+await sleep(400);
+for (const zat of [20_000_000, 30_000_000, 40_000_000]) {
+  const r = await post(`http://127.0.0.1:${Z}`, "/api/swaps", { maker: `http://127.0.0.1:${B}/m/kestrel`, zec_zat: zat });
+  check(r.status === 201, `mock: swap of ${zat / 1e8} ZEC started beside the others (${r.status})`);
+}
+const several = await page(1440);
+await several.goto(DEV + "/app");
+await several.waitForFunction(() => document.querySelectorAll("[data-recent-list] li").length === 3, null, { timeout: 10_000 });
+check(true, "Recent activity lists the 3 swaps in progress");
+await text(several, "from Kestrel");
+const free = await several.locator("form button[type=submit]").isEnabled();
+check(free, "a swap in progress no longer holds the card back: Sell ZEC can be pressed");
+await sleep(600);
+await shot(several, "10-several-live-1440");
+const severalPhone = await page(390);
+await severalPhone.goto(DEV + "/app");
+await text(severalPhone, "You have 3 swaps in progress");
+check(true, "on a phone, one banner for the 3 swaps in progress, to Activity");
+await sleep(400);
+await shot(severalPhone, "10-several-live-390", { fullPage: true });
+// a fourth from the card fills this node (MOCK_MAX_SWAPS 4); then the card says it is busy
+await several.locator("input[inputmode=decimal]").fill("0.50");
+await several.locator("form button[type=submit]").click();
+await several.waitForURL(/\/app\/swap\//);
+check(true, "the card started a 4th swap beside the 3");
+await several.goto(DEV + "/app");
+await text(several, UI_BUSY);
+const m4 = await message(several);
+check(m4.text === UI_BUSY && m4.calm, `with 4 live swaps the node is full: "${m4.text}"`);
+await several.close();
+await severalPhone.close();
+
 // mobile
 await reset();
 await sleep(400);
@@ -247,7 +342,7 @@ r = await post(PRD, "/daemon/z/api/swaps", { maker: "Kestrel", zec_zat: 70_000_0
 check(r.status === 400, "one quote, one swap: the same quote is refused again");
 
 // buying ZEC through the production server: the main B daemon takes from a Z maker, behind the
-// same guards as a sell (maker allowlist, demo cap, one live swap)
+// same guards as a sell (maker allowlist, demo cap), and swaps run side by side up to the cap
 await reset();
 await sleep(400);
 const pairs = await (await fetch(PRD + "/api/pairs")).json();
@@ -265,8 +360,18 @@ const buy = await r.json();
 check(r.status === 201, `a buy starts on B through the guard (${r.status} ${buy.error ?? ""})`);
 const bv = await (await fetch(`http://127.0.0.1:${B}/api/swaps/${buy.id}`)).json();
 check(bv.role === "B" && bv.taker === true && bv.amounts.btc_sat === Math.round(0.5 * 413800), `...as B, the taker, at Sandpiper's rate (${bv.amounts.btc_sat})`);
+// several at once: a sell starts beside the buy, then two more, to the node's cap (4)
+for (let i = 0; i < 3; i++) {
+  r = await post(PRD, "/daemon/z/api/swaps", { maker: "Kestrel", zec_zat: 50_000_000 });
+  check(r.status === 201, `prod: sell ${i + 1} starts beside the buy (${r.status} ${r.status === 201 ? "" : (await r.json()).error})`);
+}
+const cap = (await (await fetch(PRD + "/daemon/z/api/status")).json()).capacity;
+check(cap?.live === 4 && cap?.free_slots === 0 && cap?.max_swaps === 4, `prod: the node's status says it is full (${JSON.stringify(cap)})`);
 r = await post(PRD, "/daemon/z/api/swaps", { maker: "Kestrel", zec_zat: 50_000_000 });
-check(r.status === 409, "one live swap per pair: a sell waits for the buy");
+const full = await r.json();
+check(r.status === 409 && full.code === "busy" && full.error === BUSY_TEXT, `prod: past the cap, a start is "${full.error}" (${r.status}, code ${full.code})`);
+r = await post(PRD, "/daemon/b/api/swaps", { maker: "Sandpiper", zec_zat: 50_000_000 });
+check(r.status === 409 && (await r.json()).error === BUSY_TEXT, "prod: a buy too, when the other side runs as many as it takes");
 
 await reset();
 await sleep(400);

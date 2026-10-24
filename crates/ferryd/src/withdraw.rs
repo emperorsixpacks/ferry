@@ -6,8 +6,10 @@
 //! - **Only free funds.** What a live swap still needs is held: Z's ZEC lock (amount plus fee
 //!   reserve) until it is sent, B's BTC/token lock until it is out, and on EVM the gas of the
 //!   swap actions still to come. A withdrawal that would eat into that is refused and the error
-//!   says how much is free. Withdrawals and swap starts exclude each other (crate::route::Starts),
-//!   so the funds checked are the funds spent.
+//!   says how much is free. Swaps keep running meanwhile, as many as crate::capacity allows: a
+//!   B lock funded but not out keeps its coins locked in the wallet, and a ZEC withdrawal leaves
+//!   enough notes for every lock still to send. Withdrawals and swap starts exclude each other
+//!   (crate::route::Starts), so the funds checked are the funds spent.
 //! - **Shielded ZEC only.** A transparent (or Sapling, or Sprout) destination is refused before
 //!   the wallet is asked; the wallet builds Ironwood in, Ironwood out, and refuses anything else.
 //! - **Recorded before broadcast, never sent twice.** Every withdrawal is built and signed first,
@@ -622,20 +624,30 @@ pub async fn send_zec<L: ZecLeg>(
         zec,
     )?;
     let hold = held(&holds);
+    // The locks still to send, each its amount plus fee reserve, and the notes they may take
+    // (crate::capacity::zec_locks_fit).
+    let needs: Vec<u64> = holds
+        .iter()
+        .map(|h| u64::try_from(h.units).unwrap_or(u64::MAX))
+        .collect();
+    let largest = leg
+        .largest_notes(needs.len().saturating_sub(1))
+        .await
+        .map_err(|e| ApiError(503, format!("the Zcash wallet is unavailable: {e}")))?;
     let mut saved: Option<Withdrawal> = None;
     let mut refused: Option<ApiError> = None;
     let result = leg
         .withdraw(to, amount, |b| {
             // Notes are spent whole and change takes confirmations: what stays spendable must
-            // still cover the holds, or a swap's lock would wait on our change.
-            let left = u128::from(b.spendable.saturating_sub(b.spent));
-            if left < hold {
+            // still fund every swap's lock, or a lock would wait on our change.
+            let left = b.spendable.saturating_sub(b.spent);
+            if !crate::capacity::zec_locks_fit(left, &largest, &needs) {
                 let msg = format!(
                     "That withdrawal would spend notes worth {}, leaving {} spendable until its \
-                     change confirms, but a swap in progress needs {} for its ZEC lock. Withdraw \
-                     less, or after the swap has locked its ZEC",
+                     change confirms, but the swaps in progress need {} for their ZEC locks. \
+                     Withdraw less, or after the swaps have locked their ZEC",
                     zec(u128::from(b.spent)),
-                    zec(left),
+                    zec(u128::from(left)),
                     zec(hold)
                 );
                 refused = Some(ApiError(409, msg.clone()));
@@ -792,7 +804,9 @@ pub async fn send_btc(
             ),
         ));
     }
-    let have = u128::from(rpc.balance().await.map_err(unavailable)?.to_sat());
+    // Coins of our funded swap locks that aren't out yet are locked, and left out here as the
+    // wallet's coin selection leaves them out.
+    let have = u128::from(rpc.spendable_balance().await.map_err(unavailable)?.to_sat());
     check_free(
         have,
         &holds,
