@@ -151,7 +151,7 @@ services:
       FERRY_Z_SELLS: auto
       FERRY_B_BUYS: auto
     healthcheck:
-      test: ["CMD-SHELL", 'curl -sf http://127.0.0.1:8080/healthz >/dev/null']
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 10s
       start_period: 60s
