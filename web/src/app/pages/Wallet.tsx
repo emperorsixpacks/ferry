@@ -53,6 +53,7 @@ const PayFromWallet = lazy(() =>
 export function WalletPage() {
   const d = useLocal();
   const own = d.info.own;
+  const funds = d.info.funds || own;
   const w = useWallet(own);
   const params = new URLSearchParams(window.location.search);
   const [adding, setAdding] = useState<string | null>(() => params.get("add"));
@@ -69,7 +70,7 @@ export function WalletPage() {
     setNeed(null);
     if (window.location.search) window.history.replaceState(null, "", "/wallet");
   };
-  const addCoin = own ? w.coins.find((c) => c.key === adding) : undefined;
+  const addCoin = funds ? w.coins.find((c) => c.key === adding) : undefined;
   const sendCoin = own ? w.coins.find((c) => c.key === sending) : undefined;
   const sends = useMemo(() => {
     const all: { w: Withdrawal; coin: Coin | undefined; base: string }[] = [];
@@ -85,14 +86,16 @@ export function WalletPage() {
 
   return (
     <Layout>
-      <div className="mx-auto w-full max-w-[640px]" data-wallet={own ? "own" : "demo"}>
-        <PageHeader eyebrow="Your Ferry node" title="Wallet" subtitle={own ? "The coins your node holds. Add funds to swap, or send them to your own wallet. Works with Zodl: scan to add funds, paste your Zodl address to receive." : "The coins this node holds."} />
+      <div className="mx-auto w-full max-w-[640px]" data-wallet={own ? "own" : funds ? "funds" : "demo"}>
+        <PageHeader eyebrow="Your Ferry node" title="Wallet" subtitle={own ? "The coins your node holds. Add funds to swap, or send them to your own wallet. Works with Zodl: scan to add funds, paste your Zodl address to receive." : funds ? "The coins this node holds. Add funds to swap." : "The coins this node holds."} />
 
         {!own ? (
           <div className="mt-6 flex items-start gap-3 rounded-2xl bg-slate-50 px-4 py-3.5 text-sm text-slate-600" data-demo-note>
             <Info size={18} className="mt-px shrink-0 text-slate-500" aria-hidden />
             <p>
-              This is the public demo's node, so you can look but not move its coins. On your own Ferry node, this is where you add funds and send coins to your own wallet.{" "}
+              {funds
+                ? "This is the public demo's node: you can add funds to it, but not send its coins out. On your own Ferry node you can do both. "
+                : "This is the public demo's node, so you can look but not move its coins. On your own Ferry node, this is where you add funds and send coins to your own wallet. "}
               <a href={REPO_URL} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 font-medium text-slate-900 underline-offset-4 hover:underline">
                 Run your own node
                 <ArrowUpRight size={12} weight="bold" aria-hidden />
@@ -105,7 +108,7 @@ export function WalletPage() {
           {w.coins.length ? (
             <ul className="space-y-3">
               {w.coins.map((c) => (
-                <CoinCard key={c.key} coin={c} own={own} onAdd={() => setAdding(c.key)} onSend={() => setSending(c.key)} />
+                <CoinCard key={c.key} coin={c} own={own} funds={funds} onAdd={() => setAdding(c.key)} onSend={() => setSending(c.key)} />
               ))}
             </ul>
           ) : (
@@ -159,7 +162,7 @@ function CoinLogo({ coin, size = 36 }: { coin: Coin; size?: number }) {
   );
 }
 
-function CoinCard({ coin, own, onAdd, onSend }: { coin: Coin; own: boolean; onAdd: () => void; onSend: () => void }) {
+function CoinCard({ coin, own, funds, onAdd, onSend }: { coin: Coin; own: boolean; funds: boolean; onAdd: () => void; onSend: () => void }) {
   const amt = (v: bigint) => unitsText(v, coin.decimals, coin.decimals > 8 ? 6 : 8);
   const sendable = coin.holdings.some((h) => canSend(h.node.status));
   const empty = coin.total === 0n;
@@ -180,7 +183,7 @@ function CoinCard({ coin, own, onAdd, onSend }: { coin: Coin; own: boolean; onAd
           </p>
         </div>
       </div>
-      {own ? (
+      {funds || own ? (
         <div className="mt-4 grid grid-cols-2 gap-2">
           <button
             type="button"
@@ -193,16 +196,20 @@ function CoinCard({ coin, own, onAdd, onSend }: { coin: Coin; own: boolean; onAd
             <Plus size={14} weight="bold" aria-hidden />
             Add funds
           </button>
-          <button
-            type="button"
-            onClick={onSend}
-            disabled={!sendable || coin.free === 0n}
-            title={!sendable ? "Your Ferry node needs an update to send coins out." : coin.free === 0n ? "Nothing free to send." : undefined}
-            className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white text-sm font-medium text-slate-900 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-white"
-          >
-            <PaperPlaneTilt size={14} weight="bold" aria-hidden />
-            Send to my wallet
-          </button>
+          {own ? (
+            <button
+              type="button"
+              onClick={onSend}
+              disabled={!sendable || coin.free === 0n}
+              title={!sendable ? "Your Ferry node needs an update to send coins out." : coin.free === 0n ? "Nothing free to send." : undefined}
+              className="inline-flex h-10 items-center justify-center gap-1.5 rounded-full border border-slate-200 bg-white text-sm font-medium text-slate-900 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400 disabled:hover:bg-white"
+            >
+              <PaperPlaneTilt size={14} weight="bold" aria-hidden />
+              Send to my wallet
+            </button>
+          ) : (
+            <div />
+          )}
         </div>
       ) : null}
       {own && !sendable ? <p className="mt-2 text-center text-[13px] text-slate-500">Sending out needs a newer Ferry node.</p> : null}

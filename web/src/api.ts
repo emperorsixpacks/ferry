@@ -264,24 +264,29 @@ export interface PairsInfo {
   // the person's own node, opened on their own machine: the page may say where coins go and send
   // them out (server/own.mjs). False on a public demo, and from an older server.
   own: boolean;
+  // where funds may be added (the node's addresses shown): true on the person's own node and on a
+  // public demo that shows its funding addresses. Withdrawals still need `own`.
+  funds: boolean;
 }
 
 export async function getPairs(): Promise<PairsInfo> {
   // an older server: no extra pairs, and the page's own side only
-  const old: PairsInfo = { sell: [], buy: [], main: { sell: LOCAL_ROLE === "Z", buy: LOCAL_ROLE === "B" }, routes: null, own: false };
+  const old: PairsInfo = { sell: [], buy: [], main: { sell: LOCAL_ROLE === "Z", buy: LOCAL_ROLE === "B" }, routes: null, own: false, funds: false };
   const res = await fetch("/api/pairs").catch(() => null);
   if (!res?.ok) return old;
-  const data = (await res.json().catch(() => null)) as { pairs?: unknown; buy?: unknown; main?: { sell?: unknown; buy?: unknown }; routes?: { from?: unknown; to?: unknown } | null; node?: { own?: unknown } } | null;
+  const data = (await res.json().catch(() => null)) as { pairs?: unknown; buy?: unknown; main?: { sell?: unknown; buy?: unknown }; routes?: { from?: unknown; to?: unknown } | null; node?: { own?: unknown; funds?: unknown } } | null;
   const ids = (v: unknown) => (Array.isArray(v) ? PAIR_IDS.filter((id) => (v as unknown[]).includes(id)) : []);
   if (!data) return old;
   const side = (v: unknown) => (v === true || v === false || v === "auto" ? v : "auto");
   const routes = data.routes ? { from: ids(data.routes.from), to: ids(data.routes.to) } : null;
+  const own = data.node?.own === true;
   return {
     sell: ids(data.pairs),
     buy: ids(data.buy),
     main: data.main ? { sell: side(data.main.sell), buy: side(data.main.buy) } : old.main,
     routes: routes && routes.from.length && routes.to.length ? routes : null,
-    own: data.node?.own === true,
+    own,
+    funds: data.node?.funds === true || own,
   };
 }
 

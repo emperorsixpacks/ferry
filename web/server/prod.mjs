@@ -483,9 +483,9 @@ setInterval(() => {
   for (const [ip, ts] of rates) if (!ts.some((t) => now - t < 3_600_000)) rates.delete(ip);
 }, 600_000).unref();
 
-const READ_ONLY = [/^\/api\/status$/, /^\/api\/swaps$/, /^\/api\/swaps\/[0-9a-fA-F]+$/, /^\/api\/events$/];
-// the node's own addresses and what it sent out: its owner's business, on their own node only
-const OWN_READ = [/^\/api\/addresses$/, /^\/api\/withdrawals$/];
+const READ_ONLY = [/^\/api\/status$/, /^\/api\/swaps$/, /^\/api\/swaps\/[0-9a-fA-F]+$/, /^\/api\/events$/, /^\/api\/addresses$/];
+// what a node sent out: its owner's business, on their own node only
+const OWN_READ = [/^\/api\/withdrawals$/];
 
 function readBody(req, limit = 4096) {
   return new Promise((ok, fail) => {
@@ -1082,7 +1082,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/api/pairs") {
     // routes: what the router can run (null without one, or while it can't be reached); node.own: this
     // page may say where coins go and send them out (FERRY_OWN_NODE=1, opened on loopback; own.mjs)
-    (ROUTER ? ROUTER.legs() : Promise.resolve(null)).then((routes) => json(res, 200, { ...PAIRS_BODY, routes, node: { own: !ownRefusal(req) } }));
+    (ROUTER ? ROUTER.legs() : Promise.resolve(null)).then((routes) => json(res, 200, { ...PAIRS_BODY, routes, node: { own: !ownRefusal(req), funds: true } }));
     return;
   }
   if (url.pathname === "/api/quotes") {

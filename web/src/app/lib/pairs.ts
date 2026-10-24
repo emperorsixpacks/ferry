@@ -66,7 +66,7 @@ export interface Pairs {
   state: (daemon: string) => Side["state"];
 }
 
-const NONE: PairsInfo = { sell: [], buy: [], main: { sell: false, buy: false }, routes: null, own: false };
+const NONE: PairsInfo = { sell: [], buy: [], main: { sell: false, buy: false }, routes: null, own: false, funds: false };
 
 // the pair a daemon's status describes; an EVM daemon on a local chain counts as Base
 export function pairOf(s: Status | null): PairId | null {
