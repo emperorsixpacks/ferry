@@ -62,6 +62,31 @@
 //                           spends the ZEC it holds between its two swaps. The views lose the
 //                           partners' URLs on the way out
 //
+// NEAR Intents (its 1Click Swap API; near.mjs): sell shielded ZEC for any of its assets, or buy
+// shielded ZEC with them. Ferry swaps ZEC for a coin it supports, and NEAR Intents carries that coin
+// on; Ferry never sends ZEC to NEAR Intents. 1Click is called from here only (the browser never sees
+// its URL or the JWT), with timeouts and size caps, and every quote's signature is checked.
+//   FERRY_NEAR_QUOTES [1]   0 hides NEAR Intents. Otherwise the swap card lists its assets (GET
+//                           /api/near/tokens, cached 5 min) with composed quotes (POST /api/near/quote:
+//                           dry, cached 30 s, rate limited): informational unless swaps run here
+//   FERRY_NEAR [0]          1 runs NEAR Intents swaps (POST /api/near/swap). ONLY for an operator on
+//                           their own node: a NEAR swap pays out to an address the person types, so on
+//                           a public demo a visitor would choose where the operator's funds go. Off,
+//                           the card shows quotes labelled "on your own node (mainnet)". Mainnet only:
+//                           a node on a test network gets quotes, never swaps
+//   FERRY_NEAR_URL [https://1click.chaindefuser.com]  FERRY_NEAR_JWT / FERRY_NEAR_JWT_FILE [unset]
+//                           a partner JWT (lower fees: unauthenticated quotes cost 0.25% more)
+//   FERRY_NEAR_PUBKEY [1Click's]  the key 1Click signs quotes with (a mock's, for the mock)
+//   FERRY_NEAR_TESTNET [0]  1, with a loopback FERRY_NEAR_URL (the mock): swaps on test networks
+//   FERRY_NEAR_STATE [.near/jobs.json next to DIST's parent]  where NEAR swaps are kept: deposit
+//                           addresses and 1Click's signed quotes, which are the record for disputes
+//   FERRY_NEAR_SLIPPAGE_BPS [100]  FERRY_NEAR_SELL_DEADLINE_SECS [86400]  FERRY_NEAR_BUY_DEADLINE_SECS
+//                           [10800]: a sell's quote must outlive its Ferry swap; a buy's is the time to
+//                           send the deposit
+//   DEMO_NEAR_QUOTES_PER_MIN [40]  DEMO_NEAR_QUOTES_PER_MIN_TOTAL [400]  NEAR quotes per IP / in all
+//   A NEAR start takes the swap guards: the caps, both rate limits, one live swap per pair and the
+//   router idle; the Ferry buy that follows a NEAR delivery waits for the pair's daemons to be idle.
+//
 // The daemons see no browser Origin header: this server strips it after its own PUBLIC_ORIGIN
 // check, so ferryd's --ui-origin allowlist doesn't need to know the public domain.
 import http from "node:http";
@@ -72,6 +97,7 @@ import { makerDirectory, parseMakers } from "./makers.mjs";
 import { quoteDesk, rateLimit } from "./quotes.mjs";
 import { extraDaemons, mainSide, pairsBody, samePair } from "./pairs.mjs";
 import { buildRoute, publicRoute, routerLink } from "./routes.mjs";
+import { ONE_CLICK_PUBKEY, ONE_CLICK_URL, nearDesk, nearRoutes, oneClick, ownDaemons, requestJson } from "./near.mjs";
 
 const env = process.env;
 const PORT = Number(env.PORT ?? 5300);
@@ -133,6 +159,7 @@ const ROUTER_TOKEN = tokenSource("ROUTER");
 const ROUTER = env.FERRY_ROUTER_URL ? routerLink({ url: env.FERRY_ROUTER_URL, token: ROUTER_TOKEN }) : null;
 
 // one request to a daemon from this server, for the guard's own checks
+
 function daemonJson(key, path) {
   const d = DAEMONS[key];
   return new Promise((ok, fail) => {
@@ -157,6 +184,60 @@ const authHeader = (d) => {
   const t = d.token();
   return t ? { authorization: `Bearer ${t}` } : {};
 };
+
+// ------------------------------------------------------------------------------------------------
+// NEAR Intents (near.mjs): its link, the user's own daemons each way, and the desk that quotes,
+// starts and follows NEAR swaps. The guards for a start are below, with the others (nearAdmit).
+
+const NEAR_QUOTES = env.FERRY_NEAR_QUOTES !== "0";
+const NEAR_RUN = env.FERRY_NEAR === "1";
+// the partner JWT, from the env or a file re-read now and then (like the daemons' tokens)
+const NEAR_JWT = (() => {
+  const value = env.FERRY_NEAR_JWT;
+  const file = env.FERRY_NEAR_JWT_FILE;
+  let cached = value ?? null;
+  let readAt = 0;
+  return () => {
+    if (value || !file) return cached;
+    if (Date.now() - readAt > 30_000) {
+      readAt = Date.now();
+      try {
+        cached = readFileSync(file, "utf8").trim();
+      } catch (e) {
+        console.error(`ferry-ui: can't read ${file}: ${e.message}`);
+      }
+    }
+    return cached;
+  };
+})();
+// any daemon this server fronts, as near.mjs asks: {status, body}
+const daemonCall = (key, method, path, body) => requestJson(new URL(path, DAEMONS[key].url), { method, headers: authHeader(DAEMONS[key]), body, timeoutMs: 30_000 });
+const NEAR_DAEMONS = ownDaemons({
+  sell: [...(MAIN_SELL !== false ? [{ key: "z", auto: MAIN_SELL === "auto" }] : []), ...EXTRA.filter((d) => d.side === "sell").map((d) => ({ key: d.key, pair: d.id }))],
+  buy: [...(MAIN_BUY !== false ? [{ key: "b", auto: MAIN_BUY === "auto" }] : []), ...EXTRA.filter((d) => d.side === "buy").map((d) => ({ key: d.key, pair: d.id }))],
+  call: daemonCall,
+});
+const NEAR = NEAR_QUOTES
+  ? nearDesk({
+      link: oneClick({ url: env.FERRY_NEAR_URL || ONE_CLICK_URL, jwt: NEAR_JWT }),
+      directory: MAKERS,
+      quotes: QUOTES,
+      daemons: NEAR_DAEMONS,
+      call: daemonCall,
+      execution: NEAR_RUN,
+      testnet: env.FERRY_NEAR_TESTNET === "1",
+      state: NEAR_RUN ? resolve(env.FERRY_NEAR_STATE ?? join(DIST, "..", ".near", "jobs.json")) : null,
+      pubkey: env.FERRY_NEAR_PUBKEY || ONE_CLICK_PUBKEY,
+      slippageBps: Number(env.FERRY_NEAR_SLIPPAGE_BPS ?? 100),
+      sellDeadlineSecs: Number(env.FERRY_NEAR_SELL_DEADLINE_SECS ?? 86_400),
+      buyDeadlineSecs: Number(env.FERRY_NEAR_BUY_DEADLINE_SECS ?? 10_800),
+      limits: { maxZat: DEMO_MAX_ZAT, minZat: DEMO_MIN_ZAT },
+      // the Ferry buy that follows a NEAR delivery: when the pair's daemons and the router are idle
+      admit: async ({ key }) => pairIdle(key),
+    })
+  : null;
+const nearPerIp = rateLimit(Number(env.DEMO_NEAR_QUOTES_PER_MIN ?? 40));
+const nearInAll = rateLimit(Number(env.DEMO_NEAR_QUOTES_PER_MIN_TOTAL ?? 400));
 
 // ------------------------------------------------------------------------------------------------
 // responses
@@ -218,16 +299,17 @@ function takeRate(ip, n = 1) {
 // Take `n` swap starts for this request (both limits), or answer 429 and return false. A start the
 // daemon or router then refuses gives them back (req.ferryRefused).
 function takeStarts(req, res, n) {
+  const no = startsRefused(req, n);
+  if (no) json(res, no.status, no.body, no.headers);
+  return !no;
+}
+
+// The same, as a value: null when the starts were taken, else the 429 to answer.
+function startsRefused(req, n) {
   const busy = globalWait(n);
-  if (busy) {
-    json(res, 429, { error: `The demo has hit its limit of ${SWAPS_PER_HOUR} swaps an hour. Try again in ${Math.ceil(busy / 60)} minutes.` }, { "retry-after": String(busy) });
-    return false;
-  }
+  if (busy) return { status: 429, body: { error: `The demo has hit its limit of ${SWAPS_PER_HOUR} swaps an hour. Try again in ${Math.ceil(busy / 60)} minutes.` }, headers: { "retry-after": String(busy) } };
   const wait = takeRate(clientIp(req), n);
-  if (wait) {
-    json(res, 429, { error: `Too many swaps from your address. Try again in ${Math.ceil(wait / 60)} minutes.` }, { "retry-after": String(wait) });
-    return false;
-  }
+  if (wait) return { status: 429, body: { error: `Too many swaps from your address. Try again in ${Math.ceil(wait / 60)} minutes.` }, headers: { "retry-after": String(wait) } };
   const at = Date.now();
   for (let i = 0; i < n; i++) recentAll.push(at);
   req.ferryRefused = () => {
@@ -238,7 +320,31 @@ function takeStarts(req, res, n) {
       if (mine?.length) mine.pop();
     }
   };
-  return true;
+  return null;
+}
+
+// One live swap per pair, and nothing while a private swap holds ZEC: null when `key`'s pair is
+// idle, else the 409 (or 502) to answer.
+async function pairIdle(key) {
+  let lists;
+  try {
+    lists = await Promise.all(samePair(key, EXTRA).map((k) => daemonJson(k, "/api/swaps")));
+  } catch {
+    return { status: 502, body: { error: "Can't reach the daemon. Is it running?" } };
+  }
+  if (lists.some((l) => l.status === 200 && Array.isArray(l.body) && l.body.some((s) => !s.outcome))) return { status: 409, body: { error: "A swap is already in progress on this pair. Try again when it finishes." } };
+  if (ROUTER && (await ROUTER.busy())) return { status: 409, body: { error: "A private swap is in progress. Try again when it finishes." } };
+  return null;
+}
+
+// A NEAR swap's start: a sell starts its Ferry swap now (the pair idle, one start); a buy only takes
+// a start (its Ferry swap waits for NEAR Intents, and then for the pair to be idle).
+async function nearAdmit(req, { key, kind }) {
+  if (kind === "sell") {
+    const busy = await pairIdle(key);
+    if (busy) return busy;
+  }
+  return startsRefused(req, 1);
 }
 
 // whether any daemon this server fronts has a swap that isn't over; null if one can't be asked
@@ -298,6 +404,11 @@ async function guard(key, path, req, res) {
   }
 
   if (TAKERS.has(key) && path === "/api/swaps") {
+    // a NEAR buy's coins arrived on this daemon and its Ferry swap is about to spend them
+    if (NEAR?.holds().has(key)) {
+      json(res, 409, { error: "A NEAR Intents buy is about to use this node's coins. Try again when it has started." });
+      return false;
+    }
     let body;
     try {
       body = JSON.parse(await readBody(req));
@@ -685,6 +796,20 @@ async function serveQuotes(req, res) {
 }
 
 // ------------------------------------------------------------------------------------------------
+// NEAR Intents: /api/near/... (near.mjs). Quotes are rate limited per IP and in all; a swap start
+// takes the swap guards (nearAdmit) and only runs with FERRY_NEAR=1.
+
+const nearHttp = NEAR
+  ? nearRoutes(NEAR, {
+      send: json,
+      readBody,
+      origin: (req) => (PUBLIC_ORIGIN && req.headers.origin && req.headers.origin !== PUBLIC_ORIGIN ? "This origin may not use the Ferry demo" : null),
+      limit: (req) => nearPerIp(clientIp(req)) || nearInAll("all"),
+      admit: nearAdmit,
+    })
+  : null;
+
+// ------------------------------------------------------------------------------------------------
 // static files
 
 const TYPES = {
@@ -752,6 +877,14 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === "/healthz") return json(res, 200, { ok: true });
+  if (url.pathname.startsWith("/api/near/")) {
+    if (!NEAR) return json(res, 404, { error: "NEAR Intents is off on this server" });
+    nearHttp(req, res, url.pathname).catch((e) => {
+      console.error("ferry-ui near:", e?.message ?? "failed");
+      if (!res.headersSent) json(res, 500, { error: "Internal error" });
+    });
+    return;
+  }
   if (url.pathname === "/api/pairs") {
     // routes: what the router can run (null without one, or while it can't be reached)
     (ROUTER ? ROUTER.legs() : Promise.resolve(null)).then((routes) => json(res, 200, { ...PAIRS_BODY, routes }));
@@ -778,6 +911,7 @@ server.listen(PORT, HOST, () => {
   console.log(`ferry-ui on http://${HOST}:${PORT}  dist ${DIST}`);
   console.log(`  Z ${DAEMONS.z.url.origin}${MAIN_SELL === false ? " (no sell starts)" : ""}  B ${DAEMONS.b.url.origin}${MAIN_BUY === false ? " (no buy starts)" : ""}${EXTRA.map((d) => `  ${d.key.toUpperCase()} ${d.url}`).join("")}  makers ${MAKERS.makers.map((m) => `${m.name} (${m.pair})`).join(", ") || "none"}`);
   if (ROUTER) console.log(`  router ${ROUTER.url} (private swaps)`);
+  if (NEAR) console.log(`  NEAR Intents ${env.FERRY_NEAR_URL || ONE_CLICK_URL}: quotes${NEAR_RUN ? ", swaps (FERRY_NEAR=1: your own node only)" : " only (FERRY_NEAR=1 runs swaps)"}${NEAR_JWT() ? ", with a JWT" : ""}`);
   console.log(`  demo: max ${zec(DEMO_MAX_ZAT)} ZEC, ${RATE_PER_HOUR} swaps/IP/hour, ${SWAPS_PER_HOUR} swaps/hour in all, ${SSE_PER_IP} streams/IP, ${SSE_TOTAL} streams in all, faults ${FAULTS ? "on" : "off"}${PUBLIC_ORIGIN ? `, origin ${PUBLIC_ORIGIN}` : ""}`);
 });
 

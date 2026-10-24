@@ -7,6 +7,7 @@ import { makerDirectory, parseMakers } from "./server/makers.mjs";
 import { quoteDesk } from "./server/quotes.mjs";
 import { extraDaemons, mainSide, pairsBody } from "./server/pairs.mjs";
 import { buildRoute, routerLink } from "./server/routes.mjs";
+import { ONE_CLICK_PUBKEY, ONE_CLICK_URL, nearDesk, nearRoutes, oneClick, ownDaemons, requestJson } from "./server/near.mjs";
 
 // The UI talks to the user's ferryd daemons: Z sells ZEC, B buys it. In dev and preview the main
 // two are proxied under /daemon/z and /daemon/b: the proxy adds each daemon's API token
@@ -90,17 +91,66 @@ if (ROUTER_URL) {
 // allowlisted URL here, so the browser never sends one. The maker URL is handed to the daemon,
 // so it must be reachable from the daemon, not from the browser. POST /api/quotes asks the makers
 // for firm quotes (server/quotes.mjs), and a swap start may name one by id.
+//
+// NEAR Intents (server/near.mjs), as server/prod.mjs runs it: /api/near/... when FERRY_NEAR_URL is set
+// (the mock's 1Click in `pnpm dev`) or FERRY_NEAR_QUOTES=1 (the real API: quotes only, unless
+// FERRY_NEAR=1 on mainnet nodes). FERRY_NEAR_TESTNET=1 lets a loopback mock run swaps on test networks.
 function makers(): Plugin {
   const dir = makerDirectory(parseMakers(process.env.FERRY_MAKERS, process.env.FERRY_MAKER_URL ?? B_URL));
   const desk = quoteDesk(dir);
-  const send = (res: Parameters<Connect.NextHandleFunction>[1], code: number, body: unknown) => {
+  const send = (res: Parameters<Connect.NextHandleFunction>[1], code: number, body: unknown, extra: Record<string, string> = {}) => {
     res.statusCode = code;
     res.setHeader("content-type", "application/json");
     res.setHeader("cache-control", "no-store");
+    for (const [k, v] of Object.entries(extra)) res.setHeader(k, v);
     res.end(JSON.stringify(body));
   };
+  const nearOn = !!process.env.FERRY_NEAR_URL || process.env.FERRY_NEAR_QUOTES === "1";
+  const daemonCall = (key: string, method: string, path: string, body?: unknown) =>
+    requestJson(new URL(path, TARGETS[key]), { method, headers: TOKENS[key] ? { authorization: `Bearer ${TOKENS[key]}` } : {}, body, timeoutMs: 30_000 });
+  const mainSell = mainSide(process.env.FERRY_Z_SELLS);
+  const mainBuy = mainSide(process.env.FERRY_B_BUYS);
+  const near = nearOn
+    ? nearDesk({
+        link: oneClick({ url: process.env.FERRY_NEAR_URL || ONE_CLICK_URL, jwt: process.env.FERRY_NEAR_JWT ?? null }),
+        directory: dir,
+        quotes: desk,
+        daemons: ownDaemons({
+          sell: [...(mainSell !== false ? [{ key: "z", auto: mainSell === "auto" }] : []), ...EXTRA.filter((d) => d.side === "sell").map((d) => ({ key: d.key, pair: d.id }))],
+          buy: [...(mainBuy !== false ? [{ key: "b", auto: mainBuy === "auto" }] : []), ...EXTRA.filter((d) => d.side === "buy").map((d) => ({ key: d.key, pair: d.id }))],
+          call: daemonCall,
+        }),
+        call: daemonCall,
+        execution: process.env.FERRY_NEAR === "1",
+        testnet: process.env.FERRY_NEAR_TESTNET === "1",
+        state: process.env.FERRY_NEAR_STATE ?? null,
+        pubkey: process.env.FERRY_NEAR_PUBKEY || ONE_CLICK_PUBKEY,
+        tickMs: Number(process.env.FERRY_NEAR_TICK_MS ?? 4000),
+        statusEveryMs: Number(process.env.FERRY_NEAR_STATUS_MS ?? 5000),
+      })
+    : null;
+  const readBody = (req: Connect.IncomingMessage, limit = 4096) =>
+    new Promise<string>((ok, fail) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      req.on("data", (c: Buffer) => {
+        size += c.length;
+        if (size > limit) {
+          fail(new Error("too large"));
+          req.destroy();
+        } else chunks.push(c);
+      });
+      req.on("end", () => ok(Buffer.concat(chunks).toString("utf8")));
+      req.on("error", fail);
+    });
+  const nearHttp = near ? nearRoutes(near, { send, readBody }) : null;
   const handle: Connect.NextHandleFunction = (req, res, next) => {
     const url = req.url?.split("?")[0];
+    if (url?.startsWith("/api/near/")) {
+      if (!nearHttp) return send(res, 404, { error: "NEAR Intents is off on this server" });
+      nearHttp(req, res, url).catch(() => !res.headersSent && send(res, 500, { error: "near failed" }));
+      return;
+    }
     if (url === "/api/pairs" && req.method === "GET") {
       (ROUTER ? ROUTER.legs() : Promise.resolve(null)).then((routes) => send(res, 200, { ...PAIRS_BODY, routes }));
       return;
