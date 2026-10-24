@@ -73,6 +73,7 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
 | `crates/ferry-btc` | Taproot lock/cancel scripts, presigned transactions, BIP340 adaptor signatures |
 | `crates/ferry-core` | swap sessions, messages, joint Ironwood key, state machines (no I/O) |
 | `crates/ferryd` | the party daemon: peer protocol, chain watchers, persistence, HTTP/SSE API |
+| `crates/ferry-watchtower` | keyless watchtower: broadcasts an offline party's presigned cancel/refund/punish on time ([docs](docs/WATCHTOWER.md)) |
 | `web/` | the demo UI |
 | `infra/` | one-command local environment |
 | `spikes/` | day-0 go/no-go experiments, kept as evidence |
@@ -114,7 +115,8 @@ Plain-language versions of these, with what happens in every abort case, are in
   ZIP 2005 (the same constructor FROST setups use today). The address is single-use and short-lived.
 - The cross-group DLEQ is unaudited (Serai's `dleq`, experimental feature).
 - Presigned Bitcoin transactions use fixed fees; mainnet needs an anchor/CPFP plan.
-- Liveness: each party must be online until its deadline, as in every adaptor-signature swap.
+- Liveness: each party must be online until its deadline, as in every adaptor-signature swap, or
+  delegate its signed deadline transactions to a keyless [watchtower](docs/WATCHTOWER.md).
 
 ## Credits
 
