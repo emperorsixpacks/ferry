@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 const T1: u16 = 16;
 const T2: u16 = 10;
+const TOKEN: &str = "it-api-token";
 
 fn rpc_url() -> String {
     std::env::var("FERRY_BTC_RPC").unwrap_or_else(|_| "http://127.0.0.1:18543".into())
@@ -61,6 +62,12 @@ impl Party {
         }
     }
 
+    /// The peer listener's URL (what a taker is given as `maker`).
+    fn peer_url(&self) -> String {
+        let i = self.args.iter().position(|a| a == "--listen").unwrap();
+        format!("http://{}", self.args[i + 1])
+    }
+
     fn logs(&self) -> String {
         let s = std::fs::read_to_string(&self.log).unwrap_or_default();
         let lines: Vec<&str> = s.lines().collect();
@@ -99,8 +106,15 @@ fn party_args(
         role,
         "--name",
         name,
-        "--listen",
+        "--api-listen",
         &format!("127.0.0.1:{port}"),
+        "--listen",
+        &format!("127.0.0.1:{}", free_port()),
+        "--api-token",
+        TOKEN,
+        "--demo-faults",
+        "--sweep-delay-secs",
+        "0:1",
         "--data-dir",
         dir.join(name).to_str().unwrap(),
         "--btc-rpc",
@@ -188,8 +202,16 @@ impl World {
         z.spawn();
         b.spawn();
 
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {TOKEN}").parse().unwrap(),
+        );
         let w = World {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .default_headers(headers)
+                .build()
+                .unwrap(),
             rpc,
             miner,
             z,
@@ -263,7 +285,7 @@ impl World {
             .post(
                 &self.z.url,
                 "/api/swaps",
-                json!({"maker": self.b.url, "zec_zat": zec_zat}),
+                json!({"maker": self.b.peer_url(), "zec_zat": zec_zat}),
             )
             .await;
         assert_eq!(
@@ -332,10 +354,49 @@ fn state(v: &Value) -> &str {
     v["state"].as_str().unwrap_or("")
 }
 
+/// The control API needs the token, refuses foreign origins and is not on the peer listener.
+async fn check_api_guard(w: &World) {
+    let bare = reqwest::Client::new();
+    let status = |r: reqwest::Response| r.status().as_u16();
+    let url = format!("{}/api/status", w.z.url);
+    assert_eq!(status(bare.get(&url).send().await.unwrap()), 401);
+    assert_eq!(
+        status(bare.get(&url).bearer_auth("wrong").send().await.unwrap()),
+        401
+    );
+    let from_site = bare
+        .get(&url)
+        .bearer_auth(TOKEN)
+        .header("origin", "https://evil.example");
+    assert_eq!(status(from_site.send().await.unwrap()), 403);
+    assert_eq!(
+        status(bare.get(&url).bearer_auth(TOKEN).send().await.unwrap()),
+        200
+    );
+    let on_peer = format!("{}/api/status", w.b.peer_url());
+    assert_eq!(
+        status(bare.get(&on_peer).bearer_auth(TOKEN).send().await.unwrap()),
+        404
+    );
+    let offer = format!("{}/peer/offer", w.b.peer_url());
+    assert_eq!(status(bare.get(&offer).send().await.unwrap()), 200);
+
+    let token_file = w._dir.path().join("zoe").join("api-token");
+    assert_eq!(std::fs::read_to_string(&token_file).unwrap(), TOKEN);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&token_file), 0o600);
+        assert_eq!(mode(&w._dir.path().join("zoe").join("swaps")), 0o700);
+    }
+}
+
 #[tokio::test]
 #[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
 async fn happy_swap_over_http_with_restart() {
     let mut w = World::start(2).await;
+    check_api_guard(&w).await;
     let id = w.start_swap(100_000_000).await;
 
     // Restart Z mid-swap, once its ZEC is locked: it must resume from its swap file.
@@ -367,6 +428,7 @@ async fn happy_swap_over_http_with_restart() {
     assert!(entry(&z, "zec_lock_broadcast")["txid"].is_string());
     assert!(entry(&b, "secret_extracted")["txid"].is_string());
     assert!(entry(&b, "zec_sweep_broadcast")["txid"].is_string());
+    entry(&b, "sweep_delayed");
 
     // Let the redeem's timeline height fill in, then compare what each side says observers see.
     let (z, b) = w

@@ -87,6 +87,9 @@ pub struct SwapRecord {
     pub zec_lock_txid: Option<String>,
     /// Our sweep of the joint address.
     pub zec_sweep_txid: Option<String>,
+    /// Unix ms before which we do not sweep (random delay, set when the sweep is queued).
+    #[serde(default)]
+    pub sweep_not_before: Option<u64>,
     pub mine_revealed: bool,
     pub peer_learned: bool,
     pub zec_joint: String,
@@ -120,6 +123,7 @@ impl SwapRecord {
             cancel_height: None,
             zec_lock_txid: None,
             zec_sweep_txid: None,
+            sweep_not_before: None,
             mine_revealed: false,
             peer_learned: false,
             zec_joint,
@@ -163,8 +167,13 @@ impl SwapRecord {
 
     /// Nothing left to do or to fill in.
     pub fn settled(&self) -> bool {
+        // On the swapped and refunded paths someone sweeps the joint note; keep watching
+        // until we have seen it, so both parties show the same observer lines.
+        let sweep_expected =
+            matches!(self.outcome(), Some("swapped" | "refunded")) && self.zec_lock_txid.is_some();
         self.swap.is_final()
             && self.pending.is_empty()
+            && (!sweep_expected || self.observer_zec.iter().any(|(k, _)| k == "sweep"))
             && self
                 .timeline
                 .iter()
@@ -193,15 +202,17 @@ pub struct Store {
 }
 
 impl Store {
+    /// Swap records hold secret key shares: the directory is 0700 and every file 0600.
     pub fn open(data_dir: &Path) -> std::io::Result<Self> {
+        private_dir(data_dir)?;
         let dir = data_dir.join("swaps");
-        std::fs::create_dir_all(&dir)?;
+        private_dir(&dir)?;
         Ok(Store { dir })
     }
 
     pub fn save(&self, rec: &SwapRecord) -> std::io::Result<()> {
         let tmp = self.dir.join(format!(".{}.json.tmp", rec.id));
-        std::fs::write(&tmp, serde_json::to_vec_pretty(rec)?)?;
+        write_private(&tmp, &serde_json::to_vec_pretty(rec)?)?;
         std::fs::rename(tmp, self.dir.join(format!("{}.json", rec.id)))
     }
 
@@ -221,6 +232,37 @@ impl Store {
     }
 }
 
+/// Create `dir` (and parents) and restrict it to the owner.
+pub fn private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Write a fresh owner-only (0600) file at `path`, replacing a stale one. The file is created
+/// with `create_new`, so its mode is never looser than 0600, not even briefly.
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +271,22 @@ mod tests {
     fn state_labels() {
         assert_eq!(state_label("ZecSeen { confs: 2 }"), "ZecSeen");
         assert_eq!(state_label("BtcLocked"), "BtcLocked");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_files_and_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("data");
+        Store::open(&dir).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("swaps")), 0o700);
+        let f = dir.join("secret");
+        write_private(&f, b"one").unwrap();
+        write_private(&f, b"two").unwrap();
+        assert_eq!(mode(&f), 0o600);
+        assert_eq!(std::fs::read(&f).unwrap(), b"two");
     }
 }

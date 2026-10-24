@@ -3,6 +3,32 @@
 Each party runs one `ferryd`. The demo UI talks to two of them (Z on :7101, B on :7102).
 All responses are JSON. Amounts: `zat` (ZEC zatoshis) and `sat` (BTC satoshis), as integers.
 
+## Listeners and authentication
+
+`ferryd` serves two listeners:
+
+| listener | flag (default) | routes | who calls it |
+|---|---|---|---|
+| control API | `--api-listen` (127.0.0.1:7101), loopback only | `/api/*` (this document) | the UI, through the Vite proxy |
+| peer protocol | `--listen` (127.0.0.1:7111) | `/peer/*` | the counterparty's `ferryd`; a maker may expose it |
+
+Every `/api/*` request needs `Authorization: Bearer <token>`. The token is `--api-token`, or a
+random one generated at startup. Either way it is written to `<data-dir>/api-token` (mode 0600).
+`infra/demo.sh up` exports both tokens in `.demo/env` as `FERRY_Z_TOKEN` / `FERRY_B_TOKEN`, and the
+Vite proxy should inject them as the `Authorization` header. There is no CORS. A request that
+carries an `Origin` header is refused (`403`) unless that origin was allowed with `--ui-origin`
+(repeatable; demo.sh allows `http://localhost:5180` and `http://127.0.0.1:5180`). A missing or wrong
+token gets `401`.
+
+The `maker` URL in `POST /api/swaps` is the maker's **peer** listener (demo: `http://127.0.0.1:7112`,
+exported as `FERRY_MAKER_URL`), not its control API.
+
+Peer protocol (JSON `Envelope`s from ferry-core; the taker initiates every request):
+`GET /peer/offer` (rate, role, network, terms), `POST /peer/swaps` (`{envelope: Propose, taker_url}`
+→ the `Accept` envelope), `POST /peer/swaps/:id/messages` (one taker envelope; a retry of the same
+envelope is not applied twice) and `GET /peer/swaps/:id/messages?after=n` (the maker's envelopes
+from index n). A stalled party answers `503`.
+
 ## GET /api/status
 
 ```json
@@ -23,7 +49,7 @@ All responses are JSON. Amounts: `zat` (ZEC zatoshis) and `sat` (BTC satoshis), 
 Start a swap as taker against a maker.
 
 ```json
-{ "maker": "http://127.0.0.1:7102", "zec_zat": 100000000 }
+{ "maker": "http://127.0.0.1:7112", "zec_zat": 100000000 }
 ```
 → `201 { "id": "f3c1…" }`
 
@@ -109,7 +135,9 @@ The other kinds are only rendered as text (`label`, plus `txid`/`height` when pr
 free-form. The mock uses: `propose_sent`, `propose_received`, `dleq_verified`, `accept_sent`,
 `lock_template_sent`, `cancel_sigs_sent`, `refund_adaptor_verified`, `cancel_sig_received`,
 `btc_lock_seen`, `zec_note_seen`, `zec_confirmed`, `redeem_adaptor_sent`, `redeem_adaptor_received`,
-`cancel_seen`, `punish_seen`, `swap_complete`, `refunded`, `reclaimed`, `punished`.
+`cancel_seen`, `punish_seen`, `swap_complete`, `refunded`, `reclaimed`, `punished`. ferryd also
+emits `sweep_delayed` (local) when it schedules the random delay before a ZEC sweep or reclaim, and
+`peer_message_ignored` / `peer_message_rejected` for a late or invalid peer message.
 
 `label` is a full sentence written from the emitting party's point of view, for example
 `"Broadcast tx_lock: 0.0041 BTC to the Taproot lock address"`. The UI shows the newest label from
@@ -129,6 +157,8 @@ Every non-2xx response has a JSON body `{ "error": "Human-readable sentence" }`.
 - `409`: a swap is already in progress
 
 ## POST /api/swaps/:id/fault (demo only)
+
+Only exists when `ferryd` runs with `--demo-faults` (demo.sh passes it). Otherwise it is `404`.
 
 `{ "fault": "stall" }` → `200 { "ok": true }` makes this party stop acting, to demonstrate the
 cancel/refund/punish paths. While stalled, a party sends no messages and broadcasts nothing. Its

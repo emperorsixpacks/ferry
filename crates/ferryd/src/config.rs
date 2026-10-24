@@ -40,9 +40,27 @@ pub struct Cli {
     pub role: RoleArg,
     #[arg(long)]
     pub name: String,
-    #[arg(long, default_value = "127.0.0.1:7101")]
+    /// Peer protocol listener (/peer/*). A maker exposes this one to takers.
+    #[arg(long, default_value = "127.0.0.1:7111")]
     pub listen: SocketAddr,
-    /// URL the counterparty and UI use to reach us (default http://<listen>).
+    /// Control API listener (/api/*, for the UI). Must be a loopback address.
+    #[arg(long, default_value = "127.0.0.1:7101")]
+    pub api_listen: SocketAddr,
+    /// Bearer token required on /api/*. Default: a random token, written to <data-dir>/api-token.
+    #[arg(long)]
+    pub api_token: Option<String>,
+    /// Browser origin allowed to call /api/* (repeatable). Requests carrying any other
+    /// `Origin` header are refused.
+    #[arg(long)]
+    pub ui_origin: Vec<String>,
+    /// Enable POST /api/swaps/:id/fault (demo fault injection).
+    #[arg(long)]
+    pub demo_faults: bool,
+    /// Random delay before sweeping the joint note, MIN:MAX seconds, so the ZEC sweep does not
+    /// line up in time with the BTC transaction that revealed the key.
+    #[arg(long, default_value = "5:20")]
+    pub sweep_delay_secs: DelayArg,
+    /// URL the counterparty uses to reach our peer listener (default http://<listen>).
     #[arg(long)]
     pub public_url: Option<String>,
     /// One JSON file per swap is kept under <data-dir>/swaps.
@@ -95,6 +113,28 @@ pub struct Cli {
     /// Chain polling and peer exchange interval.
     #[arg(long, default_value_t = 1_000)]
     pub poll_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DelayArg {
+    pub min_secs: u64,
+    pub max_secs: u64,
+}
+
+impl std::str::FromStr for DelayArg {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        let (min, max) = s.split_once(':').unwrap_or((s, s));
+        let min = min.parse::<u64>().map_err(|e| format!("{min}: {e}"))?;
+        let max = max.parse::<u64>().map_err(|e| format!("{max}: {e}"))?;
+        if min > max {
+            return Err("expected MIN:MAX with MIN <= MAX".into());
+        }
+        Ok(DelayArg {
+            min_secs: min,
+            max_secs: max,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -261,5 +301,8 @@ mod tests {
         assert!("1:2".parse::<OfferArg>().is_err());
         assert_eq!(btc_for(100_000_000, 410_000), 410_000);
         assert_eq!(btc_for(12_345_678, 410_000), 50_617);
+        let d: DelayArg = "3:9".parse().unwrap();
+        assert_eq!((d.min_secs, d.max_secs), (3, 9));
+        assert!("9:3".parse::<DelayArg>().is_err());
     }
 }

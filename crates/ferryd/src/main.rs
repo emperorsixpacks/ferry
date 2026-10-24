@@ -44,20 +44,28 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run<L: ZecLeg + 'static>(cli: Cli, leg: L) -> anyhow::Result<()> {
-    let listen = cli.listen;
+    let (peer_addr, api_addr) = (cli.listen, cli.api_listen);
+    if !api_addr.ip().is_loopback() {
+        bail!("--api-listen must be a loopback address (the control API moves funds)");
+    }
+    let token_file = cli.data_dir.join("api-token");
     let daemon = Daemon::new(cli, leg).await?;
     tracing::info!(
         role = daemon.role.as_str(),
         name = %daemon.cli.name,
         making = daemon.offer.making,
-        "ferryd listening on http://{listen}"
+        "ferryd: API on http://{api_addr} (token in {}), peer protocol on http://{peer_addr}",
+        token_file.display()
     );
     tokio::spawn(daemon.clone().run());
-    let listener = tokio::net::TcpListener::bind(listen).await?;
-    axum::serve(listener, http::router(daemon))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    let api = tokio::net::TcpListener::bind(api_addr).await?;
+    let peer = tokio::net::TcpListener::bind(peer_addr).await?;
+    let shutdown = || async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    tokio::try_join!(
+        axum::serve(api, http::api_router(daemon.clone())).with_graceful_shutdown(shutdown()),
+        axum::serve(peer, http::peer_router(daemon)).with_graceful_shutdown(shutdown()),
+    )?;
     Ok(())
 }

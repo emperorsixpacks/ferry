@@ -10,7 +10,8 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::{FromRequest, Path, Query, Request, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseFrame, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -21,7 +22,6 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::json;
 use tokio_stream::wrappers::BroadcastStream;
-use tower_http::cors::CorsLayer;
 
 use crate::config::ProposeRequest;
 use crate::daemon::{ApiError, Daemon, SseEvent};
@@ -50,13 +50,24 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for ApiJson<T> {
     }
 }
 
-pub fn router<L: ZecLeg + 'static>(daemon: Arc<Daemon<L>>) -> Router {
-    Router::new()
+/// Control API for the UI: loopback listener, bearer token, no CORS, `Origin` allowlist.
+pub fn api_router<L: ZecLeg + 'static>(daemon: Arc<Daemon<L>>) -> Router {
+    let mut r = Router::new()
         .route("/api/status", get(status::<L>))
         .route("/api/swaps", get(list_swaps::<L>).post(create_swap::<L>))
         .route("/api/swaps/{id}", get(get_swap::<L>))
-        .route("/api/swaps/{id}/fault", post(fault::<L>))
-        .route("/api/events", get(events::<L>))
+        .route("/api/events", get(events::<L>));
+    if daemon.cli.demo_faults {
+        r = r.route("/api/swaps/{id}/fault", post(fault::<L>));
+    }
+    r.fallback(|| async { ApiError(404, "not found".into()) })
+        .layer(middleware::from_fn_with_state(daemon.clone(), guard::<L>))
+        .with_state(daemon)
+}
+
+/// Peer protocol, server to server (a maker may expose this listener).
+pub fn peer_router<L: ZecLeg + 'static>(daemon: Arc<Daemon<L>>) -> Router {
+    Router::new()
         .route("/peer/offer", get(offer::<L>))
         .route("/peer/swaps", post(propose::<L>))
         .route(
@@ -64,8 +75,36 @@ pub fn router<L: ZecLeg + 'static>(daemon: Arc<Daemon<L>>) -> Router {
             post(deliver::<L>).get(outbox::<L>),
         )
         .fallback(|| async { ApiError(404, "not found".into()) })
-        .layer(CorsLayer::permissive())
         .with_state(daemon)
+}
+
+/// Refuse foreign browser origins and requests without the API token.
+async fn guard<L: ZecLeg + 'static>(State(d): D<L>, req: Request, next: Next) -> Response {
+    if let Some(origin) = req.headers().get(header::ORIGIN) {
+        let allowed = origin
+            .to_str()
+            .is_ok_and(|o| d.cli.ui_origin.iter().any(|a| a == o));
+        if !allowed {
+            return ApiError(403, "This origin may not use the ferryd API".into()).into_response();
+        }
+    }
+    let token = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if !token.is_some_and(|t| constant_time_eq(t.as_bytes(), d.api_token.as_bytes())) {
+        return ApiError(
+            401,
+            "Missing or wrong API token (Authorization: Bearer <data-dir>/api-token)".into(),
+        )
+        .into_response();
+    }
+    next.run(req).await
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 async fn status<L: ZecLeg + 'static>(State(d): D<L>) -> Result<Json<view::StatusView>, ApiError> {

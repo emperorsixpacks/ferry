@@ -60,10 +60,19 @@ pub struct Daemon<L> {
     store: Store,
     pub state: Mutex<State>,
     pub events: broadcast::Sender<SseEvent>,
+    /// Bearer token required on /api/*.
+    pub api_token: String,
 }
 
 /// A failed action that should be retried on the next tick.
 struct Retry;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 fn peer_name(role: Role) -> &'static str {
     role.peer().as_str()
@@ -85,6 +94,12 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             BitcoinRpc::new(&cli.btc_rpc, &cli.btc_rpc_user, &cli.btc_rpc_pass).with_wallet(wallet);
         rpc.ensure_wallet().await?;
         let store = Store::open(&cli.data_dir)?;
+        let api_token = cli.api_token.clone().unwrap_or_else(|| {
+            let mut b = [0u8; 32];
+            OsRng.fill_bytes(&mut b);
+            hex::encode(b)
+        });
+        crate::record::write_private(&cli.data_dir.join("api-token"), api_token.as_bytes())?;
         let mut state = State::default();
         for rec in store.load_all()? {
             tracing::info!(id = %rec.id, state = %rec.state(), "resuming swap");
@@ -103,6 +118,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             store,
             state: Mutex::new(state),
             events,
+            api_token,
         }))
     }
 
@@ -536,9 +552,29 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         let before = rec.state();
         let actions = rec.swap.handle(event.clone())?;
         self.narrate(rec, &event, &before, &actions);
+        if rec.sweep_not_before.is_none()
+            && actions
+                .iter()
+                .any(|a| matches!(a, ferry_core::Action::SweepZec { .. }))
+        {
+            self.schedule_sweep(rec);
+        }
         rec.pending.extend(actions.into_iter().map(Pending::from));
         self.save(rec);
         Ok(())
+    }
+
+    /// Pick the random sweep delay (PROTOCOL.md: sweeps must not line up with the BTC spend).
+    fn schedule_sweep(&self, rec: &mut SwapRecord) {
+        let d = self.cli.sweep_delay_secs;
+        let secs = d.min_secs + OsRng.next_u64() % (d.max_secs - d.min_secs + 1);
+        rec.sweep_not_before = Some(now_ms() + secs * 1000);
+        rec.log(
+            "local",
+            "sweep_delayed",
+            format!("Waiting {secs}s before sweeping, so the ZEC sweep does not line up with the Bitcoin transaction"),
+            None,
+        );
     }
 
     /// While stalled: keep watching, but only take transitions that need no action.
@@ -652,6 +688,9 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             Pending::SweepZec { fvk, ask } => {
                 if rec.zec_sweep_txid.is_some() {
                     return Ok(None);
+                }
+                if rec.sweep_not_before.is_some_and(|t| now_ms() < t) {
+                    return Err(Retry);
                 }
                 match self.leg.sweep(&fvk_from_hex(&fvk), ask.expose()).await {
                     Ok(txid) => {
