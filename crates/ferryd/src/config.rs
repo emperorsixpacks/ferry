@@ -214,6 +214,13 @@ pub struct Cli {
     /// refuses to arm a tower. Z can use any tower.
     #[arg(long, requires = "watchtower")]
     pub watchtower_own: bool,
+
+    /// What the ZEC is swapped against: `btc` (bitcoind, the default) or `evm` (an ERC-20 such
+    /// as USDC in FerryLock; see the --evm-* flags and docs/EVM.md).
+    #[arg(long, value_enum, default_value = "btc")]
+    pub counter: crate::evm::Counter,
+    #[command(flatten)]
+    pub evm: crate::evm::EvmArgs,
 }
 
 #[derive(Clone, Copy, Debug)]

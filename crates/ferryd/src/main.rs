@@ -2,6 +2,7 @@
 
 mod config;
 mod daemon;
+mod evm;
 mod http;
 mod mock_zec;
 mod pricefeed;
@@ -106,6 +107,9 @@ fn resolve_secret_files(cli: &mut Cli) -> anyhow::Result<()> {
 }
 
 async fn run<L: ZecLeg + 'static>(cli: Cli, leg: L) -> anyhow::Result<()> {
+    if cli.counter == evm::Counter::Evm {
+        return evm::run(cli, leg).await;
+    }
     let (peer_addr, api_addr) = (cli.listen, cli.api_listen);
     if !api_addr.ip().is_loopback() && !cli.api_allow_remote {
         bail!(

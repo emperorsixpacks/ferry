@@ -114,12 +114,23 @@ impl EvmClient {
 
     /// Timestamp of the latest block: what the contract's windows compare against.
     pub async fn latest_timestamp(&self) -> Result<u64, Error> {
+        Ok(self.latest_block().await?.1)
+    }
+
+    /// Number and timestamp of the latest block, from one response (so a log scan up to that
+    /// number and the time it is judged at agree).
+    pub async fn latest_block(&self) -> Result<(u64, u64), Error> {
         let block = self
             .provider
             .get_block(alloy::eips::BlockId::latest())
             .await?
             .ok_or_else(|| Error::Rpc("no latest block".into()))?;
-        Ok(block.header.timestamp)
+        Ok((block.header.number, block.header.timestamp))
+    }
+
+    /// Our native balance (wei), for gas.
+    pub async fn eth_balance(&self) -> Result<U256, Error> {
+        Ok(self.provider.get_balance(self.from).await?)
     }
 
     pub async fn chain_id(&self) -> Result<u64, Error> {

@@ -2164,6 +2164,7 @@ dependencies = [
  "ferry-btc",
  "ferry-core",
  "ferry-dleq",
+ "ferry-evm",
  "ferry-watchtower",
  "ferry-zec",
  "futures-util",
