@@ -20,6 +20,7 @@ import {
   oneClick,
   ownDaemons,
   pairOfStatus,
+  planRoute,
   quoteMessage,
   roundSig,
   stableJson,
@@ -153,6 +154,7 @@ const TOKENS = [
   { assetId: FERRY_ASSETS["usdc-base"].assetId, symbol: "USDC", blockchain: "base", decimals: 6, price: 1 },
   { assetId: "nep141:sol.omft.near", symbol: "SOL", blockchain: "sol", decimals: 9, price: 100 },
   { assetId: "nep141:zec.omft.near", symbol: "ZEC", blockchain: "zec", decimals: 8, price: 400 },
+  { assetId: "nep141:tron-usdt.omft.near", symbol: "USDT", blockchain: "tron", decimals: 6, price: 1 },
 ];
 const SOL = "7dKbmvKfvwZjJ1Y2NYCQKsEXATBMVvUSSbYmdbHxQk5i";
 
@@ -490,4 +492,318 @@ test("the best Ferry leg", () => {
   assert.equal(bestFerry(list, "btc", "buy", 1e8), null);
   assert.equal(bestFerry(list, "usdc-base", "sell", 1e8).fee, 0n);
   assert.equal(bestFerry(list, "btc", "sell", 5e9), null);
+});
+
+// ------------------------------------------------------------------------------------------------
+// private swaps with NEAR Intents at an end: a router, and partners both ways for BTC and USDC
+
+const RMAKERS = [
+  { name: "Kestrel", url: "http://k.example", pair: "ZEC/BTC", chain: null },
+  { name: "Egret", url: "http://e.example", pair: "ZEC/USDC", chain: "base" },
+  { name: "Sandpiper", url: "http://s.example", pair: "ZEC/BTC", chain: null },
+  { name: "Godwit", url: "http://g.example", pair: "ZEC/USDC", chain: "base" },
+];
+const rsum = (i, role, rate) => ({ index: i, name: RMAKERS[i].name, pair: RMAKERS[i].pair, chain: RMAKERS[i].chain, role, available: true, paused: false, online: true, rate_sat_per_zec: rate, min_zat: 1_000_000, max_zat: 1_000_000_000, fee_sat: RMAKERS[i].chain ? null : 2000, liquidity_zat: null });
+// Kestrel and Egret buy ZEC (for BTC, for USDC), Sandpiper and Godwit sell it
+const RLIST = [rsum(0, "B", 400_000), rsum(1, "B", 400_000_000), rsum(2, "Z", 410_000), rsum(3, "Z", 410_000_000)];
+const rdirectory = () => ({
+  makers: RMAKERS,
+  list: async () => RLIST,
+  resolve: (ref) => (typeof ref === "number" ? RMAKERS[ref] : RMAKERS.find((m) => m.name === ref)) ?? null,
+  offerOf: () => ({ features: ["payout"] }),
+});
+
+function fakeRouter(legs = { from: ["btc", "usdc-base"], to: ["btc", "usdc-base"] }) {
+  const routes = new Map();
+  const posts = [];
+  const view = (r) => ({
+    id: r.id,
+    from: r.body.from,
+    to: r.body.to,
+    state: r.state,
+    outcome: r.outcome,
+    note: r.note ?? "",
+    amounts: { in_max: r.body.max_in, zec_zat: r.body.zec_zat, zec2_zat: r.body.zec_zat - 60_000, out_min: r.body.min_out, keep_zat: 0 },
+    zec: { held_zat: r.state === "holding" ? r.body.zec_zat - 10_000 : 0 },
+    legs: [
+      { swap_id: "rs1", counter_units: 1, earlier_swaps: [] },
+      { swap_id: r.out != null ? "rs2" : null, counter_units: r.out ?? null, earlier_swaps: [] },
+    ],
+    payout_to: r.body.payout_to ?? null,
+  });
+  return {
+    routes,
+    posts,
+    legs: async () => legs,
+    call: async (method, path, body) => {
+      if (method === "POST" && path === "/api/routes") {
+        posts.push(body);
+        const r = { id: `r${posts.length}`, body, state: "leg1", outcome: null };
+        routes.set(r.id, r);
+        return { status: 201, body: view(r) };
+      }
+      const m = path.match(/^\/api\/routes\/(r\d+)$/);
+      if (method === "GET" && m && routes.has(m[1])) return { status: 200, body: view(routes.get(m[1])) };
+      return { status: 404, body: { error: "no such route" } };
+    },
+  };
+}
+
+function comboDesk(opts = {}) {
+  const one = fakeOneClick();
+  const d = fakeDaemons(opts);
+  const router = opts.router === undefined ? fakeRouter() : opts.router;
+  const n = nearDesk({ link: one.link, directory: rdirectory(), daemons: d.daemons, call: d.call, execution: opts.execution ?? true, pubkey: PUB, tickMs: 1e9, statusEveryMs: 0, log: () => {}, router, ...(opts.desk ?? {}) });
+  return { n, one, d, router };
+}
+const realOf = (one) => one.calls.filter((c) => c.body?.dry === false).map((c) => c.body);
+const USDT = "nep141:tron-usdt.omft.near";
+const TRON = "TLa2f6VPqDgRE67v1736s7bJ8Ray5wYjU7";
+
+test("a private swap's numbers, as the card works them out", () => {
+  // 0.0041 BTC at Sandpiper's 410 000 sat/ZEC with 0.5% room: 0.995 ZEC; swap 2 sells 60 000 zat less
+  const p = planRoute(RLIST, "btc", "usdc-base", 410_000);
+  assert.equal(p.maker1.name, "Sandpiper");
+  assert.equal(p.zat, 99_500_000);
+  assert.equal(p.zat2, 99_440_000);
+  assert.equal(p.maker2.name, "Egret");
+  // 2% under Egret's 400 USDC
+  assert.equal(p.minOut, (99_440_000n * 400_000_000n * 9_800n) / 10_000n / 100_000_000n);
+  assert.equal(p.fee2, 0n);
+  assert.match(planRoute(RLIST, "btc", "usdc-base", 1).error, /No partner is selling ZEC/);
+  assert.match(planRoute(RLIST.filter((m) => m.name !== "Egret"), "btc", "usdc-base", 410_000).error, /No other partner is buying ZEC for USDC/);
+});
+
+test("info: what a private swap can hand to NEAR Intents and take from it", async () => {
+  const { n } = comboDesk();
+  const info = await n.info();
+  assert.deepEqual(info.compose, { to: ["btc", "usdc-base"], from: ["btc"], runs: true });
+  assert.deepEqual(info.vias, { sell: ["btc", "usdc-base"], buy: ["btc"] });
+  assert.equal((await comboDesk({ router: null }).n.info()).compose, null);
+  assert.equal((await comboDesk({ execution: false }).n.info()).compose.runs, false);
+  // an older ferryd can't pay out into a deposit address
+  assert.equal((await comboDesk({ features: ["route"] }).n.info()).compose.runs, false);
+});
+
+test("a hop: NEAR Intents' part of a private swap, priced alone", async () => {
+  const { n, one } = comboDesk();
+  let r = await n.hop({ side: "out", pair: "btc", asset: "nep141:sol.omft.near", amount: "193000" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  // 0.00193 BTC at $100 000 is $193: 1.93 SOL
+  assert.equal(r.body.amount_out, "1930000000");
+  const asked = one.calls.at(-1).body;
+  assert.equal(asked.swapType, "FLEX_INPUT");
+  assert.equal(asked.originAsset, FERRY_ASSETS.btc.assetId);
+  r = await n.hop({ side: "in", pair: "btc", asset: "nep141:sol.omft.near", amount: "5000000000", address: SOL, exact: true });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.amount_out, "500000");
+  assert.equal(r.body.address, "ok");
+  assert.equal(one.calls.at(-1).body.swapType, "EXACT_INPUT");
+  assert.equal(one.calls.at(-1).body.refundTo, SOL);
+  assert.equal((await n.hop({ side: "in", pair: "btc", asset: "nep141:sol.omft.near", amount: "1", address: "t1Ku2KLyndDPsR32jwnrTMd3yvi9tfFP8ML" })).body.field, "address");
+  assert.equal((await n.hop({ side: "out", pair: "doge", asset: "nep141:sol.omft.near", amount: "1" })).status, 400);
+  assert.equal((await n.hop({ side: "out", pair: "btc", asset: FERRY_ASSETS.btc.assetId, amount: "1" })).status, 400);
+});
+
+const routeNear = (more = {}) => ({
+  kind: "route-near",
+  route: { from: "usdc-base", to: "btc", zec_zat: 50_000_000, maker1: "Godwit", maker2: ["Kestrel"], max_in: 210_000_000, min_out: 195_000, pause: "off", payout_to: "bc1qattacker" },
+  asset_out: "nep141:sol.omft.near",
+  address: SOL,
+  min_asset_out: "1900000000",
+  payout_to: "bc1qattacker",
+  ...more,
+});
+
+test("coin → NEAR asset: the route's second swap pays into a deposit address made here", async () => {
+  const { n, one, router } = comboDesk();
+  let gated = null;
+  const r = await n.startCombo(routeNear(), { admit: async (w) => ((gated = w), null) });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.deepEqual(gated, { key: "z", pair: "usdc-base", kind: "route" });
+  assert.equal(r.body.state, "route");
+  // NEAR Intents' quote: from BTC (the least swap 2 pays, less Kestrel's 2000 sat fee) to SOL at the
+  // person's address; refunds go to their own BTC node
+  const [real] = realOf(one);
+  assert.equal(real.swapType, "FLEX_INPUT");
+  assert.equal(real.originAsset, FERRY_ASSETS.btc.assetId);
+  assert.equal(real.amount, "193000");
+  assert.equal(real.recipient, SOL);
+  assert.equal(real.refundTo, "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq");
+  // the route: partners as allowlisted URLs, the pause, and the deposit address made here as its
+  // payout, never the browser's
+  const post = router.posts[0];
+  assert.equal(post.maker1.url, "http://g.example");
+  assert.equal(post.maker2[0].url, "http://k.example");
+  assert.deepEqual(post.delay_secs, [0, 0]);
+  assert.equal(post.payout_to, r.body.back.deposit_address);
+  assert.notEqual(post.payout_to, "bc1qattacker");
+  assert.equal("signed" in r.body.back, false);
+  assert.equal(r.body.back.signature.startsWith("ed25519:"), true);
+  // swap 2 done: NEAR Intents' part, then delivered
+  router.routes.get("r1").state = "done";
+  router.routes.get("r1").out = 199_760;
+  await n.tick();
+  assert.equal(n.combo(r.body.id).state, "near_out");
+  assert.equal(n.combo(r.body.id).route.out, 199_760);
+  Object.assign(one.deposits.get(r.body.back.deposit_address), { status: "SUCCESS", details: { amountOut: "1990000000" } });
+  await n.tick();
+  const done = n.combo(r.body.id);
+  assert.equal(done.state, "done");
+  assert.equal(done.back.details.amount_out, "1990000000");
+  assert.equal(n.combos().length, 1);
+  assert.equal(n.jobs().length, 0);
+});
+
+test("coin → NEAR asset, refused before anything moves", async () => {
+  // a public demo: quotes only
+  const demo = comboDesk({ execution: false });
+  assert.equal((await demo.n.startCombo(routeNear())).status, 403);
+  // no router
+  assert.equal((await comboDesk({ router: null }).n.startCombo(routeNear())).status, 503);
+  const { n, one, router } = comboDesk();
+  // the same asset at both ends
+  let r = await n.startCombo(routeNear({ asset_out: FERRY_ASSETS["usdc-base"].assetId, address: "0x2527D02599Ba641c19FEa793cD0F167589a0f10D" }));
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /two different coins/);
+  // a Zcash address
+  r = await n.startCombo(routeNear({ address: "t1Ku2KLyndDPsR32jwnrTMd3yvi9tfFP8ML" }));
+  assert.equal(r.body.field, "address");
+  // a route the router can't run
+  r = await n.startCombo(routeNear({ route: { ...routeNear().route, from: "ltc" } }));
+  assert.equal(r.status, 400);
+  // the price moved under what the person agreed to: no route
+  let refunds = 0;
+  r = await n.startCombo(routeNear({ min_asset_out: "1999000000" }), { refused: () => refunds++ });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.code, "price_moved");
+  assert.equal(refunds, 1);
+  assert.equal(router.posts.length, 0);
+  // the guard says no: nothing asked of 1Click
+  const before = realOf(one).length;
+  r = await n.startCombo(routeNear(), { admit: async () => ({ status: 409, body: { error: "busy" } }) });
+  assert.equal(r.status, 409);
+  assert.equal(realOf(one).length, before);
+  // an older ferryd that can't pay out
+  assert.equal((await comboDesk({ features: ["route"] }).n.startCombo(routeNear())).status, 501);
+  // a test network
+  assert.equal((await comboDesk({ mainnet: false }).n.startCombo(routeNear())).status, 409);
+});
+
+const nearRoute = (more = {}) => ({
+  kind: "near-route",
+  route: { from: "btc", to: "usdc-base", zec_zat: 118_800_000, min_out: 450_000_000, pause: "standard" },
+  asset_in: "nep141:sol.omft.near",
+  amount_in: "5000000000",
+  refund_address: SOL,
+  min_mid: "490000",
+  ...more,
+});
+
+test("NEAR asset → coin: the deposit, NEAR Intents into the B node, then the route", async () => {
+  const { n, one, d, router } = comboDesk();
+  let gated = null;
+  const r = await n.startCombo(nearRoute(), { admit: async (w) => ((gated = w), null) });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.deepEqual(gated, { key: "b", pair: "btc", kind: "route-later" });
+  assert.equal(r.body.state, "deposit");
+  const [real] = realOf(one);
+  assert.equal(real.swapType, "EXACT_INPUT");
+  assert.equal(real.originAsset, "nep141:sol.omft.near");
+  assert.equal(real.destinationAsset, FERRY_ASSETS.btc.assetId);
+  assert.equal(real.amount, "5000000000");
+  // NEAR Intents pays the person's own B node; refunds go to the address they gave
+  assert.equal(real.recipient, "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq");
+  assert.equal(real.refundTo, SOL);
+  assert.equal(router.posts.length, 0);
+  const dep = one.deposits.get(r.body.front.deposit_address);
+  dep.status = "PROCESSING";
+  await n.tick();
+  assert.equal(n.combo(r.body.id).state, "near_in");
+  // delivered, but the wallet doesn't show it yet: wait, and hold the coins against other starts
+  Object.assign(dep, { status: "SUCCESS", details: { amountOut: "500000" } });
+  await n.tick();
+  assert.equal(n.combo(r.body.id).state, "funding");
+  assert.deepEqual([...n.holds()], ["b"]);
+  assert.equal(router.posts.length, 0);
+  d.statuses.b.balances.btc_sat = 600_000;
+  await n.tick();
+  const post = router.posts[0];
+  assert.ok(post, n.combo(r.body.id).problem);
+  // never more than NEAR Intents delivered for this swap, less the lock's fee
+  assert.equal(post.max_in, 490_000);
+  assert.equal(post.from, "btc");
+  assert.equal(post.to, "usdc-base");
+  assert.equal(post.maker1.name, "Sandpiper");
+  assert.equal(post.maker2[0].name, "Egret");
+  assert.equal("payout_to" in post, false);
+  const plan = planRoute(RLIST, "btc", "usdc-base", 490_000);
+  assert.equal(post.zec_zat, plan.zat);
+  // never under the person's own floor, scaled to the ZEC this buys now
+  assert.ok(BigInt(post.min_out) >= (450_000_000n * BigInt(plan.zat2)) / BigInt(118_800_000 - 60_000));
+  assert.deepEqual(post.delay_secs, [300, 1800]);
+  assert.equal(n.combo(r.body.id).state, "route");
+  // the route holds the ZEC, then finishes
+  router.routes.get("r1").state = "holding";
+  await n.tick();
+  assert.equal(n.combo(r.body.id).state, "holding");
+  router.routes.get("r1").state = "done";
+  router.routes.get("r1").out = 470_000_000;
+  await n.tick();
+  assert.equal(n.combo(r.body.id).state, "done");
+});
+
+test("NEAR asset → NEAR asset: the second quote once the coin arrived, the route paying into it", async () => {
+  const { n, one, d, router } = comboDesk();
+  const r = await n.startCombo(nearRoute({ kind: "near-near", asset_out: USDT, address: TRON, min_asset_out: "440000000" }));
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  d.statuses.b.balances.btc_sat = 600_000;
+  Object.assign(one.deposits.get(r.body.front.deposit_address), { status: "SUCCESS", details: { amountOut: "500000" } });
+  await n.tick();
+  const v = n.combo(r.body.id);
+  assert.equal(v.state, "route", v.problem);
+  const second = realOf(one)[1];
+  assert.equal(second.originAsset, FERRY_ASSETS["usdc-base"].assetId);
+  assert.equal(second.destinationAsset, USDT);
+  assert.equal(second.recipient, TRON);
+  // refunds of the USDC go to the person's own USDC node
+  assert.equal(second.refundTo, "0x2527D02599Ba641c19FEa793cD0F167589a0f10D");
+  assert.equal(second.amount, String(router.posts[0].min_out));
+  assert.equal(router.posts[0].payout_to, v.back.deposit_address);
+  router.routes.get("r1").state = "done";
+  await n.tick();
+  assert.equal(n.combo(r.body.id).state, "near_out");
+  one.deposits.get(v.back.deposit_address).status = "REFUNDED";
+  await n.tick();
+  assert.equal(n.combo(r.body.id).state, "refunded");
+  // NEAR Intents now offers less than the person agreed: hold the coin, and go on only when asked
+  const late = comboDesk();
+  const r2 = await late.n.startCombo(nearRoute({ kind: "near-near", asset_out: USDT, address: TRON, min_asset_out: "999000000" }));
+  late.d.statuses.b.balances.btc_sat = 600_000;
+  Object.assign(late.one.deposits.get(r2.body.front.deposit_address), { status: "SUCCESS", details: { amountOut: "500000" } });
+  await late.n.tick();
+  assert.equal(late.n.combo(r2.body.id).state, "holding");
+  assert.match(late.n.combo(r2.body.id).problem, /less USDT than you agreed/);
+  assert.equal(late.router.posts.length, 0);
+  const again = await late.n.retryCombo(r2.body.id);
+  assert.equal(again.status, 200);
+  assert.equal(again.body.state, "route");
+  assert.equal(late.router.posts.length, 1);
+});
+
+test("HTTP: the private swaps' routes", async () => {
+  const { n } = comboDesk({ execution: false });
+  const sent = [];
+  const routes = nearRoutes(n, { send: (_res, code, body) => sent.push([code, body]), readBody: async (req) => req.body, limit: () => null });
+  const req = (method, body = "{}") => ({ method, body, headers: {} });
+  await routes(req("POST", JSON.stringify({ side: "out", pair: "btc", asset: "nep141:sol.omft.near", amount: "193000" })), {}, "/api/near/hop");
+  assert.equal(sent.at(-1)[0], 200);
+  await routes(req("POST", JSON.stringify(routeNear())), {}, "/api/near/combo");
+  assert.equal(sent.at(-1)[0], 403);
+  await routes(req("GET"), {}, "/api/near/combos");
+  assert.deepEqual(sent.at(-1), [200, []]);
+  await routes(req("GET"), {}, "/api/near/combo/c0123456789abcdef");
+  assert.equal(sent.at(-1)[0], 404);
+  await routes(req("POST"), {}, "/api/near/combos/c0123456789abcdef/retry");
+  assert.equal(sent.at(-1)[0], 404);
 });

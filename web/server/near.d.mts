@@ -86,16 +86,33 @@ export function ownDaemons(opts: {
 
 export function bestFerry(list: unknown[], pair: string, dir: "sell" | "buy", zat: number): { maker: any; rate: number; gross: bigint; fee: bigint; value: bigint } | null;
 
-type Admit = (what: { key: string; pair: string; kind?: "sell" | "buy"; auto?: boolean }) => Promise<Reply | null>;
+// kind: a NEAR sell or buy; "route" a private swap starting now; "route-later" one that starts once
+// NEAR Intents delivered its coin
+type AdmitKind = "sell" | "buy" | "route" | "route-later";
+type Admit = (what: { key: string; pair: string; kind?: AdmitKind; auto?: boolean }) => Promise<Reply | null>;
+
+export const ROUTE_FEE_ZAT: number;
+export const COMBO_KINDS: string[];
+export function planRoute(
+  list: unknown[],
+  from: string,
+  to: string,
+  maxIn: bigint | number | string,
+): { error: string } | { error?: undefined; maker1: any; maker2: any; zat: number; zat2: number; pay: bigint; maxIn: bigint; out: bigint; fee2: bigint; minOut: bigint; minNet: bigint };
 
 export interface NearDesk {
   info(): Promise<unknown>;
   quote(body: unknown): Promise<Reply>;
   start(body: unknown, opts?: { admit?: Admit; refused?: () => void }): Promise<Reply>;
   retry(id: string): Promise<Reply>;
+  hop(body: unknown): Promise<Reply>;
+  startCombo(body: unknown, opts?: { admit?: Admit; refused?: () => void }): Promise<Reply>;
+  retryCombo(id: string): Promise<Reply>;
   tick(): Promise<void>;
   jobs(): unknown[];
   job(id: string): unknown | null;
+  combos(): unknown[];
+  combo(id: string): unknown | null;
   holds(): Set<string>;
   stop(): void;
 }
@@ -120,6 +137,7 @@ export function nearDesk(opts: {
   statusEveryMs?: number;
   fundWaitMs?: number;
   admit?: Admit;
+  router?: { legs(): Promise<{ from: string[]; to: string[] } | null>; call(method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> } | null;
   log?: (...a: unknown[]) => void;
 }): NearDesk;
 
@@ -130,6 +148,6 @@ export function nearRoutes(
     readBody: (req: IncomingMessage, limit?: number) => Promise<string>;
     origin?: (req: IncomingMessage) => string | null;
     limit?: (req: IncomingMessage) => number;
-    admit?: (req: IncomingMessage, what: { key: string; pair: string; kind?: "sell" | "buy" }) => Promise<Reply | null>;
+    admit?: (req: IncomingMessage, what: { key: string; pair: string; kind?: AdmitKind }) => Promise<Reply | null>;
   },
 ): (req: IncomingMessage, res: ServerResponse, path: string) => Promise<boolean>;

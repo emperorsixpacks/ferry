@@ -11,6 +11,15 @@
 //         user's own Ferry node (B) → (a Ferry swap on that node, started here) → shielded ZEC.
 // Ferry never sends ZEC to NEAR Intents (its ZEC deposit address is transparent), so the ZEC side
 // stays shielded and trustless. The NEAR leg is public, and the user trusts NEAR Intents for it.
+//
+// With the user's router (ferry-route) too, a private swap (coin A → shielded ZEC → coin C) can have
+// NEAR Intents at either end, or both ("combos"):
+//   route-near  A → ZEC → C, swap 2 paying C straight into a 1Click deposit address (the router's
+//               payout_to, set here, never by a browser) → NEAR Intents → asset Y, to the user's address
+//   near-route  the user sends asset X to a 1Click deposit address → NEAR Intents → coin A into their
+//               own B node → (the route, started here once A arrived) A → ZEC → C
+//   near-near   both: the second 1Click quote is asked once A has arrived, with the route's amounts
+// The ZEC between the two Ferry swaps stays shielded; the NEAR legs are public and trusted.
 // NEAR Intents is mainnet only: on test networks a quote is informational, unless a mock 1Click on
 // this machine (FERRY_NEAR_URL on loopback, FERRY_NEAR_TESTNET=1) stands in for it.
 //
@@ -27,6 +36,8 @@ import { dirname } from "node:path";
 import http from "node:http";
 import https from "node:https";
 import { pairLabel } from "./quotes.mjs";
+import { symbolFamily } from "./paths.mjs";
+import { PAUSES, assetOf, buildRoute, canRoute } from "./routes.mjs";
 
 export const ONE_CLICK_URL = "https://1click.chaindefuser.com";
 // 1Click's signing key, as its TypeScript SDK pins it (verifyQuoteSignature)
@@ -504,6 +515,57 @@ export function bestFerry(list, pair, dir, zat) {
 // lock's own fee on a UTXO coin.
 export const buyNeed = (gross, pair) => (gross * (10_000n + BigInt(BUY_BUFFER_BPS)) + 9_999n) / 10_000n + (isEvm(pair) ? 0n : BigInt(LOCK_FEE_RESERVE));
 
+// A private swap's numbers, as the swap card works them out (src/app/lib/routes.tsx): swap 2 sells
+// ROUTE_FEE_ZAT less ZEC than swap 1 buys (the sweep's fee, the lock's reserve); swap 1 has room for
+// its rate to tick up IN_SLIP_BPS; swap 2 may pay OUT_SLIP_BPS under today's price, else the router
+// holds the ZEC.
+export const ROUTE_FEE_ZAT = 60_000;
+const IN_SLIP_BPS = 50n;
+const OUT_SLIP_BPS = 200n;
+
+// The private swap A → C for at most `maxIn` of A, now: the cheapest partner selling ZEC for A, the
+// ZEC that buys (to 0.001 ZEC), the best other partner buying it for C, and what swap 2 pays at
+// least (min_out, before its payout fee; min_net after). {error} when nobody takes it.
+export function planRoute(list, from, to, maxIn) {
+  const budget = typeof maxIn === "bigint" ? maxIn : (big(maxIn) ?? 0n);
+  const zatFor = (rate) => Number((budget * 100_000_000n * 10_000n) / (BigInt(rate) * (10_000n + IN_SLIP_BPS)) / 100_000n) * 100_000;
+  const want = pairLabel(from);
+  const sellers = (list ?? []).filter((m) => m?.available && m.role === "Z" && want && m.pair === want.pair && (want.chain === null || m.chain === want.chain) && Number.isSafeInteger(m.rate_sat_per_zec) && m.rate_sat_per_zec > 0);
+  sellers.sort((a, b) => a.rate_sat_per_zec - b.rate_sat_per_zec);
+  let leg1 = null;
+  let zat = 0;
+  for (const m of sellers) {
+    const z = zatFor(m.rate_sat_per_zec);
+    const best = z > 0 ? bestFerry(list, from, "buy", z) : null;
+    if (!best) continue;
+    zat = zatFor(best.rate);
+    leg1 = bestFerry(list, from, "buy", zat) ?? best;
+    break;
+  }
+  if (!leg1 || zat <= ROUTE_FEE_ZAT) return { error: `No partner is selling ZEC for ${pairLabel(from)?.pair.split("/")[1] ?? from} at this amount right now.` };
+  const zat2 = zat - ROUTE_FEE_ZAT;
+  const leg2 = bestFerry(
+    (list ?? []).filter((m) => m.name !== leg1.maker.name),
+    to,
+    "sell",
+    zat2,
+  );
+  if (!leg2) return { error: `No other partner is buying ZEC for ${pairLabel(to)?.pair.split("/")[1] ?? to} at this amount right now.` };
+  const minOut = (BigInt(zat2) * BigInt(leg2.rate) * (10_000n - OUT_SLIP_BPS)) / 10_000n / 100_000_000n;
+  return {
+    maker1: leg1.maker,
+    maker2: leg2.maker,
+    zat,
+    zat2,
+    pay: leg1.gross,
+    maxIn: budget,
+    out: leg2.value,
+    fee2: leg2.fee,
+    minOut,
+    minNet: minOut - leg2.fee,
+  };
+}
+
 // ------------------------------------------------------------------------------------------------
 // 1Click's answers, for people
 
@@ -527,6 +589,8 @@ export const NEAR_DONE = ["SUCCESS", "REFUNDED", "FAILED"];
 // the desk
 
 const JOB_ID = /^n[0-9a-f]{16}$/;
+const COMBO_ID = /^c[0-9a-f]{16}$/;
+export const COMBO_KINDS = ["route-near", "near-route", "near-near"];
 const ISO = (t) => new Date(t).toISOString();
 const isoSecs = (t) => new Date(t).toISOString().replace(/\.\d+Z$/, "Z");
 const digits = (v) => (typeof v === "string" && INT.test(v) ? v : null);
@@ -559,6 +623,8 @@ export function nearDesk({
   statusEveryMs = 5000,
   fundWaitMs = 30 * 60_000,
   admit = async () => null,
+  // the user's router (routes.mjs routerLink: legs(), call()), for private swaps with NEAR at an end
+  router = null,
   log = (...a) => console.error("ferry-ui near:", ...a),
 }) {
   const maxZat = limits.maxZat ?? Infinity;
@@ -758,10 +824,12 @@ export function nearDesk({
 
   // ---------------------------------------------------------------- jobs
   let jobs = [];
+  let combos = [];
   if (state && existsSync(state)) {
     try {
       const saved = JSON.parse(readFileSync(state, "utf8"));
       if (Array.isArray(saved?.jobs)) jobs = saved.jobs.filter((j) => j && JOB_ID.test(j.id));
+      if (Array.isArray(saved?.combos)) combos = saved.combos.filter((j) => j && COMBO_ID.test(j.id));
     } catch (e) {
       log(`can't read ${state}: ${e.message}`);
     }
@@ -771,7 +839,7 @@ export function nearDesk({
     try {
       mkdirSync(dirname(state), { recursive: true });
       const tmp = `${state}.${process.pid}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ v: 1, jobs }, null, 1), { mode: 0o600 });
+      writeFileSync(tmp, JSON.stringify({ v: 1, jobs, combos }, null, 1), { mode: 0o600 });
       renameSync(tmp, state);
     } catch (e) {
       log(`can't write ${state}: ${e.message}`);
@@ -1143,6 +1211,19 @@ export function nearDesk({
           save();
         }
       }
+      for (const j of combos.filter(comboActive)) {
+        const snap = () => JSON.stringify([j.state, j.front?.status, j.back?.status, j.route, j.problem, j.timeline.length, j.front?.details, j.back?.details]);
+        const before = snap();
+        try {
+          await comboStep(j);
+        } catch (e) {
+          log(`combo ${j.id}: ${e?.message ?? e}`);
+        }
+        if (snap() !== before) {
+          j.updated_at = Math.floor(Date.now() / 1000);
+          save();
+        }
+      }
     } finally {
       ticking = false;
     }
@@ -1161,6 +1242,531 @@ export function nearDesk({
     await buyNow(j);
     save();
     return { status: 200, body: view(j) };
+  }
+
+  // ================================================================ private swaps with NEAR at an end
+
+  const comboActive = (j) => !["done", "refunded", "failed", "expired"].includes(j.state);
+  const hasPayout = (s) => (s?.features ?? []).some((f) => f === "payout" || f === "payout_to");
+  const tokenView = (t) => ({ id: t.assetId, symbol: t.symbol, blockchain: t.blockchain, decimals: t.decimals });
+
+  // The coins a private swap can hand to NEAR Intents (`to`: the user's Z node for coin C pays into
+  // a deposit address, and a refund comes back there) and take from it (`from`: NEAR Intents
+  // delivers into the user's B node for coin A), as this server fronts those nodes. They must be
+  // the router's own legs for those coins: ferry-route's status names no leg's address, so the server
+  // can't check that. `runs`: those nodes take NEAR swaps here.
+  async function composeInfo(sell, buy) {
+    if (!router) return null;
+    const legs = await router.legs();
+    if (!legs) return null;
+    const pick = async (list, ends) => {
+      const out = [];
+      for (const d of list) if (ends.includes(d.pair) && !out.some((x) => x.pair === d.pair) && FERRY_ASSETS[d.pair] && (await viaToken(d.pair))) out.push(d);
+      return out;
+    };
+    const to = await pick(sell, legs.to);
+    const from = await pick(buy, legs.from);
+    const runs = execution && to.length + from.length > 0 && to.every((d) => canRun(d.status) && hasPayout(d.status)) && from.every((d) => canRun(d.status));
+    return { to: to.map((d) => d.pair), from: from.map((d) => d.pair), runs };
+  }
+
+  // 1Click's request for NEAR Intents' part of a private swap: "out" FLEX_INPUT coin C → asset Y (a
+  // payout may land above the floor it is quoted at), "in" EXACT_INPUT asset X → coin A. `address`
+  // is the person's (Y's recipient; X's refund address), `own` the user's node (C's refunds; A's
+  // delivery); what's missing gets a dry placeholder, so only a dry quote leaves either out.
+  function hopBody(side, via, asset, amount, { address = null, own = null } = {}) {
+    const out = side === "out";
+    const origin = out ? via : asset;
+    const dest = out ? asset : via;
+    const toAddr = out ? address : own;
+    const backAddr = out ? own : address;
+    const [to, toType] = toAddr ? [toAddr, "DESTINATION_CHAIN"] : dryAddress(dest.blockchain, "DESTINATION_CHAIN");
+    const [back, backType] = backAddr ? [backAddr, "ORIGIN_CHAIN"] : dryAddress(origin.blockchain, "ORIGIN_CHAIN");
+    return { swapType: out ? "FLEX_INPUT" : "EXACT_INPUT", slippageTolerance: slippageBps, originAsset: origin.assetId, depositType: "ORIGIN_CHAIN", destinationAsset: dest.assetId, amount: amount.toString(), refundTo: back, refundType: backType, recipient: to, recipientType: toType };
+  }
+
+  // ---------------------------------------------------------------- POST /api/near/hop
+  // NEAR Intents' part alone, dry: {side: "out", pair: C, asset: Y, amount, address?} what `amount`
+  // of coin C comes to in Y; {side: "in", pair: A, asset: X, amount, address?} what sending `amount`
+  // of X delivers of A. `exact`: the amount as given (else rounded, so one cached answer serves many).
+  async function hop(body) {
+    const bad = (error, field) => ({ status: 400, body: { error, ...(field ? { field } : {}) } });
+    const side = body?.side;
+    if (side !== "in" && side !== "out") return bad('side must be "in" or "out"');
+    const pair = body?.pair;
+    const via = typeof pair === "string" && Object.hasOwn(FERRY_ASSETS, pair) ? await viaToken(pair) : null;
+    if (!via) return (await tokenList()) ? bad("NEAR Intents doesn't take that coin here") : { status: 503, body: { error: "Couldn't reach NEAR Intents. Try again in a moment." } };
+    const asset = typeof body?.asset === "string" ? await tokenOf(body.asset) : null;
+    if (!asset) return bad("NEAR Intents doesn't list that token");
+    if (asset.assetId === via.assetId) return bad("Pick two different coins");
+    const want = big(body?.amount);
+    if (want == null || want <= 0n) return bad("amount must be a whole number of the coin's smallest units");
+    let address = null;
+    if (body?.address != null && body.address !== "") {
+      const p = addressProblem(asset.blockchain, body.address);
+      if (p) return bad(p, "address");
+      address = String(body.address).trim();
+    }
+    const exact = body?.exact === true;
+    const ask = exact ? want : roundSig(want);
+    const got = await dry(hopBody(side, via, asset, ask, { address }));
+    if (!got.ok) return { status: got.field ? 400 : 502, body: { error: got.error, ...(got.field ? { field: got.field } : {}) } };
+    const amountOut = big(got.quote.amountOut);
+    const minOut = big(got.quote.minAmountOut);
+    if (amountOut == null || minOut == null) return { status: 502, body: { error: "NEAR Intents' answer was incomplete." } };
+    const s = (x) => (ask === want ? x : scale(x, want, ask));
+    return {
+      status: 200,
+      body: {
+        side,
+        pair,
+        asset: asset.assetId,
+        amount_in: want.toString(),
+        amount_out: s(amountOut).toString(),
+        min_amount_out: s(minOut).toString(),
+        time_s: Number.isFinite(got.quote.timeEstimate) ? Math.max(0, Math.round(got.quote.timeEstimate)) : 60,
+        approximate: ask !== want || !address,
+        address: address ? "ok" : null,
+        verified: verifySignatures,
+      },
+    };
+  }
+
+  // A real 1Click quote for `req`, checked: 1Click's signature, that it answers exactly what was
+  // asked, a deposit address (and no memo where a Ferry payout must pay into it).
+  async function realQuote(req, { memoOk }) {
+    let r;
+    try {
+      r = await link.quote({ ...req, dry: false });
+    } catch {
+      return { status: 502, body: nearError(0, null) };
+    }
+    if (r.status !== 200 && r.status !== 201) {
+      const e = nearError(r.status, r.body);
+      return { status: e.field ? 400 : 502, body: e };
+    }
+    const signed = r.body;
+    const q = signed?.quote ?? {};
+    const echo = signed?.quoteRequest ?? {};
+    if (verifySignatures && !verifyQuote(signed, pubkey)) return { status: 502, body: { error: "NEAR Intents' quote didn't carry a valid signature. Nothing was started." } };
+    const same = ["originAsset", "destinationAsset", "amount", "recipient", "refundTo", "swapType", "recipientType", "refundType", "depositType"].every((k) => echo[k] === req[k]) && echo.dry === false;
+    const deposit = typeof q.depositAddress === "string" && /^[A-Za-z0-9:._-]{8,128}$/.test(q.depositAddress) ? q.depositAddress : null;
+    const memo = typeof q.depositMemo === "string" && q.depositMemo ? q.depositMemo.slice(0, 100) : null;
+    if (!same || !deposit) return { status: 502, body: { error: "NEAR Intents' quote didn't match what was asked. Nothing was started." } };
+    if (memo && !memoOk) return { status: 502, body: { error: "NEAR Intents asked for a deposit memo, which a Ferry payout can't carry. Nothing was started." } };
+    // a Ferry payout pays an address of letters and digits only (ferry-route's payout_to)
+    if (!memoOk && !/^[A-Za-z0-9]+$/.test(deposit)) return { status: 502, body: { error: "NEAR Intents' deposit address isn't one a Ferry payout can pay. Nothing was started." } };
+    const minOut = big(q.minAmountOut);
+    const amountIn = big(q.amountIn);
+    if (minOut == null || amountIn == null) return { status: 502, body: { error: "NEAR Intents' quote was incomplete. Nothing was started." } };
+    return {
+      ok: true,
+      part: {
+        deposit_address: deposit,
+        deposit_memo: memo,
+        amount_in: amountIn.toString(),
+        min_amount_in: (big(q.minAmountIn) ?? big(req.amount)).toString(),
+        amount_out: digits(q.amountOut),
+        min_amount_out: minOut.toString(),
+        deadline: typeof q.deadline === "string" ? q.deadline : req.deadline,
+        time_s: Number.isFinite(q.timeEstimate) ? q.timeEstimate : null,
+        status: "PENDING_DEPOSIT",
+        checked_at: 0,
+        details: null,
+        correlation_id: typeof signed.correlationId === "string" ? signed.correlationId.slice(0, 80) : null,
+        verified: verifySignatures,
+        signed,
+      },
+    };
+  }
+
+  // what swap 2's payout loses on the way: a UTXO redeem's presigned fee, an EVM claim's relayer tip
+  function payoutFee(list, name, pair) {
+    const m = list.find((x) => x.name === name);
+    return isEvm(pair) ? (big(directory.offerOf?.(m?.index)?.terms?.max_tip) ?? 0n) : BigInt(m?.fee_sat ?? 0);
+  }
+
+  // the user's own node's address for its coin, if NEAR Intents can use it
+  async function ownFor(d) {
+    const a = await ownAddress(d.key);
+    const via = await viaToken(d.pair);
+    if (!a || !via) return null;
+    return addressProblem(via.blockchain, a) && !(testOk && testAddress(via.blockchain, a)) ? null : a;
+  }
+
+  function routeSnap(j, v) {
+    j.route = {
+      ...j.route,
+      state: typeof v.state === "string" ? v.state : j.route.state,
+      outcome: v.outcome ?? null,
+      zec_zat: v.amounts?.zec_zat ?? j.route.zec_zat,
+      in_max: v.amounts?.in_max ?? j.route.in_max,
+      out_min: v.amounts?.out_min ?? j.route.out_min,
+      held_zat: v.zec?.held_zat ?? null,
+      paid: v.legs?.[0]?.counter_units ?? null,
+      out: v.legs?.[1]?.counter_units ?? null,
+      swaps: (v.legs ?? []).flatMap((l) => [l?.swap_id, ...(l?.earlier_swaps ?? [])]).filter((x) => typeof x === "string"),
+    };
+  }
+
+  // Create the route (routes.mjs buildRoute's body), paying into `payoutTo` if NEAR Intents is next.
+  // null once it runs, else the answer to give.
+  async function createRoute(j, body, payoutTo) {
+    let r;
+    try {
+      r = await router.call("POST", "/api/routes", { ...body, ...(payoutTo ? { payout_to: payoutTo } : {}) });
+    } catch {
+      return { status: 502, body: { error: "Can't reach the private swap service. Is ferry-route running?" } };
+    }
+    if ((r.status !== 201 && r.status !== 200) || typeof r.body?.id !== "string") return { status: r.status >= 400 ? r.status : 502, body: { error: r.body?.error ?? "The private swap didn't start." } };
+    if (r.body.state === "failed") return { status: 409, body: { error: String(r.body.note || "The private swap didn't start. Nothing moved.").replace(/\bmaker\b/gi, "partner") } };
+    j.route.id = r.body.id;
+    routeSnap(j, r.body);
+    j.state = "route";
+    note(j, "route_started", `Private swap started: ${unitsText(BigInt(body.max_in), { symbol: pairLabel(j.from)?.pair.split("/")[1] ?? j.from, decimals: FERRY_ASSETS[j.from]?.decimals ?? 8 })} at most, through ${(body.zec_zat / 1e8).toFixed(4)} shielded ZEC, for ${pairLabel(j.to)?.pair.split("/")[1] ?? j.to}${payoutTo ? ", paid to NEAR Intents' deposit address" : ""}`);
+    return null;
+  }
+
+  // ---------------------------------------------------------------- POST /api/near/combo
+  // {kind: "route-near" | "near-route" | "near-near",
+  //  route: {from: A, to: C, zec_zat, maker1, maker2, max_in, min_out, pause}   the card's private swap
+  //  asset_in, amount_in, refund_address, min_mid     NEAR Intents first: send amount_in of X (min_mid:
+  //                                                   the least A the card counted on); refunds of X
+  //  asset_out, address, min_asset_out}               NEAR Intents last: Y to `address`, at least this
+  // route-near starts the route now, paying into a 1Click deposit address made here (payout_to, never
+  // a browser's); the others wait for the person's deposit, then start the route (and ask the second
+  // quote) once NEAR Intents delivered coin A into their own B node, at the price then, never under
+  // the person's own limits (scaled to the ZEC the coin then buys).
+  async function startCombo(body, { admit: gate = admit, refused = () => {} } = {}) {
+    const bad = (error, field) => ({ status: 400, body: { error, ...(field ? { field } : {}) } });
+    if (!execution) return { status: 403, body: { error: "Private swaps with NEAR Intents run on your own Ferry node: they pay out to an address you choose, which this public demo can't allow." } };
+    if (!router) return { status: 503, body: { error: "Private swaps aren't available on this server." } };
+    const kind = body?.kind;
+    if (!COMBO_KINDS.includes(kind)) return bad('kind must be "route-near", "near-route" or "near-near"');
+    const front = kind !== "route-near";
+    const back = kind !== "near-route";
+    const legs = await router.legs();
+    if (!legs) return { status: 503, body: { error: "Can't reach the private swap service. Try again in a moment." } };
+    const rt = body?.route ?? {};
+    const { from, to } = rt;
+    if (typeof from !== "string" || typeof to !== "string" || !canRoute(legs, from, to)) return bad("Private swaps can't go that way here.");
+    const pause = rt.pause ?? "standard";
+    if (typeof pause !== "string" || !Object.hasOwn(PAUSES, pause)) return bad('pause must be "off", "standard" or "long"');
+    const zat = rt.zec_zat;
+    if (!Number.isSafeInteger(zat) || zat <= ROUTE_FEE_ZAT) return bad("zec_zat must be a positive whole number of zatoshi");
+    if (zat > maxZat) return bad(`This server is limited to ${(maxZat / 1e8).toFixed(2)} ZEC per swap`);
+    if (zat < minZat) return bad(`The smallest swap here is ${(minZat / 1e8).toFixed(2)} ZEC`);
+    const routeMin = big(rt.min_out);
+    if (routeMin == null || routeMin <= 0n) return bad("min_out must be a whole number of the coin's smallest units");
+    const viaIn = front ? await viaToken(from) : null;
+    const viaOut = back ? await viaToken(to) : null;
+    if ((front && !viaIn) || (back && !viaOut)) return bad("NEAR Intents doesn't take that coin here");
+    const assetIn = front && typeof body.asset_in === "string" ? await tokenOf(body.asset_in) : null;
+    const assetOut = back && typeof body.asset_out === "string" ? await tokenOf(body.asset_out) : null;
+    if ((front && !assetIn) || (back && !assetOut)) return bad("NEAR Intents doesn't list that token");
+    // the same asset at both ends puts about the same amount on both: that links them
+    if (symbolFamily(front ? assetIn.symbol : assetOf(from)) === symbolFamily(back ? assetOut.symbol : assetOf(to))) return bad("Pick two different coins: the same coin at both ends would link them.");
+    let address = null;
+    let refundAddress = null;
+    if (back) {
+      const p = addressProblem(assetOut.blockchain, body?.address);
+      if (p) return bad(p, "address");
+      address = String(body.address).trim();
+    }
+    if (front) {
+      const p = addressProblem(assetIn.blockchain, body?.refund_address);
+      if (p) return bad(p, "refund_address");
+      refundAddress = String(body.refund_address).trim();
+    }
+    const minAssetOut = back ? big(body?.min_asset_out) : null;
+    if (back && (minAssetOut == null || minAssetOut <= 0n)) return bad("min_asset_out must be a whole number of the token's smallest units");
+    const amountIn = front ? big(body?.amount_in) : null;
+    const minMid = front ? big(body?.min_mid) : null;
+    if (front && (amountIn == null || amountIn <= 0n || minMid == null || minMid <= 0n)) return bad("amount_in and min_mid must be whole numbers of the coins' smallest units");
+
+    // the user's own nodes where NEAR Intents delivers coin A, and where coin C's refunds come back
+    const nodeIn = front ? (await daemons.list("buy")).find((d) => d.pair === from) : null;
+    const nodeOut = back ? (await daemons.list("sell")).find((d) => d.pair === to) : null;
+    if ((front && !nodeIn) || (back && !nodeOut)) return { status: 409, body: { error: "This server doesn't front your Ferry node for that coin, so NEAR Intents has nowhere to deliver it." } };
+    if ([nodeIn, nodeOut].some((d) => d && !canRun(d.status))) return { status: 409, body: { error: "NEAR Intents runs on mainnet: your Ferry node for this coin is on a test network." } };
+    if (nodeOut && !hasPayout(nodeOut.status)) return { status: 501, body: { error: "Your Ferry node can't pay out to NEAR Intents yet: it needs a ferryd with payout_to. Update it and try again." } };
+
+    const blocked = await gate({ key: (nodeIn ?? nodeOut).key, pair: from, kind: front ? "route-later" : "route" });
+    if (blocked) return blocked;
+    const fail = (r) => {
+      refused();
+      return r;
+    };
+    const ownIn = nodeIn ? await ownFor(nodeIn) : null;
+    const ownOut = nodeOut ? await ownFor(nodeOut) : null;
+    if ((nodeIn && !ownIn) || (nodeOut && !ownOut)) return fail({ status: 409, body: { error: "Couldn't read an address of your Ferry node that NEAR Intents can use. Is it running, on mainnet?" } });
+
+    const now = Date.now();
+    const j = {
+      id: `c${randomBytes(8).toString("hex")}`,
+      kind,
+      state: front ? "deposit" : "route",
+      outcome: null,
+      created_at: Math.floor(now / 1000),
+      updated_at: Math.floor(now / 1000),
+      from,
+      to,
+      pause,
+      asset_in: assetIn ? tokenView(assetIn) : null,
+      asset_out: assetOut ? tokenView(assetOut) : null,
+      via_in: viaIn ? { id: viaIn.assetId, symbol: viaIn.symbol, decimals: viaIn.decimals } : null,
+      via_out: viaOut ? { id: viaOut.assetId, symbol: viaOut.symbol, decimals: viaOut.decimals } : null,
+      address,
+      refund_address: refundAddress,
+      own_in: ownIn,
+      own_out: ownOut,
+      daemon_in: nodeIn?.key ?? null,
+      daemon_out: nodeOut?.key ?? null,
+      agreed: { zec_zat: zat, min_out: routeMin.toString(), min_asset_out: minAssetOut?.toString() ?? null },
+      route: { id: null, state: null, outcome: null, zec_zat: null, in_max: null, out_min: null, held_zat: null, paid: null, out: null, swaps: [] },
+      front: null,
+      back: null,
+      problem: null,
+      timeline: [],
+    };
+    const signedNote = verifySignatures ? "signature checked" : "signature not checked";
+    if (front) {
+      const req = { ...hopBody("in", viaIn, assetIn, amountIn, { address: refundAddress, own: ownIn }), deadline: ISO(now + buyDeadlineSecs * 1000) };
+      const got = await realQuote(req, { memoOk: true });
+      if (!got.ok) return fail(got);
+      if (BigInt(got.part.min_amount_out) < minMid) return fail({ status: 409, body: { error: "The price moved: NEAR Intents now delivers less than your quote counted on. Check the new quote and try again.", code: "price_moved" } });
+      j.front = got.part;
+      note(j, "near_quote", `NEAR Intents quoted at least ${unitsText(got.part.min_amount_out, viaIn)} into your Ferry node for ${unitsText(amountIn, assetIn)} (signed by 1Click; ${signedNote})`);
+      note(j, "deposit_waiting", `Waiting for your ${assetIn.symbol} at NEAR Intents' deposit address`);
+    } else {
+      const list = await directory.list();
+      const built = buildRoute({ from, to, zec_zat: zat, maker1: rt.maker1, maker2: rt.maker2, max_in: rt.max_in, min_out: rt.min_out, pause }, { list, resolve: directory.resolve, legs, maxZat, minZat });
+      if (built.error) return fail({ status: built.status, body: { error: built.error } });
+      // NEAR Intents is quoted at the least swap 2 may pay, less its payout fee: more converts too
+      const floor = BigInt(built.body.min_out) - payoutFee(list, built.body.maker2[0]?.name, to);
+      if (floor <= 0n) return fail(bad("That's too little to get anything after fees."));
+      const req = { ...hopBody("out", viaOut, assetOut, floor, { address, own: ownOut }), deadline: ISO(now + sellDeadlineSecs * 1000) };
+      const got = await realQuote(req, { memoOk: false });
+      if (!got.ok) return fail(got);
+      if (BigInt(got.part.min_amount_out) < minAssetOut) return fail({ status: 409, body: { error: "The price moved: NEAR Intents now promises less than you agreed to. Check the new quote and try again.", code: "price_moved" } });
+      j.back = got.part;
+      note(j, "near_quote", `NEAR Intents quoted at least ${unitsText(got.part.min_amount_out, assetOut)} for ${unitsText(floor, viaOut)} or more (signed by 1Click; ${signedNote})`);
+      const r = await createRoute(j, built.body, got.part.deposit_address);
+      if (r) return fail(r);
+    }
+    combos.unshift(j);
+    if (combos.length > 200) combos = combos.filter((x, i) => i < 200 || comboActive(x));
+    save();
+    return { status: 201, body: comboView(j) };
+  }
+
+  function detailsOf(d) {
+    return {
+      amount_in: digits(d.amountIn),
+      amount_out: digits(d.amountOut),
+      deposited: digits(d.depositedAmount),
+      refunded: digits(d.refundedAmount),
+      refund_reason: typeof d.refundReason === "string" ? d.refundReason.slice(0, 80) : null,
+      origin_txs: txList(d.originChainTxHashes),
+      destination_txs: txList(d.destinationChainTxHashes),
+      near_txs: Array.isArray(d.nearTxHashes) ? d.nearTxHashes.filter((h) => typeof h === "string").slice(0, 10).map((h) => h.slice(0, 100)) : [],
+    };
+  }
+
+  // 1Click's status for one of a combo's NEAR parts
+  async function partStatus(j, part, words) {
+    if (Date.now() - part.checked_at < (j.state === "deposit" ? statusEveryMs * 3 : statusEveryMs)) return;
+    part.checked_at = Date.now();
+    let r;
+    try {
+      r = await link.status(part.deposit_address, part.deposit_memo);
+    } catch {
+      return;
+    }
+    if (r.status !== 200 || typeof r.body?.status !== "string") return;
+    const theirs = r.body.quoteResponse?.quote?.depositAddress;
+    if (theirs && theirs !== part.deposit_address) return;
+    part.details = detailsOf(r.body.swapDetails ?? {});
+    const s = r.body.status;
+    if (s !== part.status) {
+      part.status = s;
+      note(j, `near_${s.toLowerCase()}`, words[s] ?? `NEAR Intents: ${s}`);
+    }
+  }
+
+  async function followRoute(j) {
+    let r;
+    try {
+      r = await router.call("GET", `/api/routes/${j.route.id}`);
+    } catch {
+      return;
+    }
+    if (r.status !== 200 || !r.body) return;
+    const v = r.body;
+    routeSnap(j, v);
+    const c = j.via_out?.symbol ?? pairLabel(j.to)?.pair.split("/")[1] ?? j.to;
+    const a = j.via_in?.symbol ?? pairLabel(j.from)?.pair.split("/")[1] ?? j.from;
+    if (v.state === "done") {
+      if (j.back) {
+        j.state = "near_out";
+        note(j, "route_done", `Private swap done: the ${c} went to NEAR Intents' deposit address`);
+      } else {
+        j.state = "done";
+        j.outcome = "swapped";
+        note(j, "route_done", `Private swap done: your ${c} is in your Ferry node`);
+      }
+    } else if (v.state === "holding") {
+      if (j.state !== "holding") {
+        j.state = "holding";
+        note(j, "holding", "The second swap couldn't run at your price: your ZEC waits, shielded, in your wallet");
+      }
+    } else if (v.state === "failed") {
+      j.state = "failed";
+      j.outcome = v.outcome === "punished" ? "punished" : v.outcome === "refunded" ? "route_refunded" : "not_started";
+      note(j, "route_failed", v.outcome === "refunded" ? `The private swap was called off: your ${a} is back in your Ferry node` : v.outcome === "punished" ? "The first swap's deadline passed while your node was offline" : `The private swap didn't start. Your ${a} stays in your Ferry node`);
+    } else if (j.state === "holding") {
+      j.state = "route";
+      note(j, "route_resumed", "The second swap is running again");
+    }
+  }
+
+  function comboWait(j, why) {
+    if (j.problem !== why) {
+      j.problem = why;
+      j.updated_at = Math.floor(Date.now() / 1000);
+    }
+    j.funding_since ??= Date.now();
+    if (Date.now() - j.funding_since > fundWaitMs) comboHold(j, why);
+  }
+  function comboHold(j, why) {
+    j.state = "holding";
+    j.problem = why;
+    note(j, "holding", `The private swap couldn't start: ${why.replace(/\.$/, "")}. Your ${j.via_in?.symbol ?? "coin"} is in your Ferry node`);
+  }
+
+  // NEAR Intents delivered coin A: plan the route at today's prices, never under the person's own
+  // limits; for near-near, ask NEAR Intents for the second part; then start the route.
+  async function fundCombo(j) {
+    daemons.forget(j.daemon_in);
+    const status = await daemons.statusOf(j.daemon_in);
+    if (!status) return;
+    const balance = big(status.balances?.token_units) ?? big(status.balances?.btc_sat) ?? 0n;
+    const reserve = isEvm(j.from) ? 0n : BigInt(LOCK_FEE_RESERVE);
+    const got = big(j.front.details?.amount_out) ?? big(j.front.amount_out) ?? 0n;
+    const budget = (got < balance ? got : balance) - reserve;
+    if (budget <= 0n) return comboWait(j, balance < got ? "Waiting for your Ferry node's wallet to show the coins NEAR Intents delivered." : "What arrived doesn't cover a private swap.");
+    const list = await directory.list();
+    const plan = planRoute(list, j.from, j.to, budget);
+    if (plan.error) return comboWait(j, plan.error);
+    const legs = await router.legs();
+    if (!legs) return comboWait(j, "Can't reach the private swap service. Trying again.");
+    // the person's floor, for the ZEC this coin buys now
+    const agreed2 = BigInt(Math.max(1, j.agreed.zec_zat - ROUTE_FEE_ZAT));
+    const floor = (BigInt(j.agreed.min_out) * BigInt(plan.zat2)) / agreed2;
+    const minOut = j.any_price || plan.minOut >= floor ? plan.minOut : floor;
+    const built = buildRoute({ from: j.from, to: j.to, zec_zat: plan.zat, maker1: plan.maker1.name, maker2: [plan.maker2.name], max_in: Number(budget), min_out: Number(minOut), pause: j.pause }, { list, resolve: directory.resolve, legs, maxZat, minZat });
+    if (built.error) return comboWait(j, built.error);
+    let back = null;
+    if (j.kind === "near-near") {
+      const viaOut = await viaToken(j.to);
+      const assetOut = await tokenOf(j.asset_out.id);
+      if (!viaOut || !assetOut) return comboWait(j, "NEAR Intents doesn't list a coin of this swap right now. Trying again.");
+      const amount = BigInt(built.body.min_out) - payoutFee(list, built.body.maker2[0]?.name, j.to);
+      if (amount <= 0n) return comboWait(j, "What arrived is too little to get anything after fees.");
+      const req = { ...hopBody("out", viaOut, assetOut, amount, { address: j.address, own: j.own_out }), deadline: ISO(Date.now() + sellDeadlineSecs * 1000) };
+      const q = await realQuote(req, { memoOk: false });
+      if (!q.ok) return comboWait(j, q.body?.error ?? "NEAR Intents didn't quote the second part. Trying again.");
+      const wanted = (BigInt(j.agreed.min_asset_out) * BigInt(plan.zat2)) / agreed2;
+      if (!j.any_price && BigInt(q.part.min_amount_out) < wanted) return comboHold(j, `NEAR Intents now offers less ${j.asset_out.symbol} than you agreed to.`);
+      back = q.part;
+    }
+    const blocked = await admit({ key: j.daemon_in, pair: j.from, kind: "route", auto: true });
+    if (blocked) return comboWait(j, blocked.body?.error ?? "Waiting for another swap to finish.");
+    const r = await createRoute(j, built.body, back?.deposit_address ?? null);
+    if (r) return comboWait(j, r.body?.error ?? "The private swap didn't start. Trying again.");
+    if (back) {
+      j.back = back;
+      note(j, "near_quote", `NEAR Intents quoted at least ${unitsText(back.min_amount_out, j.asset_out)} for what the private swap pays (signed by 1Click; ${verifySignatures ? "signature checked" : "signature not checked"})`);
+    }
+    j.problem = null;
+    j.funding_since = null;
+  }
+
+  async function comboStep(j) {
+    const inSym = j.asset_in?.symbol;
+    const midIn = j.via_in?.symbol;
+    if (j.state === "deposit" || j.state === "near_in") {
+      await partStatus(j, j.front, {
+        KNOWN_DEPOSIT_TX: "NEAR Intents sees your deposit",
+        PENDING_DEPOSIT: "NEAR Intents is waiting for the deposit",
+        INCOMPLETE_DEPOSIT: "NEAR Intents got less than the quote needs",
+        PROCESSING: `NEAR Intents is swapping your ${inSym} for ${midIn}`,
+        SUCCESS: `NEAR Intents delivered ${midIn} to your Ferry node`,
+        REFUNDED: "NEAR Intents refunded the deposit",
+        FAILED: "NEAR Intents reported a failure",
+      });
+      const s = j.front.status;
+      if (["KNOWN_DEPOSIT_TX", "PROCESSING", "INCOMPLETE_DEPOSIT"].includes(s)) j.state = "near_in";
+      if (s === "SUCCESS") {
+        j.state = "funding";
+        j.funding_since = Date.now();
+      } else if (s === "REFUNDED" || s === "FAILED") {
+        j.state = "refunded";
+        j.outcome = "near_refunded";
+        note(j, "refunded", `Your ${inSym} goes back to your refund address`);
+      } else if (s === "PENDING_DEPOSIT" && Date.parse(j.front.deadline) + 600_000 < Date.now()) {
+        j.state = "expired";
+        j.outcome = "not_started";
+        note(j, "expired", "No deposit arrived before the deadline. Nothing moved");
+      }
+    }
+    if (j.state === "funding") return fundCombo(j);
+    if (j.state === "route" || (j.state === "holding" && j.route.id)) return followRoute(j);
+    if (j.state === "near_out") {
+      const outSym = j.asset_out.symbol;
+      await partStatus(j, j.back, {
+        KNOWN_DEPOSIT_TX: "NEAR Intents sees the payout",
+        PENDING_DEPOSIT: "NEAR Intents is waiting for the payout",
+        PROCESSING: `NEAR Intents is swapping the ${j.via_out.symbol} for ${outSym}`,
+        SUCCESS: `NEAR Intents delivered ${outSym}`,
+        REFUNDED: "NEAR Intents refunded the payout",
+        INCOMPLETE_DEPOSIT: "NEAR Intents got less than the quote needs",
+        FAILED: "NEAR Intents reported a failure",
+      });
+      if (j.back.status === "SUCCESS") {
+        j.state = "done";
+        j.outcome = "swapped";
+      } else if (j.back.status === "REFUNDED" || j.back.status === "FAILED") {
+        j.state = "refunded";
+        j.outcome = "near_refunded";
+        note(j, "refunded", `Your ${j.via_out.symbol} goes back to your Ferry node's own address`);
+      }
+    }
+  }
+
+  // "Swap now": a combo holding coin A (its route couldn't start) tries again at today's price
+  async function retryCombo(id) {
+    const j = combos.find((x) => x.id === id);
+    if (!j) return { status: 404, body: { error: "No such swap" } };
+    if (j.state !== "holding" || j.route.id) return { status: 409, body: { error: "Nothing to retry" } };
+    Object.assign(j, { state: "funding", funding_since: Date.now(), problem: null, any_price: true });
+    note(j, "retry", "You asked to go on at today's price");
+    await fundCombo(j);
+    save();
+    return { status: 200, body: comboView(j) };
+  }
+
+  const partView = (p) => {
+    if (!p) return null;
+    const { signed, checked_at, ...rest } = p;
+    void checked_at;
+    return { ...rest, signature: signed?.signature ?? null, timestamp: signed?.timestamp ?? null };
+  };
+  function comboView(j) {
+    const { funding_since, any_price, front, back, ...rest } = j;
+    void funding_since;
+    void any_price;
+    return { ...rest, front: partView(front), back: partView(back), problem: j.problem ?? null, explorer: EXPLORER_URL };
   }
 
   // What a browser gets: everything about the job but the signed quote's raw request, which is
@@ -1195,26 +1801,45 @@ export function nearDesk({
       const tokens = await tokenList();
       const [sell, buy] = await Promise.all([daemons.list("sell"), daemons.list("buy")]);
       const runs = (list) => list.some((d) => canRun(d.status) && FERRY_ASSETS[d.pair]);
+      const listed = async (list) => {
+        const out = [];
+        for (const d of list) if (FERRY_ASSETS[d.pair] && !out.includes(d.pair) && (await viaToken(d.pair))) out.push(d.pair);
+        return out;
+      };
+      const compose = tokens ? await composeInfo(sell, buy) : null;
       return {
         available: !!tokens,
         execution: { sell: runs(sell), buy: runs(buy) },
         // why not: "demo" (this server doesn't run NEAR swaps) or "mainnet" (its nodes are on test networks)
-        reason: runs(sell) || runs(buy) ? null : reason() ?? "mainnet",
+        reason: runs(sell) || runs(buy) || compose?.runs ? null : reason() ?? "mainnet",
         tokens: tokens ?? [],
         explorer: EXPLORER_URL,
+        // the coins a NEAR sell / buy can go through here (the user's nodes whose coin 1Click lists)
+        vias: { sell: tokens ? await listed(sell) : [], buy: tokens ? await listed(buy) : [] },
+        // private swaps with NEAR Intents at an end (null without a router)
+        compose,
       };
     },
     quote,
     start,
     retry,
+    hop,
+    startCombo,
+    retryCombo,
     tick,
     jobs: () => jobs.map(view),
     job: (id) => {
       const j = typeof id === "string" && JOB_ID.test(id) ? jobs.find((x) => x.id === id) : null;
       return j ? view(j) : null;
     },
-    // the daemons whose coins a NEAR buy is about to spend (it arrived, the Ferry swap hasn't started)
-    holds: () => new Set(jobs.filter((j) => j.kind === "buy" && j.state === "funding").map((j) => j.daemon)),
+    combos: () => combos.map(comboView),
+    combo: (id) => {
+      const j = typeof id === "string" && COMBO_ID.test(id) ? combos.find((x) => x.id === id) : null;
+      return j ? comboView(j) : null;
+    },
+    // the daemons whose coins a NEAR buy, or a private swap NEAR Intents delivered into, is about to
+    // spend (it arrived, the swap hasn't started)
+    holds: () => new Set([...jobs.filter((j) => j.kind === "buy" && j.state === "funding").map((j) => j.daemon), ...combos.filter((j) => j.state === "funding").map((j) => j.daemon_in)]),
     stop: () => timer && clearInterval(timer),
   };
 }
@@ -1227,6 +1852,11 @@ export function nearDesk({
 //   GET  /api/near/jobs             every NEAR swap, newest first
 //   GET  /api/near/status/:id       one of them
 //   POST /api/near/jobs/:id/retry   a buy holding its coin tries the Ferry swap again
+//   POST /api/near/hop              NEAR Intents' part of a private swap, priced alone (dry; `limit`)
+//   POST /api/near/combo            start a private swap with NEAR Intents at an end (`admit`)
+//   GET  /api/near/combos           every one, newest first
+//   GET  /api/near/combo/:id        one of them
+//   POST /api/near/combos/:id/retry one holding its coin (its route couldn't start) tries again
 // `origin(req)`: an error when the request's Origin may not post here. Returns false for a path it
 // doesn't serve.
 export function nearRoutes(desk, { send, readBody, origin = () => null, limit = () => null, admit = async () => null }) {
@@ -1286,6 +1916,40 @@ export function nearRoutes(desk, { send, readBody, origin = () => null, limit = 
     if (again) {
       if ((await post(req, res)) === undefined) return true;
       const r = await desk.retry(again[1]);
+      send(res, r.status, r.body);
+      return true;
+    }
+    if (path === "/api/near/hop") {
+      const body = await post(req, res);
+      if (body === undefined) return true;
+      const wait = limit(req);
+      if (wait) return send(res, 429, { error: "Too many price requests. Try again in a minute." }, { "retry-after": String(wait) }), true;
+      const r = await desk.hop(body);
+      send(res, r.status, r.body);
+      return true;
+    }
+    if (path === "/api/near/combo") {
+      const body = await post(req, res, 4096);
+      if (body === undefined) return true;
+      const r = await desk.startCombo(body, { admit: (what) => admit(req, what), refused: () => req.ferryRefused?.() });
+      send(res, r.status, r.body);
+      return true;
+    }
+    if (path === "/api/near/combos") {
+      if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, { error: "Method not allowed" }), true;
+      send(res, 200, desk.combos());
+      return true;
+    }
+    const combo = path.match(/^\/api\/near\/combo\/(c[0-9a-f]{16})$/);
+    if (combo) {
+      const v = desk.combo(combo[1]);
+      send(res, v ? 200 : 404, v ?? { error: "No such swap" });
+      return true;
+    }
+    const comboAgain = path.match(/^\/api\/near\/combos\/(c[0-9a-f]{16})\/retry$/);
+    if (comboAgain) {
+      if ((await post(req, res)) === undefined) return true;
+      const r = await desk.retryCombo(comboAgain[1]);
       send(res, r.status, r.body);
       return true;
     }

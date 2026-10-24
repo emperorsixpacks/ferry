@@ -86,6 +86,10 @@
 //   DEMO_NEAR_QUOTES_PER_MIN [40]  DEMO_NEAR_QUOTES_PER_MIN_TOTAL [400]  NEAR quotes per IP / in all
 //   A NEAR start takes the swap guards: the caps, both rate limits, one live swap per pair and the
 //   router idle; the Ferry buy that follows a NEAR delivery waits for the pair's daemons to be idle.
+//   With FERRY_ROUTER_URL too, a private swap can have NEAR Intents at an end (POST /api/near/combo:
+//   coin → NEAR asset, NEAR asset → coin, NEAR → NEAR), with the route guards (two starts, nothing
+//   else moving), the partners mapped here (buildRoute), and the route's payout_to set here to a
+//   1Click deposit address this server made, never one from a browser. Only with FERRY_NEAR=1.
 //
 // The daemons see no browser Origin header: this server strips it after its own PUBLIC_ORIGIN
 // check, so ferryd's --ui-origin allowlist doesn't need to know the public domain.
@@ -232,8 +236,11 @@ const NEAR = NEAR_QUOTES
       sellDeadlineSecs: Number(env.FERRY_NEAR_SELL_DEADLINE_SECS ?? 86_400),
       buyDeadlineSecs: Number(env.FERRY_NEAR_BUY_DEADLINE_SECS ?? 10_800),
       limits: { maxZat: DEMO_MAX_ZAT, minZat: DEMO_MIN_ZAT },
-      // the Ferry buy that follows a NEAR delivery: when the pair's daemons and the router are idle
-      admit: async ({ key }) => pairIdle(key),
+      // the Ferry buy that follows a NEAR delivery: when the pair's daemons and the router are idle;
+      // a private swap that follows one: when no route moves and no swap runs anywhere
+      admit: async ({ key, kind }) => (kind === "route" ? routeIdle() : pairIdle(key)),
+      // private swaps with NEAR Intents at an end: the route through the user's router
+      router: ROUTER,
     })
   : null;
 const nearPerIp = rateLimit(Number(env.DEMO_NEAR_QUOTES_PER_MIN ?? 40));
@@ -337,14 +344,31 @@ async function pairIdle(key) {
   return null;
 }
 
+// Nothing moving that a route could collide with: no route, no swap on any daemon. null when idle,
+// else the 409 (or 502) to answer.
+async function routeIdle() {
+  if (!ROUTER) return { status: 503, body: { error: "Private swaps aren't available on this server." } };
+  const [moving, live] = await Promise.all([ROUTER.busy(), anySwapLive()]);
+  if (moving === null || live === null) return { status: 502, body: { error: "Can't reach the private swap service or a daemon. Try again in a moment." } };
+  if (moving) return { status: 409, body: { error: "A private swap is already in progress. Try again when it finishes." } };
+  if (live) return { status: 409, body: { error: "A swap is already in progress. Try again when it finishes." } };
+  return null;
+}
+
 // A NEAR swap's start: a sell starts its Ferry swap now (the pair idle, one start); a buy only takes
-// a start (its Ferry swap waits for NEAR Intents, and then for the pair to be idle).
+// a start (its Ferry swap waits for NEAR Intents, and then for the pair to be idle). A private swap
+// with NEAR Intents at an end is two swap starts: now when it starts now (everything idle), else
+// when NEAR Intents has delivered its coin (and then waits for everything to be idle).
 async function nearAdmit(req, { key, kind }) {
   if (kind === "sell") {
     const busy = await pairIdle(key);
     if (busy) return busy;
   }
-  return startsRefused(req, 1);
+  if (kind === "route") {
+    const busy = await routeIdle();
+    if (busy) return busy;
+  }
+  return startsRefused(req, kind === "route" || kind === "route-later" ? 2 : 1);
 }
 
 // whether any daemon this server fronts has a swap that isn't over; null if one can't be asked
