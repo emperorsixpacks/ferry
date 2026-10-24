@@ -7,6 +7,10 @@
 //!   ferry-zec-signer sign <in.pczt> <out.pczt>      (ask hex on stdin)
 //!       Signs every Ironwood/Orchard spend still awaiting a signature with
 //!       rsk = ask + alpha (RedPallas SpendAuth over the transaction's shielded sighash).
+//!   ferry-zec-signer spends <pczt>
+//!       The values of the notes a PCZT's Ironwood and Orchard actions spend, as
+//!       `ironwood=<v>,<v>… orchard=<v>,…` (zatoshi; dummy spends show as 0). Used to make sure
+//!       a sweep includes the lock note.
 //!   ferry-zec-signer pools <file>
 //!       What a PCZT or a raw transaction (binary or hex) touches, as one line of `key=count`:
 //!       transparent_inputs, transparent_outputs, sapling_spends, sapling_outputs,
@@ -193,14 +197,41 @@ fn pools(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn spends(path: &str) -> anyhow::Result<()> {
+    let pczt = Pczt::parse(&fs::read(path)?).map_err(|e| anyhow!("parse PCZT: {e:?}"))?;
+    fn values(bundle: &orchard::pczt::Bundle, out: &mut Vec<u64>) {
+        for action in bundle.actions() {
+            out.push(action.spend().value().map_or(0, |v| v.inner()));
+        }
+    }
+    let (mut iw, mut or) = (vec![], vec![]);
+    // The signing entry points are the public way into the parsed bundles; these closures
+    // only read, so the PCZT is left as it was.
+    Signer::new(pczt)
+        .sign_ironwood_with(|_, b, _| -> Result<(), OrchardParseError> {
+            values(b, &mut iw);
+            Ok(())
+        })
+        .map_err(|e| anyhow!("ironwood: {e:?}"))?
+        .sign_orchard_with(|_, b, _| -> Result<(), OrchardParseError> {
+            values(b, &mut or);
+            Ok(())
+        })
+        .map_err(|e| anyhow!("orchard: {e:?}"))?;
+    let join = |v: &[u64]| v.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+    println!("ironwood={} orchard={}", join(&iw), join(&or));
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         [_, "ufvk", network, fvk] => ufvk(network, fvk),
         [_, "sign", input, output] => sign(input, output),
         [_, "pools", path] => pools(path),
+        [_, "spends", path] => spends(path),
         _ => bail!(
-            "usage: ferry-zec-signer ufvk <regtest|test|main> <fvk hex> | sign <in.pczt> <out.pczt> (ask hex on stdin) | pools <pczt or tx>"
+            "usage: ferry-zec-signer ufvk <regtest|test|main> <fvk hex> | sign <in.pczt> <out.pczt> (ask hex on stdin) | pools <pczt or tx> | spends <pczt>"
         ),
     }
 }

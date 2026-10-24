@@ -27,6 +27,19 @@ pub struct ZecStatus {
     pub shielded_balance: u64,
 }
 
+/// How a failed [`ZecLeg::send`] left things.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendFailure {
+    /// The transaction may have reached the network: never send again; wait for the note.
+    MaybeSent,
+    /// Failed before anything was broadcast (sync, note selection, building, proving,
+    /// signing); sending again is safe.
+    NotSent,
+    /// Refused before anything was broadcast, and retrying cannot help (for example, too few
+    /// Ironwood notes to fund it shielded-only).
+    Refused,
+}
+
 /// Zcash (Ironwood) operations, keyed by the joint full viewing key from
 /// [`crate::joint::joint_fvk_bytes`] (`ak || nk || rivk`, Orchard encoding).
 pub trait ZecLeg: Send + Sync {
@@ -45,11 +58,11 @@ pub trait ZecLeg: Send + Sync {
         amount: u64,
     ) -> impl Future<Output = Result<String, Self::Error>> + Send;
 
-    /// Whether `err`, returned by [`ZecLeg::send`], means the send was refused before anything
-    /// was broadcast and retrying cannot help (for example, too few Ironwood notes to fund it
-    /// shielded-only). Any other send error may have reached the network.
-    fn send_refused(&self, _err: &Self::Error) -> bool {
-        false
+    /// What an error returned by [`ZecLeg::send`] says about the network. Only report
+    /// [`SendFailure::NotSent`] or [`SendFailure::Refused`] when nothing can have been
+    /// broadcast; the default assumes the worst.
+    fn send_failure(&self, _err: &Self::Error) -> SendFailure {
+        SendFailure::MaybeSent
     }
 
     /// Notes received by the joint address, found by scanning with the joint viewing key.
@@ -58,12 +71,16 @@ pub trait ZecLeg: Send + Sync {
         fvk: &[u8; 96],
     ) -> impl Future<Output = Result<Vec<ZecNote>, Self::Error>> + Send;
 
-    /// Spend every note of the joint address to our own wallet, authorizing with `ask`
-    /// (RedPallas, `rsk = ask + α`). Returns the txid.
+    /// Spend the joint address's notes to our own wallet, authorizing with `ask` (RedPallas,
+    /// `rsk = ask + α`). The sweep must include the lock note, a note worth at least
+    /// `lock_value`; one that would leave it behind is refused. Retrying after an error returns
+    /// the sweep already built if it may still confirm, rather than building another.
+    /// Returns the txid.
     fn sweep(
         &self,
         fvk: &[u8; 96],
         ask: &[u8; 32],
+        lock_value: u64,
     ) -> impl Future<Output = Result<String, Self::Error>> + Send;
 
     /// Confirmations of a transaction (`Some(0)` while in the mempool, `None` if unknown).

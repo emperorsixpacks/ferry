@@ -208,7 +208,13 @@ impl SwapRecord {
         // until we have seen it, so both parties show the same observer lines.
         let sweep_expected =
             matches!(self.outcome(), Some("swapped" | "refunded")) && self.zec_lock_txid.is_some();
-        self.swap.is_final()
+        // Z refunded without (knowingly) locking ZEC, but a send was attempted: keep watching
+        // the joint address, so a note that lands anyway is reclaimed rather than stranded.
+        let late_note_possible = self.role() == Role::Z
+            && self.state() == "Refunded"
+            && (self.zec_send_intent || self.has("zec_lock_refused") || self.has("zec_send_uncertain"));
+        !late_note_possible
+            && self.swap.is_final()
             && self.pending.is_empty()
             && (!sweep_expected || self.observer_zec.iter().any(|(k, _)| k == "sweep"))
             && self

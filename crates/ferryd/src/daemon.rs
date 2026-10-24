@@ -11,7 +11,8 @@ use futures_util::FutureExt;
 use ferry_btc::bitcoin::{Address, Amount, Network, Transaction, Txid};
 use ferry_btc::rpc::{BitcoinRpc, RpcError};
 use ferry_core::{
-    accept, ChainEvent, Envelope, Event, Message, Policy, Proposal, Role, Spend, Swap, ZecLeg,
+    accept, ChainEvent, Envelope, Event, Message, Policy, Proposal, Role, SendFailure, Spend, Swap,
+    ZecLeg,
 };
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
@@ -813,6 +814,10 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             }
             Pending::SendZec { fvk, amount } => {
                 let fvk = fvk_from_hex(&fvk);
+                // Already refused (and applied) before a crash removed this entry: nothing to do.
+                if matches!(&rec.swap, Swap::Z(z) if !z.zec_locked()) {
+                    return Ok(None);
+                }
                 if rec.zec_send_intent {
                     if rec.zec_lock_txid.is_some() {
                         return Ok(None);
@@ -858,26 +863,41 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                         );
                         Ok(None)
                     }
-                    Err(e) if self.leg.send_refused(&e) => {
-                        // Refused before broadcasting: nothing is locked, and asking again
-                        // would be refused again. The BTC side cancels and B refunds.
-                        rec.zec_send_intent = false;
-                        tracing::error!(id = %rec.id, "zec lock refused: {e}");
-                        rec.log(
-                            "local",
-                            "zec_lock_refused",
-                            format!(
-                                "Refused to lock ZEC, nothing was sent: {e}. The swap now waits for tx_cancel and B's refund"
-                            ),
-                            None,
-                        );
-                        Ok(Some(Event::ZecLockRefused))
-                    }
-                    Err(e) => {
-                        // Whether it went out is unknown: the intent stays set (see above).
-                        tracing::warn!(id = %rec.id, "zec send: {e}");
-                        Err(Retry)
-                    }
+                    Err(e) => match self.leg.send_failure(&e) {
+                        SendFailure::Refused => {
+                            // Refused before broadcasting: nothing is locked, and asking again
+                            // would be refused again. The BTC side cancels and B refunds. The
+                            // state change is applied (and saved) here, while this SendZec is
+                            // still pending, so a crash cannot separate the two; the guard
+                            // above skips the SendZec if it runs again.
+                            rec.zec_send_intent = false;
+                            tracing::error!(id = %rec.id, "zec lock refused: {e}");
+                            rec.log(
+                                "local",
+                                "zec_lock_refused",
+                                format!(
+                                    "Refused to lock ZEC, nothing was sent: {e}. The swap now waits for tx_cancel and B's refund"
+                                ),
+                                None,
+                            );
+                            if let Err(err) = self.apply(rec, Event::ZecLockRefused) {
+                                tracing::error!(id = %rec.id, "applying the refused lock: {err}");
+                            }
+                            Ok(None)
+                        }
+                        SendFailure::NotSent => {
+                            // Nothing went out; sending again later is safe.
+                            rec.zec_send_intent = false;
+                            self.save(rec);
+                            tracing::warn!(id = %rec.id, "zec send (nothing sent, will retry): {e}");
+                            Err(Retry)
+                        }
+                        SendFailure::MaybeSent => {
+                            // Whether it went out is unknown: the intent stays set (see above).
+                            tracing::warn!(id = %rec.id, "zec send: {e}");
+                            Err(Retry)
+                        }
+                    },
                 }
             }
             Pending::SweepZec { fvk, ask } => {
@@ -887,7 +907,12 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 if rec.sweep_not_before.is_some_and(|t| now_ms() < t) {
                     return Err(Retry);
                 }
-                match self.leg.sweep(&fvk_from_hex(&fvk), ask.expose()).await {
+                let lock_value = rec.swap.session().params.zec_amount;
+                match self
+                    .leg
+                    .sweep(&fvk_from_hex(&fvk), ask.expose(), lock_value)
+                    .await
+                {
                     Ok(txid) => {
                         rec.zec_sweep_txid = Some(txid.clone());
                         let (kind, label) = match rec.role() {
@@ -1467,7 +1492,11 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         }
         let fvk = rec.swap.session().joint_fvk()?;
         let amount = rec.swap.session().params.zec_amount;
+        let mut lock_spent_by = None;
         for note in self.leg.watch(&fvk).await? {
+            if note.value >= amount && lock_spent_by.is_none() {
+                lock_spent_by = note.spent_by.clone();
+            }
             // B tracks the qualifying lock note; Z's lock txid only ever comes from its own send.
             if rec.role() == Role::B && note.value >= amount {
                 rec.zec_lock_txid.get_or_insert(note.txid.clone());
@@ -1480,9 +1509,13 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 confs: note.confirmations,
             }));
         }
+        // Swept means the lock note itself is spent by our sweep, not merely that a
+        // transaction of ours confirmed (it could have taken only other notes).
         if let Some(txid) = rec.zec_sweep_txid.clone() {
-            if let Some(confs) = self.leg.confirmations(&txid).await? {
-                out.push(Event::Chain(ChainEvent::ZecSwept { confs }));
+            if lock_spent_by.as_deref() == Some(txid.as_str()) {
+                if let Some(confs) = self.leg.confirmations(&txid).await? {
+                    out.push(Event::Chain(ChainEvent::ZecSwept { confs }));
+                }
             }
         }
         Ok(())

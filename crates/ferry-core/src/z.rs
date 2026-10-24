@@ -104,6 +104,10 @@ pub struct ZSwap {
     #[serde(default)]
     keypath_enc_sig: Option<EncryptedSignature>,
     zec_locked: bool,
+    /// The joint `ask`, kept when B refunded while we believed no ZEC was locked, so a note
+    /// that turns up at the joint address anyway can still be reclaimed.
+    #[serde(default)]
+    reclaim_ask: Option<Secret32>,
     lock_confs: u32,
     cancel_confs: Option<u32>,
 }
@@ -121,6 +125,7 @@ impl ZSwap {
             musig: None,
             keypath_enc_sig: None,
             zec_locked: false,
+            reclaim_ask: None,
             lock_confs: 0,
             cancel_confs: None,
         }
@@ -256,7 +261,9 @@ impl ZSwap {
                     redeem_enc_sig,
                     redeem_partial,
                 },
-                ZState::ZecLocked,
+                // B sends this only once it sees our note, so a refused lock that went out after
+                // all is accepted too (and counts as locked from here on).
+                ZState::ZecLocked | ZState::ZecLockRefused,
             ) => {
                 let txs = self.txs()?;
                 let ok = adaptor::verify_encrypted(
@@ -287,6 +294,7 @@ impl ZSwap {
                     self.keypath_enc_sig = Some(enc);
                 }
                 self.redeem_enc_sig = Some(redeem_enc_sig.clone());
+                self.zec_locked = true;
                 self.state = ZState::RedeemSigReceived;
                 Ok(vec![])
             }
@@ -318,6 +326,17 @@ impl ZSwap {
                             self.state = ZState::ZecLocked;
                         }
                         ZState::Cancelled => self.zec_locked = true,
+                        // B already refunded, and we kept the joint ask for exactly this.
+                        ZState::Refunded => {
+                            if let Some(ask) = self.reclaim_ask.clone() {
+                                self.zec_locked = true;
+                                self.state = ZState::ZecReclaiming;
+                                return Ok(vec![Action::SweepZec {
+                                    joint_fvk: self.session.joint_fvk()?,
+                                    ask,
+                                }]);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -358,11 +377,8 @@ impl ZSwap {
                     ZState::ZecReclaiming | ZState::ZecReclaimed | ZState::Refunded
                 ) =>
             {
-                if !self.zec_locked {
-                    self.state = ZState::Refunded;
-                    return Ok(vec![]);
-                }
-                // Our completed refund signature is on chain: s − ŝ reveals b.
+                // Our completed refund signature is on chain: s − ŝ reveals b. Extracted even
+                // when we believe nothing was locked, in case a note turns up later.
                 let enc = self.refund_enc_sig.as_ref().expect("sent with CancelSigs");
                 let sig_z = SwapTxs::witness_sig(tx, Spend::Refund, Role::Z)?;
                 let y = adaptor::recover(&self.session.b_encryption_key(), enc, &sig_z).ok_or(
@@ -370,6 +386,11 @@ impl ZSwap {
                 )?;
                 let b = self.session.peer_share_from_secp(&y)?;
                 let ask = self.session.joint_ask(&b)?;
+                if !self.zec_locked {
+                    self.reclaim_ask = Some(Secret32::new(*ask));
+                    self.state = ZState::Refunded;
+                    return Ok(vec![]);
+                }
                 self.state = ZState::ZecReclaiming;
                 Ok(vec![Action::SweepZec {
                     joint_fvk: self.session.joint_fvk()?,

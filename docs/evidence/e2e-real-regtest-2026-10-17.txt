@@ -1,43 +1,73 @@
-== happy: B sweeps the joint note, Z redeems the BTC
-  swap 94d757051621c8267171b8fa10790aceb1a9ee542456bcf156556ae0e6edd556
+[demo] building ferryd
+[demo] starting bitcoind (bitcoin/bitcoin:28.1) on 127.0.0.1:18843
+[demo] starting zebrad (zfnd/zebra:7.0.0-rc.0) on 127.0.0.1:18332 and zainod on :8237
+[demo] mining 105 ZEC blocks (coinbase maturity is 100; ~2s a block under emulation)
+Generating a new age identity to encrypt the mnemonic phrase
+Generating a new age identity to encrypt the mnemonic phrase
+[demo] funded Z with 500000000 zat of shielded (Ironwood) ZEC
+[demo] mined 101 blocks to the miner wallet
+[demo] starting B (bram, maker at 410000 sat/ZEC): API :7502, peer :7512
+[demo] starting Z (zoe): API :7501, peer :7511
+[demo] funded bram with 1 BTC
+[demo] ready: Z http://127.0.0.1:7501  B http://127.0.0.1:7502 (maker http://127.0.0.1:7512)  bitcoind http://127.0.0.1:18843  (ZEC: devtool, a block every 5s)
+[demo] API tokens and UI settings: /Users/ram/Desktop/ferry/.e2e-real/env
+[demo] UI: cd web && source /Users/ram/Desktop/ferry/.e2e-real/env && pnpm dev:ui
+
+== happy: B sweeps the joint note, Z redeems the BTC; foreign dust arrives meanwhile
+  swap 86ef532f75cbc7372baabdc64270a1073712ab5dfc80469f02ba7436fc17ace4
+  [PASS] foreign dust reached the joint address while B waited to sweep: 3 note(s) of 20000 zat
   [PASS] outcomes swapped/swapped: BtcRedeemed/ZecSwept
-  [PASS] B broadcast the ZEC sweep: 92a4ccee300e273e7a40023bb2ba9f8570ce1198cc287b51d99252acea445467
-  [PASS] B received the ZEC: +99990000 zat
+  [PASS] B broadcast the ZEC sweep: 49e952955697568748b73b5eca79777c02f2b0f05e8707d610e5520188ec6e09
+  [PASS] B received at least the swap amount (less fees) despite the dust: +99990000 zat
   [PASS] Z received the BTC: +408000 sat
   [PASS] Z spent the ZEC: -100025000 zat
-  lock 15a265b45b50329a6c0a96243a9d19940bf798a04754864fb06c918adca63641  sweep 92a4ccee300e273e7a40023bb2ba9f8570ce1198cc287b51d99252acea445467  btc redeem 26c744ea4f496fd223b666c5c3cbb3e91959a4c6b8aaabcc1718177a1e3d93b3
+  lock 472d5f78cbf797231aea931609e483d60525c73e71ae99ea3d8583fd54101b65  sweep 49e952955697568748b73b5eca79777c02f2b0f05e8707d610e5520188ec6e09  btc redeem b32e6661ffbfa83d162955c4a6ba5a634d6e84046ba8ff8484c91c23832f1e38
   [PASS] H4 B's sweep: Z sees the spend of the joint note: full transaction downloaded
   [PASS] H4 B's sweep: Z recovers no recipient or amount: sent_notes=[] received=[]
   [PASS] happy ZEC lock is Ironwood-only: transparent_inputs=0 transparent_outputs=0 sapling_spends=0 sapling_outputs=0 orchard_actions=0 ironwood_actions=5
   [PASS] happy B's sweep is Ironwood-only: transparent_inputs=0 transparent_outputs=0 sapling_spends=0 sapling_outputs=0 orchard_actions=0 ironwood_actions=2
 
 == refund: Z stalls after locking ZEC, B refunds, Z reclaims
-  swap 30a05b1cf7a31bbc17070f317d0dab1fade732d063e5f616e2abd1726a683a82
+  swap 6ef7ac657e3ac91605f1d4f9be362a5913d213b3a7ae864a36bb99b970a22241
   Z stalled in ZecLocked
   [PASS] outcomes Z refunded (reclaimed) / B refunded: ZecReclaimed/Refunded
-  [PASS] Z broadcast the ZEC reclaim: 00022270d008ea77817ba55915c6fce120afc1c265dd062c49ee9cd557706574
+  [PASS] Z broadcast the ZEC reclaim: 7915d3050e03bd3c03e89d908e1c7b4a83d3496c13557c3d8ad4fc3352e78f6c
   [PASS] Z got its ZEC back (less fees): -20000 zat
-  lock f7a69939a386f2ba8d5e88d627593d7148aa8e99a347d61e89a3b426f25e4475  cancel 0aa44d93afcf2a0e50d6ca7097c4243eba66c6dfb3d7164d2948282189d9e377  refund 806c48858d2bdf1cec677f4a8dfa84a55bb3fbbff958651bafb539c58590e3ec  reclaim 00022270d008ea77817ba55915c6fce120afc1c265dd062c49ee9cd557706574
+  lock 6dc5775e57abac562318b4bbe6856f22e030721334646509d638ad9cc64f8ba5  cancel 08d6121dcba5de13735e2e5d8fb9673d0792fd084fd9e012356d6fd8918bc814  refund e52369f75311215c896f0350d84df2a6164e60bbb14f4b64b12b98ca527e42d0  reclaim 7915d3050e03bd3c03e89d908e1c7b4a83d3496c13557c3d8ad4fc3352e78f6c
   [PASS] H4 Z's reclaim: B sees the spend of the joint note: full transaction downloaded
   [PASS] H4 Z's reclaim: B recovers no recipient or amount: sent_notes=[] received=[]
   [PASS] refund ZEC lock is Ironwood-only: transparent_inputs=0 transparent_outputs=0 sapling_spends=0 sapling_outputs=0 orchard_actions=0 ironwood_actions=2
   [PASS] refund Z's reclaim is Ironwood-only: transparent_inputs=0 transparent_outputs=0 sapling_spends=0 sapling_outputs=0 orchard_actions=0 ironwood_actions=2
 
 == punish: B stalls after locking BTC, Z cancels and punishes
-  swap e6d4614a3f1578bb471c13eae2025d8f26247b4d4d9c8bedb623ae473235f9f7
+  swap 3560885dbb43ec9488c44fc5c892abb59595475c7d9dc0dcef8ff904d8013470
   B stalled in BtcLocked
   [PASS] outcomes punished/punished: Punished/Punished
   [PASS] Z took B's BTC: +119000 sat
   [PASS] nobody swept the joint note
-  btc lock dc6da3abbe83993c0c65542cacdd5aecff861ba96a01e88127ed0165665b5066  zec lock acf3ad13ca34dc91b2f77baf3b7f61c4d9736f56696332e344c8c99aa24be6fa  cancel 19f9209526cae2a578d4dca504896d4fc358d6b4b778dbccfaebb930e72c4371  punish ecc37c8bdbd4f9fb2b439f64acf4555054bfd224222a5b611408ec49e80d6a70
+  btc lock a185658c97d4bd131f4f4a3d5325ff9c633cb7c4a30254a1658df79a22065c90  zec lock 3b1b85dc5aff929aa765ca52a874f30daea1e9852575c630be5700a83c009c92  cancel 89e47cec831e8a01c9f09ae1e2047887e7bebafc1a41882dd3f88b03ce2c7e4e  punish 42b276e3d379974120e64d69ee0fe9861cccdbdb963f66e37fcecd008bf11c0a
   [PASS] punish ZEC lock is Ironwood-only: transparent_inputs=0 transparent_outputs=0 sapling_spends=0 sapling_outputs=0 orchard_actions=0 ironwood_actions=2
+
+== refused: Z has transparent ZEC but too little Ironwood; the lock must be refused
+  Z: 369945000 zat spendable Ironwood, plus 200000000 zat transparent
+  swap cf8ab901a78b2188c182143e9ec02e34fa793a1e5deb496e4b340658b9ea8bec
+  [PASS] Z's wallet refused the lock: Refused to lock ZEC, nothing was sent: refused: our Ironwood notes total 369945000 zat, short of 369925000 zat plus fees, and Ferry never funds the lock from transparent or other shielded pools. The swap now waits for tx_cancel and B's refund
+  [PASS] nothing was sent to the joint address
+  [PASS] outcomes refunded/refunded (B got its BTC back): Refunded/Refunded
+  [PASS] Z's states went ZecLockRefused -> Refunded
+  [PASS] Z's Ironwood balance is untouched: 369945000 zat
+  btc lock 20dc9a2580a2762a605cc8bb5080165795fb58787b743c25e83cbe5b61a10eac  cancel fde7b26939a9a344a9ca67bf8dc8450817e1619cfdde24979c4d525288e94248  refund 5698310ef3537b72a7dd384ebc9fdbe49c3a28284496163ec469373709bed794
+
+== H4 positive control: a sweep WITHOUT --discard-ovk is visible to the counterparty
+  [PASS] H4 control: the observer sees the sender-OVK sweep: full transaction downloaded
+  [PASS] H4 control: the same query recovers the recipient of a sender-OVK sweep: sweep 7fd51ff494351b830016c0bea70d1c7e3dfa8b1c0dc492c0448b8712c984ef2c: sent_notes=[(49990000, 'uregtest17thjwcl996wz8nu6wyq6nsxs4mnpqclsqk0hzugdt47dk2743y6urhkefsfunujuvnrtapzc7v4frn2ju5x55ky2xulyjq00fcfzkfgk')]
 
 == every ZEC transaction, as mined
   swap    tx           txid                                                              t-in t-out sapling orchard ironwood
-  happy   ZEC lock     15a265b45b50329a6c0a96243a9d19940bf798a04754864fb06c918adca63641     0     0       0       0        5
-  happy   B's sweep    92a4ccee300e273e7a40023bb2ba9f8570ce1198cc287b51d99252acea445467     0     0       0       0        2
-  refund  ZEC lock     f7a69939a386f2ba8d5e88d627593d7148aa8e99a347d61e89a3b426f25e4475     0     0       0       0        2
-  refund  Z's reclaim  00022270d008ea77817ba55915c6fce120afc1c265dd062c49ee9cd557706574     0     0       0       0        2
-  punish  ZEC lock     acf3ad13ca34dc91b2f77baf3b7f61c4d9736f56696332e344c8c99aa24be6fa     0     0       0       0        2
+  happy   ZEC lock     472d5f78cbf797231aea931609e483d60525c73e71ae99ea3d8583fd54101b65     0     0       0       0        5
+  happy   B's sweep    49e952955697568748b73b5eca79777c02f2b0f05e8707d610e5520188ec6e09     0     0       0       0        2
+  refund  ZEC lock     6dc5775e57abac562318b4bbe6856f22e030721334646509d638ad9cc64f8ba5     0     0       0       0        2
+  refund  Z's reclaim  7915d3050e03bd3c03e89d908e1c7b4a83d3496c13557c3d8ad4fc3352e78f6c     0     0       0       0        2
+  punish  ZEC lock     3b1b85dc5aff929aa765ca52a874f30daea1e9852575c630be5700a83c009c92     0     0       0       0        2
 
 ALL PASS

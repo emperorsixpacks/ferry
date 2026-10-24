@@ -212,7 +212,12 @@ impl ZecLeg for MockZecLeg {
         })
     }
 
-    async fn sweep(&self, fvk: &[u8; 96], ask: &[u8; 32]) -> Result<String, MockZecError> {
+    async fn sweep(
+        &self,
+        fvk: &[u8; 96],
+        ask: &[u8; 32],
+        lock_value: u64,
+    ) -> Result<String, MockZecError> {
         let scalar = ferry_dleq::pallas_scalar_from_bytes(ask)
             .ok_or_else(|| MockZecError::Rejected("ask is not a canonical Pallas scalar".into()))?;
         let ak = ferry_dleq::pallas_bytes(&(ferry_dleq::spend_auth_g() * scalar));
@@ -235,6 +240,15 @@ impl ZecLeg for MockZecLeg {
             if value == 0 {
                 return Err(MockZecError::Rejected(
                     "no notes at the joint address".into(),
+                ));
+            }
+            if !c
+                .txs
+                .iter()
+                .any(|t| t.kind == Kind::Send && t.fvk == fvk && t.value >= lock_value)
+            {
+                return Err(MockZecError::Rejected(
+                    "the sweep would leave the lock note behind".into(),
                 ));
             }
             *c.balances.entry(self.owner.clone()).or_default() += value;
@@ -307,10 +321,11 @@ mod tests {
         assert!(b.confirmations(&txid).await.unwrap().unwrap() >= 1);
 
         let wrong = ferry_dleq::random_mutual_scalar(&mut OsRng);
-        assert!(b.sweep(&fvk, &wrong.to_repr()).await.is_err());
-        let sweep = b.sweep(&fvk, &ask.to_repr()).await.unwrap();
+        assert!(b.sweep(&fvk, &wrong.to_repr(), 600).await.is_err());
+        assert!(b.sweep(&fvk, &ask.to_repr(), 601).await.is_err(), "lock note missing");
+        let sweep = b.sweep(&fvk, &ask.to_repr(), 600).await.unwrap();
         assert_eq!(z.watch(&fvk).await.unwrap()[0].spent_by, Some(sweep));
-        assert!(z.sweep(&fvk, &ask.to_repr()).await.is_err(), "double spend");
+        assert!(z.sweep(&fvk, &ask.to_repr(), 600).await.is_err(), "double spend");
         assert_eq!(b.status().await.unwrap().shielded_balance, 600);
         assert_eq!(z.status().await.unwrap().shielded_balance, 400);
     }

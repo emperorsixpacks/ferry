@@ -52,6 +52,8 @@ struct Faults {
     refused_zec_lands_anyway: bool,
     /// ...and only shows up once tx_cancel is mined (B will not redeem by then).
     refused_zec_lands_after_cancel: bool,
+    /// ...and only shows up after B's refund is mined (Z has already finished as Refunded).
+    refused_zec_lands_after_refund: bool,
     /// Deliver the redeem adaptor only after this many lock confirmations.
     delay_redeem_adaptor_until: Option<u32>,
     /// B ignores the chain while the mined cancel has fewer confirmations than this.
@@ -293,10 +295,21 @@ impl Sim {
             for (_, mined) in self.chain.values_mut() {
                 mined.get_or_insert(h);
             }
-            if self.faults.refused_zec_lands_after_cancel && self.zec_note.is_none() {
+            if self.zec_note.is_none() {
                 if let Some(amount) = self.refused_amount {
-                    let cancel = self.txid(ferry_core::Spend::Cancel);
-                    if self.mined(&cancel) {
+                    let after = if self.faults.refused_zec_lands_after_cancel {
+                        Some(ferry_core::Spend::Cancel)
+                    } else if self.faults.refused_zec_lands_after_refund {
+                        Some(ferry_core::Spend::Refund)
+                    } else {
+                        None
+                    };
+                    // Strictly after: the spend was mined in an earlier block.
+                    if after.is_some_and(|sp| {
+                        self.chain
+                            .get(&self.txid(sp))
+                            .is_some_and(|(_, m)| m.is_some_and(|mh| mh < h))
+                    }) {
                         self.zec_note = Some((amount, h));
                     }
                 }
@@ -519,6 +532,33 @@ fn refused_lock_that_lands_after_cancel_is_reclaimed() {
         s.b_state() == BState::Refunded && s.z_state() == ZState::ZecReclaimed
     });
     sim.assert_sweep_valid(Role::Z);
+}
+
+#[test]
+fn refused_lock_that_lands_after_refund_is_reclaimed() {
+    let mut sim = Sim::new(Faults {
+        z_wallet_refuses_zec: true,
+        refused_zec_lands_after_refund: true,
+        ..Default::default()
+    });
+    // The note first appears in the block after B's refund confirms: Z sees the refund (and
+    // becomes Refunded, keeping b), then the note, and reclaims it.
+    sim.mine_until(40, |s| {
+        s.b_state() == BState::Refunded && s.z_state() == ZState::ZecReclaimed
+    });
+    sim.assert_sweep_valid(Role::Z);
+}
+
+#[test]
+fn redeem_adaptor_is_accepted_after_a_refused_lock_lands() {
+    // B only sends its adaptor once it sees the note; Z must not reject it as unexpected.
+    let mut sim = Sim::new(Faults {
+        z_wallet_refuses_zec: true,
+        refused_zec_lands_anyway: true,
+        ..Default::default()
+    });
+    sim.mine_until(40, |s| s.z_state() == ZState::BtcRedeemed);
+    assert!(sim.rejected.iter().all(|r| r.ends_with("already known")), "{:?}", sim.rejected);
 }
 
 #[test]
