@@ -278,6 +278,24 @@ for BTC, LTC, USDC or WETH) and NEAR Intents only ever touches the other coin.
 coins, so a visitor's address would be paid with them. Its server sets the field only to a
 deposit address it created itself.
 
+## Taking coins out of your Ferry ("Send to my wallet")
+
+`POST /api/withdraw` ([API.md](API.md#withdraw-send-to-my-wallet)) sends coins from your Ferry's
+wallets to an address you give. It is an owner action on your own node's control API: loopback
+only by default, and only whoever holds the API token can call it, the same token that already
+controls everything the node holds. Nothing about a swap partner changes: no partner can reach it
+or set where it pays. **The public demo must never expose it**: its daemons hold the operator's
+coins, so its server must not forward the call (the web server gates it, as it does `payout_to`).
+Ferry never spends what a running swap still needs (its lock, the fee reserve, the gas of its
+remaining claim, refund or penalty) and records each withdrawal before broadcasting it, so a
+crash neither loses nor repeats one. **ZEC leaves shielded only**: Ferry refuses a transparent
+destination, funds the payment from Ironwood notes and pays an Ironwood note, and refuses to sign
+anything else; it is sent from your own account, whose outgoing viewing key only you hold, so the
+joint-address concern behind sweeping with `--discard-ovk` does not arise. The deposit address
+Ferry shows (`GET /api/addresses`) has a shielded receiver only, so whatever a wallet sends there
+arrives shielded. On Bitcoin, Litecoin and EVM chains a withdrawal is an ordinary public payment
+from the node's wallet to your address.
+
 ## How we checked
 
 - `cargo test --workspace`: unit tests, a two-daemon simulation of every outcome above, and

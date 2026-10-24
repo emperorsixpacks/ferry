@@ -66,8 +66,37 @@ pub struct EvmDaemon<L> {
     logs: std::sync::Mutex<HashMap<String, LogCache>>,
     /// Our firm quotes, when making offers (crate::quote).
     pub quotes: Option<crate::quote::QuoteBook>,
-    /// The `POST /api/swaps` in progress, if any (crate::route).
+    /// The `POST /api/swaps` or `POST /api/withdraw` in progress, if any (crate::route).
     starts: crate::route::Starts,
+    /// "Send to my wallet" (crate::withdraw).
+    pub withdrawals: crate::withdraw::Withdrawals,
+}
+
+/// Gas a live swap may still spend, per action, for the reserve a withdrawal leaves in place
+/// (generous: FerryLock's lock is ~150k with the approve, a claim or refund under 100k).
+const GAS_LOCK: u64 = 300_000;
+const GAS_CLAIM: u64 = 200_000;
+const GAS_REFUND: u64 = 150_000;
+const GAS_PUNISH: u64 = 150_000;
+/// The reserve prices that gas at this many times today's max fee per gas (fees can rise
+/// before the action is due).
+const GAS_RESERVE_FACTOR: u64 = 2;
+/// A pending withdrawal is handed to the node again this often.
+const EVM_REBROADCAST_MS: u64 = 30_000;
+
+/// Whether a node's refusal of a raw transaction may mean it has (or had) this very one, or that
+/// its nonce is already used: then whether it pays is decided from its receipt, never assumed.
+fn maybe_known(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    [
+        "already known",
+        "known transaction",
+        "already imported",
+        "nonce too low",
+        "nonce has already been used",
+    ]
+    .iter()
+    .any(|k| m.contains(k))
 }
 
 /// A swap's events in the blocks before `next`.
@@ -247,7 +276,9 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             state.swaps.insert(rec.id.clone(), rec);
         }
         let (events, _) = broadcast::channel(256);
+        let withdrawals = crate::withdraw::Withdrawals::open(&cli.data_dir, events.clone())?;
         let daemon = EvmDaemon {
+            withdrawals,
             price,
             role,
             offer,
@@ -498,8 +529,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             )?
         };
         if let Some(to) = &route.sweep_to {
-            self.leg
-                .check_address(to)
+            crate::withdraw::check_zec_destination(&self.leg, to)
                 .await
                 .map_err(|e| ApiError(400, format!("sweep_to: {e}")))?;
         }
@@ -697,18 +727,333 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
         Ok(id)
     }
 
-    pub async fn funding_addresses(&self) -> Result<serde_json::Value, ApiError> {
+    /// Where the owner funds this node: our EVM account (the token and the chain's gas coin both
+    /// go there; it is one account, so `fresh` changes nothing) and our own shielded address.
+    pub async fn funding_addresses(&self, _fresh: bool) -> Result<serde_json::Value, ApiError> {
         Ok(serde_json::json!({
             "role": self.role,
             "name": self.cli.name,
             "btc": {
+                "coin": self.offer.token_symbol.to_lowercase(),
+                "ticker": self.offer.token_symbol,
                 "network": self.offer.network,
+                "chain_id": self.chain_id,
                 "address": self.client.address().to_checksum(None),
                 "token": addr_str(&self.offer.token),
                 "symbol": self.offer.token_symbol,
+                "decimals": self.offer.token_decimals,
             },
-            "zec": { "address": self.leg.receive_address() },
+            "zec": crate::withdraw::zec_address_view(&self.leg).await,
         }))
+    }
+
+    // ------------------------------------------------------------------ withdrawals
+
+    /// `POST /api/withdraw`: shielded ZEC, our token, or the chain's gas coin, to the owner's
+    /// own wallet, from what no live swap needs (crate::withdraw).
+    pub async fn withdraw(
+        &self,
+        req: crate::withdraw::WithdrawRequest,
+    ) -> Result<crate::withdraw::Withdrawal, ApiError> {
+        use crate::withdraw::{self as w, Asset};
+        let symbol = self.offer.token_symbol.to_ascii_lowercase();
+        let asset = Asset::parse(
+            &req.asset,
+            &[Asset::Zec, Asset::Token, Asset::Eth],
+            &[(symbol.as_str(), Asset::Token)],
+        )?;
+        let amount = w::parse_amount(&req.amount).map_err(|e| ApiError(400, e))?;
+        let to = req.to.trim();
+        let _slot = self.starts.begin_withdrawal()?;
+        let _gate = self.withdrawals.gate().await;
+        match asset {
+            Asset::Zec => {
+                let amount = u64::try_from(amount)
+                    .map_err(|_| ApiError(400, "amount is more than ZEC has".into()))?;
+                w::check_zec_destination(&self.leg, to)
+                    .await
+                    .map_err(|e| ApiError(400, format!("to: {e}")))?;
+                if self.leg.receive_address().as_deref() == Some(to) {
+                    return Err(ApiError(
+                        400,
+                        "to: that is this node's own ZEC address".into(),
+                    ));
+                }
+                let holds = {
+                    let st = self.state.lock().await;
+                    st.swaps
+                        .values()
+                        .filter_map(|r| {
+                            w::zec_lock_hold(
+                                &r.id,
+                                r.role() == Role::Z,
+                                r.swap.is_final(),
+                                r.zec_lock_txid.is_some(),
+                                r.swap.session().params.zec_amount,
+                                self.leg.send_fee_reserve(),
+                            )
+                        })
+                        .collect()
+                };
+                w::send_zec(&self.withdrawals, &self.leg, to, amount, holds).await
+            }
+            _ => self.send_evm(asset, to, amount).await,
+        }
+    }
+
+    /// What our live swaps hold: tokens for a B lock not yet made, and gas (in gas units) for
+    /// the actions still to come: B's lock and refund, Z's claim and punish.
+    fn evm_holds(&self, st: &EvmState) -> (Vec<crate::withdraw::Hold>, u64) {
+        let mut tokens = vec![];
+        let mut gas = 0u64;
+        for r in st.swaps.values().filter(|r| !r.swap.is_final()) {
+            match r.role() {
+                Role::B if r.evm_tx("lock").is_none() => {
+                    tokens.push(crate::withdraw::Hold {
+                        units: u128::from(r.swap.session().params.token_amount),
+                        why: format!("swap {}'s lock", crate::withdraw::short_id(&r.id)),
+                    });
+                    gas += GAS_LOCK + GAS_REFUND;
+                }
+                Role::B => gas += GAS_REFUND,
+                Role::Z => gas += GAS_CLAIM + GAS_PUNISH,
+            }
+        }
+        (tokens, gas)
+    }
+
+    /// The destination of a token or gas-coin withdrawal: as a `payout_to` (EIP-55 if mixed
+    /// case, not zero, not FerryLock or the token contract), and not our own account.
+    fn check_withdraw_to(&self, to: &str) -> Result<[u8; 20], ApiError> {
+        let a = self
+            .check_payout(to)
+            .map_err(|e| ApiError(400, format!("to: {e}")))?;
+        if Address::from(a) == self.client.address() {
+            return Err(ApiError(400, "to: that is this node's own account".into()));
+        }
+        Ok(a)
+    }
+
+    /// A token transfer or a gas-coin send: checked against what is free, simulated, signed at
+    /// our next nonce, recorded, then broadcast, all with the swaps' state held, so no swap
+    /// action is signed meanwhile (it would take the same nonce).
+    async fn send_evm(
+        &self,
+        asset: crate::withdraw::Asset,
+        to: &str,
+        amount: u128,
+    ) -> Result<crate::withdraw::Withdrawal, ApiError> {
+        use crate::withdraw::{self as w, Asset, Crash, Hold, Status, Withdrawal};
+        let to = self.check_withdraw_to(to)?;
+        let unavailable = |e: ferry_evm::Error| ApiError(503, format!("the EVM node: {e}"));
+        let st = self.state.lock().await;
+        let (token_holds, gas_units) = self.evm_holds(&st);
+        let (max_fee, _) = self.client.fees().await.map_err(unavailable)?;
+        let reserve = u128::from(gas_units)
+            .saturating_mul(max_fee)
+            .saturating_mul(u128::from(GAS_RESERVE_FACTOR));
+        let gas_holds: Vec<Hold> = (reserve > 0)
+            .then(|| Hold {
+                units: reserve,
+                why: "gas for the swap actions still to come".into(),
+            })
+            .into_iter()
+            .collect();
+        let sat = |v: U256| u128::try_from(v).unwrap_or(u128::MAX);
+        let eth = sat(self.client.eth_balance().await.map_err(unavailable)?);
+        let eth_fmt = |u: u128| w::show(u, 18, "ETH");
+        let tok_fmt = |u: u128| w::show(u, self.offer.token_decimals, &self.offer.token_symbol);
+        let token = Address::from(self.offer.token);
+        // What is free, before asking the node to simulate it (a clearer refusal than a revert).
+        match asset {
+            Asset::Token => {
+                let have = sat(self
+                    .client
+                    .token_balance(token, self.client.address())
+                    .await
+                    .map_err(unavailable)?);
+                w::check_free(have, &token_holds, amount, &tok_fmt(amount), tok_fmt)?;
+            }
+            _ => w::check_free(
+                eth,
+                &gas_holds,
+                amount,
+                &format!("{} plus its gas", eth_fmt(amount)),
+                eth_fmt,
+            )?,
+        }
+        let signed = self
+            .client
+            .sign_transfer(
+                &self.signer,
+                (asset == Asset::Token).then_some(token),
+                Address::from(to),
+                U256::from(amount),
+            )
+            .await
+            .map_err(|e| match e {
+                ferry_evm::Error::WouldRevert(m) => ApiError(
+                    400,
+                    format!("The transfer would fail on chain ({m}); nothing was sent"),
+                ),
+                e => unavailable(e),
+            })?;
+        let cost = sat(signed.max_cost());
+        let (need, what) = match asset {
+            Asset::Token => (cost, format!("up to {} for its gas", eth_fmt(cost))),
+            _ => (
+                amount.saturating_add(cost),
+                format!(
+                    "{} plus up to {} for its gas",
+                    eth_fmt(amount),
+                    eth_fmt(cost)
+                ),
+            ),
+        };
+        w::check_free(eth, &gas_holds, need, &what, eth_fmt)?;
+        let coin = match asset {
+            Asset::Token => self.offer.token_symbol.to_lowercase(),
+            _ => "eth".into(),
+        };
+        let mut rec = Withdrawal::new(
+            asset,
+            &coin,
+            amount,
+            &addr_str(&to),
+            cost,
+            "eth",
+            signed.hash.to_string(),
+            Some(hex::encode(&signed.raw)),
+        );
+        rec.nonce = Some(signed.nonce);
+        if !self.withdrawals.save(&rec) {
+            return Err(ApiError(
+                500,
+                "could not save the withdrawal; nothing was sent".into(),
+            ));
+        }
+        self.withdrawals.crash_point(Crash::AfterSave);
+        rec.sent_ms = now_ms();
+        let sent = self.client.send_raw(&signed.raw).await;
+        drop(st);
+        match sent {
+            Ok(Ok(_)) => {
+                self.withdrawals.crash_point(Crash::AfterBroadcast);
+                rec.set(Status::Pending, 0, None);
+                self.withdrawals.save(&rec);
+                Ok(rec)
+            }
+            // The node may already have it (a retried request whose first try went through, or
+            // even mined it): the follow-up decides from its receipt and our nonce.
+            Ok(Err(m)) if maybe_known(&m) => {
+                tracing::warn!(id = %rec.id, "withdrawal broadcast: {m}");
+                self.withdrawals.save(&rec);
+                Ok(rec)
+            }
+            // Refused by our node: it was not taken, and nobody else has it.
+            Ok(Err(m)) => {
+                rec.set(
+                    Status::Failed,
+                    0,
+                    Some(format!("the node refused it ({m}); nothing was sent")),
+                );
+                self.withdrawals.save(&rec);
+                Err(ApiError(
+                    409,
+                    format!("The EVM node refused the withdrawal ({m}); nothing was sent"),
+                ))
+            }
+            // No answer: it may be out. The follow-up sends the same transaction again.
+            Err(e) => {
+                tracing::warn!(id = %rec.id, "withdrawal broadcast: {e}");
+                self.withdrawals.save(&rec);
+                Ok(rec)
+            }
+        }
+    }
+
+    /// Follow the withdrawals still open (skipped while one is being sent).
+    async fn follow_withdrawals(&self) {
+        let Some(_round) = self.withdrawals.round() else {
+            return;
+        };
+        crate::withdraw::follow_zec(&self.withdrawals, &self.leg).await;
+        use crate::withdraw::{Asset, Status};
+        for mut w in self.withdrawals.unsettled(&[Asset::Token, Asset::Eth]) {
+            let Ok(hash) = w.txid.parse::<B256>() else {
+                continue;
+            };
+            // The nonce first: if it moved past ours and ours is still not mined, another
+            // transaction took it and ours can never be mined.
+            let mined_nonce = match self.client.nonce(false).await {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(id = %w.id, "EVM node: {e}");
+                    continue;
+                }
+            };
+            let status = match self.client.tx_status(hash).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(id = %w.id, "withdrawal state: {e}");
+                    continue;
+                }
+            };
+            let mut changed = false;
+            match status {
+                ferry_evm::TxStatus::Mined { ok, block } => {
+                    if let Ok(Some(cost)) = self.client.tx_cost(hash).await {
+                        let cost = cost.to_string();
+                        changed |= w.fee != cost;
+                        w.fee = cost;
+                    }
+                    let tip = self.client.block_number().await.unwrap_or(block).max(block);
+                    changed |= if ok {
+                        w.set(Status::Confirmed, (tip - block + 1) as u32, None)
+                    } else {
+                        w.set(
+                            Status::Failed,
+                            0,
+                            Some(
+                                "the transaction reverted, so nothing was paid (its gas was spent)"
+                                    .into(),
+                            ),
+                        )
+                    };
+                }
+                _ if w.nonce.is_some_and(|ours| mined_nonce > ours) => {
+                    changed |= w.set(
+                        Status::Failed,
+                        0,
+                        Some("another transaction of this account used its nonce, so it can never be mined; nothing was paid".into()),
+                    );
+                }
+                ferry_evm::TxStatus::Pending => changed |= w.set(Status::Pending, 0, None),
+                ferry_evm::TxStatus::Unknown => {
+                    // Neither mined nor in the node's mempool: the same transaction again.
+                    let due =
+                        w.status == Status::Sending || now_ms() >= w.sent_ms + EVM_REBROADCAST_MS;
+                    if let (true, Some(raw)) =
+                        (due, w.raw.as_deref().and_then(|r| hex::decode(r).ok()))
+                    {
+                        w.sent_ms = now_ms();
+                        changed = true;
+                        match self.client.send_raw(&raw).await {
+                            Ok(Ok(_)) => {
+                                w.set(Status::Pending, 0, None);
+                            }
+                            Ok(Err(m)) => {
+                                tracing::info!(id = %w.id, "withdrawal rebroadcast refused: {m}")
+                            }
+                            Err(e) => tracing::info!(id = %w.id, "withdrawal rebroadcast: {e}"),
+                        }
+                    }
+                }
+            }
+            if changed {
+                self.withdrawals.save(&w);
+            }
+        }
     }
 
     /// A `payout_to` for our chain: a well-formed, non-zero address (`parse_payout`) that is not
@@ -1776,6 +2121,7 @@ impl<L: ZecLeg + 'static> EvmDaemon<L> {
             interval.tick().await;
             self.refresh_status().await;
             self.tick().await;
+            self.follow_withdrawals().await;
         }
     }
 
@@ -2133,4 +2479,30 @@ fn short_addr(a: &Address) -> String {
 
 fn p_claimer(rec: &EvmRecord) -> [u8; 20] {
     rec.swap.session().evm_addresses().0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::maybe_known;
+
+    /// A refusal that may mean the node has (or mined) the transaction is never taken for "not
+    /// sent"; a plain refusal is.
+    #[test]
+    fn refusals_that_may_hide_a_sent_withdrawal() {
+        for m in [
+            "already known",
+            "ALREADY_EXISTS: already known",
+            "nonce too low: next nonce 7, tx nonce 6",
+            "Known transaction: 0xab",
+        ] {
+            assert!(maybe_known(m), "{m}");
+        }
+        for m in [
+            "insufficient funds for gas * price + value",
+            "max fee per gas less than block base fee",
+            "intrinsic gas too low",
+        ] {
+            assert!(!maybe_known(m), "{m}");
+        }
+    }
 }

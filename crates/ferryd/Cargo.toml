@@ -30,5 +30,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[target.'cfg(unix)'.dependencies]
+# umask(2), so every file ferryd and its child processes (zcash-devtool) create is owner-only.
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

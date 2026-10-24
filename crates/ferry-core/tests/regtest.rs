@@ -14,7 +14,7 @@ use ferry_btc::rpc::BitcoinRpc;
 use ferry_btc::Coin;
 use ferry_core::{
     accept, Action, BState, ChainEvent, Envelope, Event, Message, Proposal, Role, Spend, Swap,
-    SwapParams, ZState, ZecLeg, ZecNote, ZecStatus,
+    SwapParams, ZState, ZecLeg, ZecNote, ZecStatus, ZecTxState, ZecWithdrawal,
 };
 use rand_core::{OsRng, RngCore};
 
@@ -114,6 +114,17 @@ impl ZecLeg for MockZec {
                     .map(|(t, ..)| t.clone()),
             })
             .collect())
+    }
+
+    async fn withdraw<F>(&self, _to: &str, _amount: u64, _f: F) -> Result<ZecWithdrawal, MockError>
+    where
+        F: FnOnce(&ZecWithdrawal) -> Result<(), String> + Send,
+    {
+        Err(MockError("this mock has no wallet to withdraw from".into()))
+    }
+
+    async fn tx_state(&self, _txid: &str) -> Result<ZecTxState, MockError> {
+        Ok(ZecTxState::Unknown)
     }
 
     async fn sweep(

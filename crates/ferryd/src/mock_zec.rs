@@ -13,7 +13,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ferry_core::{ZecLeg, ZecNote, ZecStatus};
+use ferry_core::{SendFailure, ZecLeg, ZecNote, ZecStatus, ZecTxState, ZecWithdrawal};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 
@@ -25,13 +25,21 @@ pub enum MockZecError {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Rejected(String),
+    /// Refused before anything was recorded on the mock chain (a withdrawal).
+    #[error("not sent: {0}")]
+    NotSent(String),
 }
+
+/// What a mock withdrawal pays in fees (ZIP 317's floor: two actions).
+pub const MOCK_WITHDRAW_FEE: u64 = 10_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Kind {
     Send,
     Sweep,
+    /// From an owner's own wallet to another wallet (`paid_to`).
+    Withdraw,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -241,6 +249,73 @@ impl ZecLeg for MockZecLeg {
         })
     }
 
+    /// Withdrawal errors keep the trait's meaning; a lock that fails stays "maybe sent" as
+    /// before (the mock's send never fails half-way, but the daemon must not rely on it).
+    fn send_failure(&self, err: &MockZecError) -> SendFailure {
+        match err {
+            MockZecError::NotSent(_) => SendFailure::NotSent,
+            _ => SendFailure::MaybeSent,
+        }
+    }
+
+    fn withdraw_fee_bound(&self) -> u64 {
+        MOCK_WITHDRAW_FEE
+    }
+
+    /// Atomic like every mock transaction: `before_broadcast` runs with the chain file locked,
+    /// and only if it agrees is the withdrawal recorded (it confirms with the next block).
+    async fn withdraw<F>(
+        &self,
+        to: &str,
+        amount: u64,
+        before_broadcast: F,
+    ) -> Result<ZecWithdrawal, MockZecError>
+    where
+        F: FnOnce(&ZecWithdrawal) -> Result<(), String> + Send,
+    {
+        let payee = self.wallet_owner(to).map_err(MockZecError::NotSent)?;
+        self.with_chain(|c, height| {
+            let spendable = c.balances.get(&self.owner).copied().unwrap_or(0);
+            let spent = amount.saturating_add(MOCK_WITHDRAW_FEE);
+            if spendable < spent {
+                return Err(MockZecError::NotSent(format!(
+                    "insufficient shielded balance ({spendable} < {amount} plus a {MOCK_WITHDRAW_FEE} zat fee)"
+                )));
+            }
+            let w = ZecWithdrawal {
+                txid: Self::txid(),
+                fee: MOCK_WITHDRAW_FEE,
+                spent,
+                spendable,
+            };
+            before_broadcast(&w).map_err(MockZecError::NotSent)?;
+            *c.balances.entry(self.owner.clone()).or_default() -= spent;
+            *c.balances.entry(payee.clone()).or_default() += amount;
+            c.txs.push(MockTx {
+                txid: w.txid.clone(),
+                kind: Kind::Withdraw,
+                fvk: String::new(),
+                value: amount,
+                owner: self.owner.clone(),
+                height: height + 1,
+                paid_to: Some(payee),
+            });
+            Ok(w)
+        })
+    }
+
+    async fn tx_state(&self, txid: &str) -> Result<ZecTxState, MockZecError> {
+        self.with_chain(|c, height| {
+            Ok(match c.txs.iter().find(|t| t.txid == txid) {
+                None => ZecTxState::Unknown,
+                Some(t) => match c.confs(t, height) {
+                    0 => ZecTxState::Pending,
+                    n => ZecTxState::Mined { confirmations: n },
+                },
+            })
+        })
+    }
+
     /// A mock send is atomic: recorded with its note, or not at all. So no note means no lock.
     async fn lock_lapsed(&self, fvk: &[u8; 96], amount: u64) -> Result<bool, MockZecError> {
         let fvk = hex::encode(fvk);
@@ -351,6 +426,11 @@ impl ZecLeg for MockZecLeg {
                 Kind::Sweep => format!(
                     "ZEC sweep: Ironwood bundle spending one note, revealing only a nullifier, a randomized key rk \
                      and encrypted outputs; nothing in it appears on Bitcoin (mock chain, txid {}…)",
+                    &t.txid[..8]
+                ),
+                Kind::Withdraw => format!(
+                    "ZEC withdrawal: Ironwood bundle; value, sender, receiver and memo encrypted \
+                     (mock chain, txid {}…)",
                     &t.txid[..8]
                 ),
             }))

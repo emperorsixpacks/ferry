@@ -77,8 +77,10 @@ pub struct Daemon<L> {
     proposals: std::sync::Mutex<VecDeque<Instant>>,
     /// Our firm quotes, when making offers (crate::quote).
     pub quotes: Option<crate::quote::QuoteBook>,
-    /// The `POST /api/swaps` in progress, if any (crate::route).
+    /// The `POST /api/swaps` or `POST /api/withdraw` in progress, if any (crate::route).
     starts: crate::route::Starts,
+    /// "Send to my wallet" (crate::withdraw).
+    pub withdrawals: crate::withdraw::Withdrawals,
 }
 
 /// At most this many proposals per minute reach the maker's negotiation code.
@@ -224,7 +226,9 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         }
         let (events, _) = broadcast::channel(256);
         let quotes = crate::quote::maker_book(&cli)?;
+        let withdrawals = crate::withdraw::Withdrawals::open(&cli.data_dir, events.clone())?;
         Ok(Arc::new(Daemon {
+            withdrawals,
             role: cli.role.into(),
             offer: Offer {
                 quote_key: quotes.as_ref().map(|q| q.public_key()),
@@ -365,8 +369,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             )?
         };
         if let Some(to) = &route.sweep_to {
-            self.leg
-                .check_address(to)
+            crate::withdraw::check_zec_destination(&self.leg, to)
                 .await
                 .map_err(|e| ApiError::bad(format!("sweep_to: {e}")))?;
         }
@@ -559,24 +562,151 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         Ok(id)
     }
 
-    /// Where the operator funds this party: a fresh address of our BTC wallet and, if the Zcash
-    /// backend has one, our own Zcash address.
-    pub async fn funding_addresses(&self) -> Result<serde_json::Value, ApiError> {
-        let btc = self
-            .rpc
-            .labeled_address("ferry-funding", self.network())
-            .await
-            .map_err(|e| ApiError(503, e.to_string()))?;
+    /// Where the owner funds this node: a receiving address of our BTC/LTC wallet (the same one
+    /// every time, labeled `ferry-funding` in the node's wallet, unless `fresh` asks for a new
+    /// one, labeled `ferry-deposit`) and our own shielded Zcash address.
+    pub async fn funding_addresses(&self, fresh: bool) -> Result<serde_json::Value, ApiError> {
+        let btc = if fresh {
+            self.rpc
+                .labeled_new_address("ferry-deposit", self.network())
+                .await
+        } else {
+            self.rpc
+                .labeled_address("ferry-funding", self.network())
+                .await
+        }
+        .map_err(|e| ApiError(503, e.to_string()))?;
         Ok(serde_json::json!({
             "role": self.role,
             "name": self.cli.name,
             "btc": {
                 "coin": self.cli.chain,
+                "ticker": self.cli.chain.ticker(),
                 "network": self.network().to_string(),
                 "address": self.chain().encode_address(&btc),
             },
-            "zec": { "address": self.leg.receive_address() },
+            "zec": crate::withdraw::zec_address_view(&self.leg).await,
         }))
+    }
+
+    // ------------------------------------------------------------------ withdrawals
+
+    /// `POST /api/withdraw`: shielded ZEC, or our BTC/LTC, to the owner's own wallet, from what
+    /// no live swap needs (crate::withdraw).
+    pub async fn withdraw(
+        &self,
+        req: crate::withdraw::WithdrawRequest,
+    ) -> Result<crate::withdraw::Withdrawal, ApiError> {
+        use crate::withdraw::{self as w, Asset};
+        let ticker = self.cli.chain.ticker().to_ascii_lowercase();
+        let asset = Asset::parse(
+            &req.asset,
+            &[Asset::Zec, Asset::Btc],
+            &[(ticker.as_str(), Asset::Btc)],
+        )?;
+        let amount = w::parse_amount(&req.amount).map_err(ApiError::bad)?;
+        let amount = u64::try_from(amount)
+            .map_err(|_| ApiError::bad("amount is more than this coin has"))?;
+        let to = req.to.trim();
+        let _slot = self.starts.begin_withdrawal()?;
+        let _gate = self.withdrawals.gate().await;
+        match asset {
+            Asset::Zec => {
+                w::check_zec_destination(&self.leg, to)
+                    .await
+                    .map_err(|e| ApiError::bad(format!("to: {e}")))?;
+                if self.leg.receive_address().as_deref() == Some(to) {
+                    return Err(ApiError::bad("to: that is this node's own ZEC address"));
+                }
+                let holds = {
+                    let st = self.state.lock().await;
+                    self.zec_holds(&st)
+                };
+                w::send_zec(&self.withdrawals, &self.leg, to, amount, holds).await
+            }
+            _ => {
+                // Held until the withdrawal is out: no lock is funded from the wallet meanwhile.
+                let st = self.state.lock().await;
+                let (holds, blocked) = self.btc_holds(&st).await?;
+                w::send_btc(
+                    &self.withdrawals,
+                    &self.rpc,
+                    self.chain(),
+                    to,
+                    amount,
+                    holds,
+                    blocked,
+                )
+                .await
+            }
+        }
+    }
+
+    /// What our live Z swaps hold of our shielded ZEC: their lock, until it is sent.
+    fn zec_holds(&self, st: &State) -> Vec<crate::withdraw::Hold> {
+        st.swaps
+            .values()
+            .filter_map(|r| {
+                crate::withdraw::zec_lock_hold(
+                    &r.id,
+                    r.role() == Role::Z,
+                    r.swap.is_final(),
+                    r.zec_lock_txid.is_some(),
+                    r.swap.session().params.zec_amount,
+                    self.leg.send_fee_reserve(),
+                )
+            })
+            .collect()
+    }
+
+    /// What our live B swaps hold of our BTC: their lock (and its fee) until it is funded. A lock
+    /// that is funded but not yet known to the node still spends wallet coins the wallet thinks
+    /// are free, so no withdrawal goes out then (the reason is the second value).
+    async fn btc_holds(
+        &self,
+        st: &State,
+    ) -> Result<(Vec<crate::withdraw::Hold>, Option<String>), ApiError> {
+        let mut holds = vec![];
+        for r in st.swaps.values() {
+            if r.role() != Role::B || r.swap.is_final() {
+                continue;
+            }
+            let id = crate::withdraw::short_id(&r.id);
+            match r.swap.lock_outpoint() {
+                None => holds.push(crate::withdraw::Hold {
+                    units: u128::from(r.swap.session().params.btc_amount)
+                        + u128::from(LOCK_FEE_RESERVE_SAT),
+                    why: format!("swap {id}'s lock"),
+                }),
+                Some(lock) => {
+                    let known = self
+                        .rpc
+                        .confirmations(&lock.txid)
+                        .await
+                        .map_err(|e| ApiError(503, e.to_string()))?;
+                    if known.is_none() {
+                        return Ok((
+                            holds,
+                            Some(format!(
+                                "Swap {id}'s {} lock is funded but not broadcast yet; withdraw \
+                                 once it is out (a minute or so)",
+                                self.cli.chain.ticker()
+                            )),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok((holds, None))
+    }
+
+    /// Follow the withdrawals still open (skipped while one is being sent).
+    async fn follow_withdrawals(&self) {
+        let Some(_round) = self.withdrawals.round() else {
+            return;
+        };
+        crate::withdraw::follow_zec(&self.withdrawals, &self.leg).await;
+        crate::withdraw::follow_btc(&self.withdrawals, &self.rpc).await;
     }
 
     /// Whether our wallet can fund our side of `params`.
@@ -1577,6 +1707,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             interval.tick().await;
             self.refresh_status().await;
             self.tick().await;
+            self.follow_withdrawals().await;
         }
     }
 

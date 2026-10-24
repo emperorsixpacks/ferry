@@ -46,9 +46,13 @@ pub fn api_router<L: ZecLeg + 'static>(daemon: Arc<EvmDaemon<L>>) -> Router {
         .route("/api/swaps", get(list_swaps::<L>).post(create_swap::<L>))
         .route("/api/swaps/{id}", get(get_swap::<L>))
         .route("/api/events", get(events::<L>))
-        .route("/api/addresses", get(addresses::<L>));
+        .route("/api/addresses", get(addresses::<L>))
+        .route("/api/withdraw", post(withdraw::<L>))
+        .route("/api/withdrawals", get(withdrawals::<L>));
     if daemon.cli.demo_faults {
-        r = r.route("/api/swaps/{id}/fault", post(fault::<L>));
+        r = r
+            .route("/api/swaps/{id}/fault", post(fault::<L>))
+            .route("/api/withdraw/fault", post(withdraw_fault::<L>));
     }
     r.fallback(|| async { ApiError(404, "not found".into()) })
         .layer(middleware::from_fn_with_state(daemon.clone(), guard::<L>))
@@ -201,8 +205,31 @@ async fn events<L: ZecLeg + 'static>(
 
 async fn addresses<L: ZecLeg + 'static>(
     State(d): D<L>,
+    Query(q): Query<crate::http::AddressQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    d.funding_addresses().await.map(Json)
+    d.funding_addresses(q.fresh()).await.map(Json)
+}
+
+async fn withdraw<L: ZecLeg + 'static>(
+    State(d): D<L>,
+    ApiJson(req): ApiJson<crate::withdraw::WithdrawRequest>,
+) -> Result<(StatusCode, Json<crate::withdraw::WithdrawalView>), ApiError> {
+    let w = d.withdraw(req).await?;
+    Ok((StatusCode::CREATED, Json(w.view())))
+}
+
+async fn withdrawals<L: ZecLeg + 'static>(
+    State(d): D<L>,
+) -> Json<Vec<crate::withdraw::WithdrawalView>> {
+    Json(d.withdrawals.views())
+}
+
+async fn withdraw_fault<L: ZecLeg + 'static>(
+    State(d): D<L>,
+    ApiJson(f): ApiJson<crate::withdraw::FaultRequest>,
+) -> Json<serde_json::Value> {
+    d.withdrawals.arm(f.crash);
+    Json(json!({ "ok": true }))
 }
 
 async fn offer<L: ZecLeg + 'static>(State(d): D<L>) -> Json<EvmOffer> {

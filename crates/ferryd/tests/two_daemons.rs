@@ -998,7 +998,11 @@ async fn route_leg_buys_zec_into_another_wallet() {
     let w = World::start_as(1, Role::Z, &[]).await;
     let (user, maker) = (w.taker().url.clone(), w.maker().peer_url());
     let status = w.get(&user, "/api/status").await;
-    assert_eq!(status["features"], json!(["route", "payout"]), "{status}");
+    assert_eq!(
+        status["features"],
+        json!(["route", "payout", "withdraw"]),
+        "{status}"
+    );
     let addresses = w.get(&user, "/api/addresses").await;
     assert_eq!(addresses["zec"]["address"], mock_wallet("bram"));
 
@@ -1068,4 +1072,293 @@ async fn route_leg_buys_zec_into_another_wallet() {
         );
         assert_eq!(std::fs::read_dir(&swaps).unwrap().count(), before);
     }
+}
+
+// ------------------------------------------------------------------------- withdrawals
+
+impl World {
+    /// A POST that may find the daemon gone (a demo crash): None then.
+    async fn post_maybe(&self, url: &str, path: &str, body: Value) -> Option<(u16, Value)> {
+        let r = self
+            .http
+            .post(format!("{url}{path}"))
+            .json(&body)
+            .send()
+            .await
+            .ok()?;
+        Some((r.status().as_u16(), r.json().await.unwrap_or_default()))
+    }
+
+    /// The newest withdrawal of `url`, once `ok` holds (mining a block now and then).
+    async fn newest_withdrawal(&self, url: &str, ok: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(40);
+        let mut last_block = Instant::now();
+        loop {
+            let all = self.get(url, "/api/withdrawals").await;
+            let newest = all[0].clone();
+            if ok(&newest) {
+                return newest;
+            }
+            assert!(Instant::now() < deadline, "withdrawal never matched: {all}");
+            if last_block.elapsed() >= Duration::from_millis(700) {
+                self.mine().await;
+                last_block = Instant::now();
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+
+    fn mock_balance(&self, owner: &str) -> u64 {
+        let chain: Value =
+            serde_json::from_slice(&std::fs::read(self.zec_file()).unwrap()).unwrap();
+        chain["balances"][owner].as_u64().unwrap_or(0)
+    }
+
+    /// What the test wallet received at `address`: (sat, number of transactions).
+    async fn received(&self, address: &str) -> (u64, usize) {
+        let v: Value = self
+            .rpc
+            .wallet_call("listreceivedbyaddress", json!([0, true, true, address]))
+            .await
+            .unwrap();
+        let e = &v[0];
+        let sat = Amount::from_btc(e["amount"].as_f64().unwrap_or(0.0))
+            .unwrap()
+            .to_sat();
+        (sat, e["txids"].as_array().map_or(0, Vec::len))
+    }
+}
+
+async fn refused(w: &World, url: &str, body: Value, code: u16, needle: &str) {
+    let (got, resp) = w.post(url, "/api/withdraw", body.clone()).await;
+    assert_eq!(got, code, "{body} -> {resp}");
+    let msg = resp["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains(needle),
+        "{body} -> {msg:?}, expected {needle:?}"
+    );
+}
+
+/// "Send to my wallet" on Bitcoin daemons with the mock Zcash chain: both daemons list their
+/// addresses alike and advertise `withdraw`; bad requests (a transparent or Sapling ZEC address,
+/// another network's, dust, more than the wallet has) are refused before anything is recorded;
+/// shielded ZEC and BTC withdrawals land; a live swap's ZEC is held (the refusal says how much is
+/// free) and the swap still completes; and a crash after the record is saved, or after the
+/// broadcast, never sends twice: an unsent ZEC withdrawal is marked failed, a BTC one goes out
+/// once after the restart.
+#[tokio::test]
+#[ignore = "needs regtest bitcoind (spikes/btc/scripts/regtest.sh start)"]
+async fn withdraw_to_own_wallet() {
+    let mut w = World::start(1).await;
+    let (z, b) = (w.z.url.clone(), w.b.url.clone());
+    for url in [&z, &b] {
+        let s = w.get(url, "/api/status").await;
+        assert!(
+            s["features"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("withdraw")),
+            "{s}"
+        );
+    }
+
+    // Addresses: the same shape on both daemons; the BTC one stable unless asked for a new one.
+    let za = w.get(&z, "/api/addresses").await;
+    assert_eq!(za["zec"]["address"], mock_wallet("zoe"), "{za}");
+    assert_eq!(za["zec"]["network"], "regtest");
+    assert_eq!(
+        (za["btc"]["coin"].as_str(), za["btc"]["ticker"].as_str()),
+        (Some("btc"), Some("BTC"))
+    );
+    let btc_addr = za["btc"]["address"].as_str().unwrap().to_string();
+    assert!(btc_addr.starts_with("bcrt1"), "{za}");
+    assert_eq!(
+        w.get(&z, "/api/addresses").await["btc"]["address"],
+        btc_addr
+    );
+    let fresh = w.get(&z, "/api/addresses?fresh=1").await;
+    assert_ne!(fresh["btc"]["address"], btc_addr);
+    assert_eq!(
+        w.get(&b, "/api/addresses").await["zec"]["address"],
+        mock_wallet("bram")
+    );
+
+    // Refusals, before anything is recorded.
+    let zec = |amount: Value, to: &str| json!({"asset": "zec", "amount": amount, "to": to});
+    let bram_addr = mock_wallet("bram");
+    for (body, needle) in [
+        (
+            zec(json!(1000), "tmBsTi2xWTjUdEXnuTceL7fecEQKeWaPDJd"),
+            "Ferry only sends shielded ZEC; use a shielded address",
+        ),
+        (
+            zec(json!(1000), &format!("zregtestsapling1{}", "q".repeat(60))),
+            "Sapling",
+        ),
+        (
+            zec(json!(1000), "utest1mockwallet7a6f65"),
+            "to: not a wallet address",
+        ),
+        (zec(json!(1000), &mock_wallet("zoe")), "own ZEC address"),
+        (zec(json!(0), &bram_addr), "more than 0"),
+        (zec(json!(1.5), &bram_addr), "whole number"),
+        (zec(json!("600000000"), &bram_addr), "Not enough"),
+        (
+            json!({"asset": "token", "amount": 1, "to": "x"}),
+            "asset must be one of",
+        ),
+    ] {
+        refused(&w, &z, body, 400, needle).await;
+    }
+    let btc = |amount: u64, to: &str| json!({"asset": "btc", "amount": amount, "to": to});
+    refused(&w, &b, btc(100, &btc_addr), 400, "dust").await;
+    refused(
+        &w,
+        &b,
+        btc(10_000, "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"),
+        400,
+        "to: not a",
+    )
+    .await;
+    refused(&w, &z, btc(10_000, &btc_addr), 400, "Not enough").await;
+    assert_eq!(w.get(&z, "/api/withdrawals").await, json!([]));
+    assert_eq!(w.get(&b, "/api/withdrawals").await, json!([]));
+
+    // Shielded ZEC lands in another wallet (B's).
+    let (code, wd) = w
+        .post(&z, "/api/withdraw", zec(json!("100000000"), &bram_addr))
+        .await;
+    assert_eq!(code, 201, "{wd}");
+    assert_eq!(
+        (
+            wd["asset"].as_str(),
+            wd["amount"].as_str(),
+            wd["fee"].as_str(),
+            wd["fee_coin"].as_str()
+        ),
+        (Some("zec"), Some("100000000"), Some("10000"), Some("zec"))
+    );
+    assert_eq!(wd["status"], "pending", "{wd}");
+    assert_eq!(wd["txid"].as_str().unwrap().len(), 64);
+    let done = w
+        .newest_withdrawal(&z, |v| v["status"] == "confirmed")
+        .await;
+    assert_eq!(done["id"], wd["id"]);
+    assert_eq!(w.mock_balance("bram"), 100_000_000);
+    assert_eq!(w.mock_balance("zoe"), 500_000_000 - 100_010_000);
+
+    // BTC lands at the test wallet's address.
+    let dest = w
+        .rpc
+        .new_address(Network::Regtest)
+        .await
+        .unwrap()
+        .to_string();
+    let (code, wd) = w.post(&b, "/api/withdraw", btc(10_000_000, &dest)).await;
+    assert_eq!(code, 201, "{wd}\n{}", w.b.logs());
+    assert_eq!(
+        (wd["asset"].as_str(), wd["coin"].as_str()),
+        (Some("btc"), Some("btc"))
+    );
+    assert!(
+        wd["fee"].as_str().unwrap().parse::<u64>().unwrap() > 0,
+        "{wd}"
+    );
+    let done = w
+        .newest_withdrawal(&b, |v| v["status"] == "confirmed")
+        .await;
+    assert_eq!(done["txid"], wd["txid"]);
+    assert_eq!(w.received(&dest).await, (10_000_000, 1));
+
+    // A live swap's ZEC is held until its lock goes out: Z sells 3 of its 3.9999 ZEC. Nothing is
+    // mined yet, so Z's lock waits for B's.
+    let id = w.start_swap(300_000_000).await;
+    refused(
+        &w,
+        &z,
+        zec(json!(99_990_000), &bram_addr),
+        400,
+        "Only 0.9999 ZEC is free to withdraw: 3.9999 ZEC is in the wallet and 3 ZEC is held \
+         for a swap in progress",
+    )
+    .await;
+    let (code, wd) = w
+        .post(&z, "/api/withdraw", zec(json!(50_000_000), &bram_addr))
+        .await;
+    assert_eq!(code, 201, "what is free goes: {wd}");
+    w.run_until(&id, 700, 40, |z, b| {
+        z["outcome"] == "swapped" && b["outcome"] == "swapped"
+    })
+    .await;
+
+    // Crash after the record is saved, before the broadcast. ZEC: the wallet never stored it,
+    // so it was never sent; it is marked failed and nothing moved.
+    let (bram, zoe) = (w.mock_balance("bram"), w.mock_balance("zoe"));
+    let arm = |crash: &str| json!({ "crash": crash });
+    let crashed = |r: Option<(u16, Value)>| r.is_none_or(|(c, _)| c >= 500);
+    let (code, _) = w.post(&z, "/api/withdraw/fault", arm("after_save")).await;
+    assert_eq!(code, 200);
+    let r = w
+        .post_maybe(&z, "/api/withdraw", zec(json!(10_000_000), &bram_addr))
+        .await;
+    assert!(crashed(r), "the daemon exits mid-withdrawal");
+    w.z.kill();
+    w.z.spawn();
+    w.wait_ready(&z).await;
+    let failed = w.newest_withdrawal(&z, |v| v["status"] == "failed").await;
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("never broadcast"),
+        "{failed}"
+    );
+    assert_eq!((w.mock_balance("bram"), w.mock_balance("zoe")), (bram, zoe));
+
+    // ZEC, crash after the broadcast: found, then confirmed; paid once.
+    let (code, _) = w
+        .post(&z, "/api/withdraw/fault", arm("after_broadcast"))
+        .await;
+    assert_eq!(code, 200);
+    let r = w
+        .post_maybe(&z, "/api/withdraw", zec(json!(10_000_000), &bram_addr))
+        .await;
+    assert!(crashed(r));
+    w.z.kill();
+    w.z.spawn();
+    w.wait_ready(&z).await;
+    w.newest_withdrawal(&z, |v| v["status"] == "confirmed")
+        .await;
+    assert_eq!(w.mock_balance("bram"), bram + 10_000_000);
+    assert_eq!(w.mock_balance("zoe"), zoe - 10_010_000);
+
+    // BTC: the signed transaction goes out (again, as is) after the restart, and pays once.
+    for crash in ["after_save", "after_broadcast"] {
+        let dest = w
+            .rpc
+            .new_address(Network::Regtest)
+            .await
+            .unwrap()
+            .to_string();
+        let (code, _) = w.post(&b, "/api/withdraw/fault", arm(crash)).await;
+        assert_eq!(code, 200);
+        let r = w
+            .post_maybe(&b, "/api/withdraw", btc(5_000_000, &dest))
+            .await;
+        assert!(crashed(r));
+        w.b.kill();
+        w.b.spawn();
+        w.wait_ready(&b).await;
+        let done = w
+            .newest_withdrawal(&b, |v| v["status"] == "confirmed")
+            .await;
+        assert_eq!(done["amount"], "5000000", "{crash}: {done}");
+        assert_eq!(
+            w.received(&dest).await,
+            (5_000_000, 1),
+            "{crash}: paid once"
+        );
+    }
+    let all = w.get(&b, "/api/withdrawals").await;
+    assert_eq!(all.as_array().unwrap().len(), 3, "{all}");
 }

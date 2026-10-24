@@ -40,6 +40,36 @@ pub enum SendFailure {
     Refused,
 }
 
+/// A withdrawal from our own wallet ([`ZecLeg::withdraw`]), built and signed, before it is
+/// broadcast.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ZecWithdrawal {
+    /// The transaction's id: the one it is broadcast under, fixed before broadcasting.
+    pub txid: String,
+    /// zatoshi
+    pub fee: u64,
+    /// Total value of our notes it spends (amount, fee and change). Change takes confirmations
+    /// before it is spendable, so this much leaves the spendable balance for a while.
+    pub spent: u64,
+    /// Our spendable Ironwood balance when it was built (before it).
+    pub spendable: u64,
+}
+
+/// What our wallet knows of a transaction it built (a withdrawal).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZecTxState {
+    Mined {
+        confirmations: u32,
+    },
+    /// Stored by the wallet, not mined, not expired: it may still confirm.
+    Pending,
+    /// Never mined, and past its expiry height: it can never confirm, and its notes are ours
+    /// to spend again.
+    Expired,
+    /// The wallet never stored it, so it was never broadcast.
+    Unknown,
+}
+
 /// Zcash (Ironwood) operations, keyed by the joint full viewing key from
 /// [`crate::joint::joint_fvk_bytes`] (`ak || nk || rivk`, Orchard encoding).
 pub trait ZecLeg: Send + Sync {
@@ -123,6 +153,32 @@ pub trait ZecLeg: Send + Sync {
     fn receive_address(&self) -> Option<String> {
         None
     }
+
+    /// Zatoshi a [`ZecLeg::withdraw`] may pay in fees at most (the caller checks the amount plus
+    /// this against what is free before asking).
+    fn withdraw_fee_bound(&self) -> u64 {
+        self.send_fee_reserve()
+    }
+
+    /// Send `amount` zatoshi from our own wallet to `to`, an address [`ZecLeg::check_address`]
+    /// accepted, funded from Ironwood notes only and paying Ironwood only (never a transparent
+    /// output). Once the transaction is built and signed, and before anything is broadcast,
+    /// `before_broadcast` gets its id and fee: the caller records them durably there, so a
+    /// crash can never lead to a second send. If it returns `Err(reason)`, nothing is broadcast
+    /// and the error is one [`ZecLeg::send_failure`] reports as [`SendFailure::NotSent`].
+    /// Errors from before that point are `NotSent` or `Refused`; after it, the transaction may
+    /// have gone out (its id is known: see [`ZecLeg::tx_state`]).
+    fn withdraw<F>(
+        &self,
+        to: &str,
+        amount: u64,
+        before_broadcast: F,
+    ) -> impl Future<Output = Result<ZecWithdrawal, Self::Error>> + Send
+    where
+        F: FnOnce(&ZecWithdrawal) -> Result<(), String> + Send;
+
+    /// What our wallet knows of a transaction it built ([`ZecLeg::withdraw`]).
+    fn tx_state(&self, txid: &str) -> impl Future<Output = Result<ZecTxState, Self::Error>> + Send;
 
     /// One line on what a public chain observer sees of `txid` (for the demo UI).
     fn describe_tx(
