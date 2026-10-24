@@ -15,6 +15,7 @@ import { ToneBadge } from "../components/ui/badge";
 import { Fold } from "../components/ui/fold";
 import { useLocal } from "../lib/daemon";
 import { STATUS_WORD, lockedMine, plainSteps, swapAmounts, wordsFor, type Tone } from "../lib/progress";
+import { shortAddress } from "../lib/receive";
 import { useWalletCaughtUp } from "../lib/walletSync";
 
 // /app/swap/:id: one calm card. A status word, a headline, three or four plain steps with the
@@ -51,12 +52,14 @@ export function SwapDetail({ id }: { id: string }) {
 }
 
 function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
-  const { bt, pair } = useLocal();
+  const { bt, pair, info } = useLocal();
   const phase = phaseOf(swap);
   const w = wordsFor();
   const a = swapAmounts(swap, status, w);
   const z = swap.role === "Z";
   const mine = z ? a.zec : a.coin;
+  // where what you get goes: your own wallet (payout_to selling, sweep_to buying), else your node
+  const paidTo = swap.route ? null : ((z ? swap.payout_to : swap.sweep_to) ?? null);
   const live = phase === "progress" || phase === "unwinding";
   const refused = swap.timeline.some((e) => e.kind === "zec_lock_refused");
   const lapsed = swap.timeline.some((e) => e.kind === "zec_lock_lapsed");
@@ -73,7 +76,18 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
       title: "Cancelling…",
       sub: refused ? `Nothing left your wallet. It closes by about ${by ? clock(by) : "–"}.` : `Nothing is lost. Your ${mine} comes back by about ${by ? clock(by) : "–"}.`,
     };
-  else if (phase === "done") head = { tone: "good", title: `You received ${z ? a.coin : a.zec}`, sub: z ? `${a.zec} left your shielded wallet.` : `It's in your shielded wallet. You paid ${a.coin}.` };
+  else if (phase === "done")
+    head = {
+      tone: "good",
+      title: `You received ${z ? a.coin : a.zec}`,
+      sub: paidTo
+        ? z
+          ? `It went to your wallet ${shortAddress(paidTo)}. ${a.zec} left your shielded wallet.`
+          : `It went to your own wallet ${shortAddress(paidTo)}, shielded. You paid ${a.coin}.`
+        : z
+          ? `${a.zec} left your shielded wallet.`
+          : `It's in your shielded wallet. You paid ${a.coin}.`,
+    };
   else if (phase === "settled")
     head = { tone: "good", title: `You received ${a.coin}`, sub: `Your partner stopped responding, so after the deadline their ${w.ticker} was released to you. You were paid in full for your ZEC.` };
   else if (phase === "refunded")
@@ -118,6 +132,11 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
             </span>
           </div>
         ) : null}
+        {live && paidTo ? (
+          <p className="mt-2 text-center text-[13px] text-slate-500" data-paid-to>
+            To your wallet <span className="font-mono text-xs text-slate-700">{shortAddress(paidTo)}</span>
+          </p>
+        ) : null}
 
         <Tracker steps={steps} />
 
@@ -137,6 +156,11 @@ function Body({ swap, status }: { swap: SwapView; status: Status | null }) {
             <Link to="/app" className="flex h-12 w-full items-center justify-center rounded-2xl bg-slate-900 text-[15px] font-semibold text-white transition-colors hover:bg-slate-800">
               {phase === "done" || phase === "settled" ? "Swap again" : "Start a new swap"}
             </Link>
+            {phase === "done" && !paidTo && info.own && !swap.route ? (
+              <Link to={`/wallet?send=${z ? pair : "zec"}`} className="rounded text-sm font-medium text-slate-700 transition-colors hover:text-slate-900" data-send-on>
+                Send it to my wallet
+              </Link>
+            ) : null}
             <Link to="/app/activity" className="rounded text-sm text-slate-600 transition-colors hover:text-slate-900">
               View all activity
             </Link>
@@ -189,6 +213,7 @@ function Technical({ swap, status }: { swap: SwapView; status: Status | null }) 
         <Row label="Started" value={swap.timeline[0] ? new Date(swap.timeline[0].at).toLocaleString() : "–"} />
         <Row label={swap.role === "Z" ? "You send" : "You pay"} value={swap.role === "Z" ? a.zec : a.coin} />
         <Row label="You receive" value={swap.role === "Z" ? a.coin : a.zec} />
+        {!swap.route ? <Row label="Paid to" value={(swap.role === "Z" ? swap.payout_to : swap.sweep_to) ? <CopyText value={(swap.role === "Z" ? swap.payout_to : swap.sweep_to)!} head={10} tail={8} /> : "Your Ferry node"} /> : null}
         <Row label="Rate" value={rate ? `1 ZEC = ${btcText(rate)} ${coin().ticker}` : "–"} />
         <Row
           label="Network fee"

@@ -15,11 +15,13 @@ function expected(v: SwapView): Asset | null {
   const phase = phaseOf(v);
   const lockedMine = v.timeline.some((e) => e.kind === (v.role === "Z" ? "zec_lock_broadcast" : "btc_lock_broadcast"));
   if (v.role === "Z") {
+    // paid to the person's own wallet (or a NEAR deposit address): this node's balance won't move
+    if ((phase === "done" || phase === "settled") && v.payout_to) return null;
     if (phase === "done" || phase === "settled") return "btc_sat";
     if (phase === "refunded" && lockedMine) return "zec_shielded_zat";
     return null;
   }
-  if (phase === "done") return "zec_shielded_zat";
+  if (phase === "done") return v.sweep_to ? null : "zec_shielded_zat";
   if (phase === "refunded" && lockedMine) return "btc_sat";
   return null;
 }

@@ -11,6 +11,7 @@ import { ToneBadge } from "../components/ui/badge";
 import { Fold } from "../components/ui/fold";
 import { PAUSE, ROUTE_WORD, inAbout, isRunning, legNote, routeAmounts, tickerOf, unitsText, useRoutes, zecText } from "../lib/routes";
 import type { Tone } from "../lib/progress";
+import { shortAddress } from "../lib/receive";
 
 // /app/route/:id: a private swap, as one calm card. A status word, a headline, its three parts
 // (swap 1, the private pause, swap 2) with the current one explained, and what to expect. Holding
@@ -94,7 +95,12 @@ function Body({ v }: { v: RouteView }) {
   else if (v.state === "pausing") head = { tone: "live", title: `Swapping ${a} for ${c} privately`, sub: "Swap 1 is done. Your ZEC is resting in your shielded wallet." };
   else if (v.state === "leg2") head = { tone: "live", title: `Swapping ${a} for ${c} privately`, sub: `Swap 2 of 2 is selling your ZEC for ${c}.` };
   else if (holding) head = { tone: "warn", title: `You hold ${zecText(v.zec.held_zat)}`, sub: `${why(v)}. Your ZEC is safe in your shielded wallet. Nothing is lost.` };
-  else if (v.state === "done") head = { tone: "good", title: `You received ${amt.outShort}`, sub: `${amt.inShort} went in, through shielded ZEC. No transaction links the two.` };
+  else if (v.state === "done")
+    head = {
+      tone: "good",
+      title: `You received ${amt.outShort}`,
+      sub: `${amt.inShort} went in, through shielded ZEC. No transaction links the two.${v.payout_to ? ` It went to your wallet ${shortAddress(v.payout_to)}.` : ""}`,
+    };
   else if (v.outcome === "refunded") head = { tone: "neutral", title: `Your ${a} is back`, sub: "The first swap didn't finish in time, so it was undone. The second never started." };
   else if (v.outcome === "punished") head = { tone: "bad", title: "The swap didn't complete", sub: `Your Ferry node was offline past the deadline, so the ${a} went to your partner.` };
   else head = { tone: "neutral", title: "Nothing moved", sub: (v.note || "The private swap didn't start.").replace(/\bmaker\b/gi, "partner") };
@@ -165,6 +171,11 @@ function Body({ v }: { v: RouteView }) {
             faded={holding}
           />
         ) : null}
+        {running && v.payout_to ? (
+          <p className="mt-2 text-center text-[13px] text-slate-500" data-paid-to>
+            The {c} goes to your wallet <span className="font-mono text-xs text-slate-700">{shortAddress(v.payout_to)}</span>
+          </p>
+        ) : null}
 
         {v.state !== "failed" ? <Tracker steps={steps} /> : null}
 
@@ -234,6 +245,7 @@ function Technical({ v }: { v: RouteView }) {
         <Row label="ZEC bought" value={zecText(v.amounts.zec_zat)} />
         <Row label="ZEC sold" value={zecText(v.amounts.zec2_zat)} />
         <Row label="You get at least" value={unitsText(v.amounts.out_min, v.to)} />
+        <Row label="Paid to" value={v.payout_to ? <CopyText value={v.payout_to} head={10} tail={8} /> : "Your Ferry node"} />
         <Row label="Privacy pause" value={hi === 0 ? "Off" : `${mins(lo)} to ${mins(hi)}, drawn at random`} />
         {v.privacy.not_before ? <Row label="Pause ends" value={clock(new Date(v.privacy.not_before * 1000))} /> : null}
       </Group>

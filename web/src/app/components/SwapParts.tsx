@@ -1,6 +1,7 @@
 import { Fragment, type ReactNode } from "react";
 import { ArrowDown, ArrowRight, ArrowsDownUp, CaretDown, Check, ShieldCheck } from "@phosphor-icons/react";
 import type { PairId } from "@/api";
+import { Link } from "@/router";
 import { useNear } from "../lib/near";
 import { ZEC, isNear, tickerOf, type OptOut, type Path, type Step, type Token } from "../lib/paths";
 import { cn } from "../lib/utils";
@@ -14,7 +15,7 @@ export function Panel({ label, pill, foot, onClick, children }: { label: string;
   return (
     <div
       onClick={(e) => {
-        if (onClick && !(e.target as HTMLElement).closest("button")) onClick();
+        if (onClick && !(e.target as HTMLElement).closest("button, a")) onClick();
       }}
       className={cn(
         "rounded-3xl border border-slate-200/70 bg-slate-50 px-5 pt-4 pb-4 transition-colors",
@@ -28,6 +29,24 @@ export function Panel({ label, pill, foot, onClick, children }: { label: string;
       </div>
       <div className="mt-3 flex min-h-6 items-center justify-between gap-3 text-[13px] text-slate-500">{foot}</div>
     </div>
+  );
+}
+
+// "You have 4.99 ZEC · Add funds": what the node holds of a panel's coin; on the person's own node,
+// with a way to add more (`add`: the coin's key on /wallet).
+export function YouHave({ text, add }: { text: string | null; add?: string }) {
+  return (
+    <span className="flex min-w-0 items-center gap-1.5">
+      <span className="truncate tabular-nums">{text == null ? "You have –" : `You have ${text}`}</span>
+      {add ? (
+        <>
+          <span aria-hidden>·</span>
+          <Link to={`/wallet?add=${add}`} className="shrink-0 rounded font-medium text-slate-700 underline-offset-4 transition-colors hover:text-slate-900 hover:underline" data-add-funds>
+            Add funds
+          </Link>
+        </>
+      ) : null}
+    </span>
   );
 }
 

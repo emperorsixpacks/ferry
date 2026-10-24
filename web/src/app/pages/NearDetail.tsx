@@ -14,6 +14,7 @@ import { useLocal } from "../lib/daemon";
 import { aboutTime, chainName, isActive, jobZec, nearText, nearWord, useNear } from "../lib/near";
 import { pairName } from "../lib/pairs";
 import type { Tone } from "../lib/progress";
+import { shortAddress } from "../lib/receive";
 import { legNote } from "../lib/routes";
 import { cn } from "../lib/utils";
 
@@ -107,7 +108,7 @@ function Body({ j }: { j: NearJob }) {
   else if (j.state === "ferry") head = { tone: "live", title: "Buying your ZEC", sub: `Ferry is swapping the ${c} for shielded ZEC.` };
   else if (j.state === "near") head = { tone: "live", title: `Sending your ${a.symbol}`, sub: `The Ferry swap is done. NEAR Intents is swapping the ${c} for ${a.symbol}.` };
   else if (j.state === "holding") head = { tone: "warn", title: `Your ${c} is in your Ferry node`, sub: `${j.problem ? `${j.problem.replace(/\.$/, "")}. ` : ""}Nothing is lost: buy the ZEC now, or keep the ${c}.` };
-  else if (j.state === "done") head = { tone: "good", title: `You received ${selling ? getsText : `${jobZec(j)}`}`, sub: selling ? `${jobZec(j)} left your shielded wallet, through ${c} and NEAR Intents.` : `It's in your shielded wallet. You sent ${nearText(j.near.details?.amount_in ?? j.near.amount_in, a)}.` };
+  else if (j.state === "done") head = { tone: "good", title: `You received ${selling ? getsText : `${jobZec(j)}`}`, sub: selling ? `${jobZec(j)} left your shielded wallet, through ${c} and NEAR Intents.` : `${j.sweep_to ? `It went to your own wallet ${shortAddress(j.sweep_to)}, shielded` : "It's in your shielded wallet"}. You sent ${nearText(j.near.details?.amount_in ?? j.near.amount_in, a)}.` };
   else if (j.state === "refunded") head = { tone: "neutral", title: selling ? `Your ${c} is back` : `Your ${a.symbol} is on its way back`, sub: selling ? `NEAR Intents couldn't fill the swap, so it refunded the ${c} to your Ferry node.` : `NEAR Intents couldn't fill the swap, so it refunds your ${a.symbol} to ${short(j.address)}.` };
   else if (j.state === "expired") head = { tone: "neutral", title: "Nothing moved", sub: "No deposit arrived before the deadline. If you sent one late, NEAR Intents refunds it to your refund address." };
   else head = { tone: j.outcome === "punished" ? "bad" : "neutral", title: j.outcome === "punished" ? "The swap didn't complete" : "Your ZEC is back", sub: j.outcome === "punished" ? "Your Ferry node was offline past the deadline." : "The Ferry swap was called off before anything reached NEAR Intents." };
@@ -289,6 +290,7 @@ function Technical({ j, via }: { j: NearJob; via: string }) {
         <Row label="Status" value={<span className="font-mono text-xs">{j.near.status}</span>} />
         <Row label={j.kind === "sell" ? "Sends to" : "Refunds to"} value={<CopyText value={j.address} head={8} tail={6} />} />
         <Row label={j.kind === "sell" ? "Refunds to" : "Delivers to"} value={<span className="inline-flex items-center gap-1">your Ferry node <CopyText value={j.own_address} head={6} tail={4} /></span>} />
+        {j.kind === "buy" ? <Row label="ZEC paid to" value={j.sweep_to ? <CopyText value={j.sweep_to} head={10} tail={8} /> : "Your Ferry node"} /> : null}
         <Row label="Quote" value={`${nearText(j.near.amount_in, j.kind === "sell" ? j.via_asset : j.asset)} → ${nearText(j.near.amount_out, j.kind === "sell" ? j.asset : j.via_asset)}`} />
         <Row label={j.kind === "sell" ? "At least" : "Exactly"} value={nearText(j.near.min_amount_out, j.kind === "sell" ? j.asset : j.via_asset)} />
         <Row label="Quote deadline" value={new Date(j.near.deadline).toLocaleString()} />
