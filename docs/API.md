@@ -195,6 +195,54 @@ that maker), refuses one it doesn't hold or that has under 5 s left
 `{maker: <allowlisted URL>, zec_zat, quote: <signed quote>}` to the daemon. A quote is handed out for
 one swap start only.
 
+## NEAR Intents (UI server, not ferryd)
+
+The UI servers (`server/prod.mjs`, the Vite dev server; `web/server/near.mjs`) reach NEAR Intents'
+1Click API for the browser, so a person can sell shielded ZEC for any 1Click asset or buy shielded
+ZEC with one ([ARCHITECTURE.md](ARCHITECTURE.md#cross-chain-settlement-with-near-intents)). Only the
+server talks to 1Click (`FERRY_NEAR_URL`, an optional partner `FERRY_NEAR_JWT` sent as a bearer
+token), with timeouts and size caps; the browser never names a URL. Every quote 1Click returns is
+checked against its ed25519 signature (`FERRY_NEAR_PUBKEY`, 1Click's key by default) before it is
+shown or used, and a real quote must echo the assets, amount and addresses that were asked.
+
+| Call | |
+|---|---|
+| `GET /api/near/tokens` | `{available, execution: {sell, buy}, reason, tokens, explorer}`: 1Click's tokens (cached 5 min) without native ZEC, each with `ferry`, the Ferry pair it is; `execution` says whether NEAR swaps run here each way; `reason` `"demo"` or `"mainnet"` when not |
+| `POST /api/near/quote` | `{direction, zec_zat, asset, address?, exact?}` → the best route: the Ferry leg (`via` pair, `maker`, rate) × a dry 1Click quote (`near.amount_in/amount_out/min_amount_out`, `time_s`). Without `exact` the coin amount is rounded to 3 significant digits before it leaves the server (cached 30 s) and the dry quote uses NEAR Intents placeholders; with it, the exact amount and, if given, `address` checked by 1Click (`400 {"field": "address"}`) |
+| `POST /api/near/swap` | sell `{direction: "sell", zec_zat, asset, address, via, min_out}` or buy `{direction: "buy", zec_zat, asset, address, via, max_in}` → `201` the job |
+| `GET /api/near/jobs`, `GET /api/near/status/:id` | the jobs, newest first, or one |
+| `POST /api/near/jobs/:id/retry` | a buy holding its coin (its Ferry swap couldn't run) tries again |
+
+**Sell.** A real 1Click quote (`FLEX_INPUT`, the coin → `asset`, `recipient` the person's address,
+`refundTo` their own Z daemon's address from `GET /api/addresses`), refused with `409 price_moved`
+if its `minAmountOut` is under `min_out`; then `POST /api/swaps` on the user's Z daemon with
+`payout_to` = the quote's deposit address and `min_counter` = its `minAmountIn` plus the redeem fee
+(EVM: the claim's tip), at a firm price when the partner gives one, and only with a partner whose
+offer lists `"payout"`. Only a daemon whose status lists `"payout"` is used (`501` otherwise). The
+job follows the swap, then `GET /v0/status` until `SUCCESS` (`done`) or `REFUNDED`/`FAILED` (the
+coin goes back to the person's own node: `refunded`).
+
+**Buy.** A real 1Click quote (`EXACT_OUTPUT`: `asset` → the coin, its amount what the ZEC costs now
+plus 1% and a UTXO lock's fee, `recipient` the user's own B daemon's address, `refundTo` the
+person's address), refused with `409 price_moved` if its `amountIn` is over `max_in`. The job shows
+the deposit address (and memo); on `SUCCESS` the server starts the Ferry buy on that B daemon once
+its balance shows the coin, for at most what NEAR Intents delivered (`max_counter`); a short
+delivery buys what it covers. A Ferry buy that fails leaves the coin in the node (`holding`).
+
+Jobs are kept in `FERRY_NEAR_STATE` with 1Click's signed quote (the record for a dispute). States:
+`deposit` (a buy waiting for it), `near`, `funding`, `ferry`, `holding`, `done`, `refunded`,
+`failed` (a sell's Ferry swap was called off; nothing reached NEAR Intents), `expired`.
+
+**Gating.** Swaps run only with `FERRY_NEAR=1`, which an operator sets on their own node: a NEAR swap
+pays out to an address the person types, so on a public demo a visitor would choose where the
+operator's coins go. Without it (the public demo) the tokens and quotes still answer, labelled not
+runnable here, and `POST /api/near/swap` is `403`; the daemon proxy never forwards a browser's
+`payout_to`. NEAR Intents is mainnet only: a daemon on a test network gets quotes, not swaps
+(`reason: "mainnet"`), unless `FERRY_NEAR_TESTNET=1` and `FERRY_NEAR_URL` is a loopback mock
+(`web/mock/oneclick.mjs`). A start takes the swap guards (the caps, both rate limits, one live swap
+per pair, the router idle); quotes are limited to `DEMO_NEAR_QUOTES_PER_MIN` (40) per IP and
+`DEMO_NEAR_QUOTES_PER_MIN_TOTAL` (400) in all; `FERRY_NEAR_QUOTES=0` turns it all off.
+
 ## GET /api/status
 
 ```json

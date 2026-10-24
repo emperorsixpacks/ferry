@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import { ArrowRight, ArrowsLeftRight } from "@phosphor-icons/react";
-import { directionOf, getSwaps, isMine, pairChain, pairCoin, type Direction, type PairId, type RouteView, type Status, type SwapView } from "@/api";
+import { directionOf, getSwaps, isMine, pairChain, pairCoin, type Direction, type NearJob, type PairId, type RouteView, type Status, type SwapView } from "@/api";
 import { coin, coinOf } from "@/format";
 import { navigate } from "@/router";
 import { phaseOf } from "@/swap/steps";
 import { Layout } from "../components/Layout";
-import { PairLogo, TokenLogo } from "../components/Logos";
+import { NearTokenLogo, PairLogo, TokenLogo } from "../components/Logos";
+import { NearMark } from "../components/TokenPicker";
 import { ToneBadge } from "../components/ui/badge";
 import { useLocal } from "../lib/daemon";
+import { chainName, jobIn, jobOut, nearWord, useNear } from "../lib/near";
 import { pairName } from "../lib/pairs";
 import { STATUS_WORD, swapAmounts, wordsFor, type Words } from "../lib/progress";
 import { ROUTE_WORD, legSwapIds, routeAmounts, tickerOf, useRoutes, zecText } from "../lib/routes";
@@ -17,6 +19,7 @@ import { ROUTE_WORD, legSwapIds, routeAmounts, tickerOf, useRoutes, zecText } fr
 // server offers. A row opens the swap, switching the coin and direction on screen first when it's
 // another one. Swaps a node of theirs made as a maker (in a local demo) are not theirs to list.
 // A private swap (coin → shielded ZEC → coin) is one row: its two swaps aren't listed on their own.
+// So is a NEAR Intents swap: its Ferry swap is part of its row.
 
 const POLL_MS = 10_000;
 
@@ -66,8 +69,10 @@ export function Activity() {
   }, [key]);
 
   const routes = useRoutes();
-  // a private swap's own two swaps are in its row
+  const near = useNear();
+  // a private swap's own two swaps are in its row, and a NEAR swap's Ferry swap in its own
   const seen = legSwapIds(routes.list);
+  for (const j of near.jobs) for (const id of [j.ferry.swap_id, ...j.ferry.earlier]) if (id) seen.add(id);
   const items: Item[] = sources
     .flatMap((x) => {
       const followed = x.daemon === d.daemon;
@@ -81,6 +86,7 @@ export function Activity() {
   const rows = [
     ...items.map((it) => ({ at: Date.parse(it.swap.timeline[0]?.at ?? "") || 0, key: `${it.pair}:${it.swap.id}`, row: <Row item={it} onOpen={() => open(it)} /> })),
     ...routes.list.map((v) => ({ at: v.created_at * 1000, key: v.id, row: <RouteRow route={v} /> })),
+    ...near.jobs.map((j) => ({ at: j.created_at * 1000, key: j.id, row: <NearRow job={j} /> })),
   ].sort((x, y) => y.at - x.at);
 
   const open = (it: Item) => {
@@ -196,6 +202,47 @@ function RouteRow({ route: v }: { route: RouteView }) {
           <span className="hidden sm:inline">
             {" "}
             · {tickerOf(v.from)} → shielded ZEC → {tickerOf(v.to)}
+          </span>
+        </span>
+      </span>
+      <ToneBadge tone={st.tone}>{st.label}</ToneBadge>
+      <ArrowRight size={14} weight="bold" className="hidden shrink-0 text-slate-400 transition-colors group-hover:text-slate-900 sm:block" aria-hidden />
+    </a>
+  );
+}
+
+// A NEAR Intents swap: shielded ZEC for an asset (or the other way), "via NEAR Intents", its status.
+function NearRow({ job: j }: { job: NearJob }) {
+  const st = nearWord(j);
+  const sell = j.kind === "sell";
+  const started = new Date(j.created_at * 1000);
+  const token = <NearTokenLogo symbol={j.asset.symbol} chain={j.asset.blockchain} size={30} />;
+  return (
+    <a
+      href={`/app/near/${j.id}`}
+      onClick={(e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+        e.preventDefault();
+        navigate(`/app/near/${j.id}`);
+      }}
+      className="group flex items-center gap-4 px-4 py-4 transition-colors hover:bg-slate-50 sm:px-5"
+    >
+      <span className="relative flex h-10 w-[52px] shrink-0 items-center" aria-hidden>
+        <span className="absolute left-0">{sell ? <TokenLogo id="zec" size={32} /> : <NearTokenLogo symbol={j.asset.symbol} chain={j.asset.blockchain} size={32} />}</span>
+        <span className="absolute left-5 rounded-full bg-white p-[2px]">{sell ? token : <TokenLogo id="zec" size={30} />}</span>
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block font-medium break-words text-slate-900 tabular-nums">
+          {jobIn(j)} <span className="text-slate-400">→</span> <span className="whitespace-nowrap">{j.state === "done" || !sell ? jobOut(j) : `${j.asset.symbol}`}</span>
+        </span>
+        <span className="mt-0.5 flex min-w-0 items-center gap-1 truncate text-[13px] text-slate-500">
+          <span className="font-medium text-slate-700">{sell ? "Sell ZEC" : "Buy ZEC"}</span>
+          <span aria-hidden>·</span>
+          <NearMark size={12} />
+          <span>via NEAR Intents</span>
+          <span className="hidden sm:inline">
+            {" "}
+            · {chainName(j.asset.blockchain)} · {started.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
           </span>
         </span>
       </span>

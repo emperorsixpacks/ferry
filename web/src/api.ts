@@ -276,3 +276,138 @@ export async function getMakers(): Promise<Maker[] | null> {
 }
 export const injectStall = (role: Role, id: string) =>
   call<unknown>(DAEMONS[role], `/api/swaps/${id}/fault`, { fault: "stall" });
+
+// ------------------------------------------------------------------------------------------------
+// NEAR Intents (server/near.mjs): sell shielded ZEC for any of its assets, or buy shielded ZEC with
+// them. Ferry swaps ZEC for a coin it supports; NEAR Intents (its 1Click API, called by the UI
+// server only) carries that coin on. Amounts of NEAR Intents assets are base-unit decimal strings.
+
+export interface NearToken {
+  assetId: string;
+  symbol: string;
+  // 1Click's chain id: "sol", "eth", "base", "near", "btc", ...
+  blockchain: string;
+  decimals: number;
+  price: number | null;
+  contractAddress: string | null;
+  // the Ferry pair it is, if Ferry swaps it itself
+  ferry: PairId | null;
+}
+
+export interface NearInfo {
+  available: boolean;
+  // whether NEAR swaps run here, each way (the operator's own node, on mainnet)
+  execution: { sell: boolean; buy: boolean };
+  // why not: "demo" (a public demo: quotes only) or "mainnet" (the nodes are on test networks)
+  reason: "demo" | "mainnet" | null;
+  tokens: NearToken[];
+  explorer: string;
+}
+
+export interface NearQuote {
+  direction: Direction;
+  zec_zat: number;
+  asset: string;
+  // the coin Ferry swaps ZEC for (sell) or with (buy), and the partner for it
+  via: PairId;
+  maker: string;
+  ferry: { rate_sat_per_zec: number; counter: string; fee: string; units: string; time_s: number };
+  near: {
+    amount_in: string;
+    amount_out: string;
+    min_amount_out: string;
+    max_amount_in: string | null;
+    time_s: number;
+    withdraw_fee: string | null;
+    approximate: boolean;
+    verified: boolean;
+  };
+  time_s: number;
+  execution: boolean;
+  reason: "demo" | "mainnet" | null;
+  address: "ok" | null;
+}
+
+export type NearState = "deposit" | "near" | "funding" | "ferry" | "holding" | "done" | "refunded" | "failed" | "expired";
+
+export interface NearTx {
+  hash: string;
+  url: string | null;
+}
+
+export interface NearJob {
+  id: string;
+  kind: Direction;
+  state: NearState;
+  outcome: string | null;
+  created_at: number;
+  updated_at: number;
+  zec_zat: number;
+  via: PairId;
+  maker: string;
+  asset: { id: string; symbol: string; blockchain: string; decimals: number };
+  via_asset: { id: string; symbol: string; decimals: number };
+  // sell: where NEAR Intents sends the asset; buy: where it refunds it
+  address: string;
+  // the user's own Ferry node's address for the coin between (a sell's refunds; a buy's delivery)
+  own_address: string;
+  ferry: { swap_id: string | null; state: string | null; outcome: Outcome; counter: string; counter_units?: string; zec_zat?: number; earlier: string[] };
+  near: {
+    deposit_address: string;
+    deposit_memo: string | null;
+    amount_in: string;
+    min_amount_in: string;
+    amount_out: string | null;
+    min_amount_out: string;
+    deadline: string;
+    time_s: number | null;
+    status: string;
+    details: {
+      amount_in: string | null;
+      amount_out: string | null;
+      deposited: string | null;
+      refunded: string | null;
+      refund_reason: string | null;
+      origin_txs: NearTx[];
+      destination_txs: NearTx[];
+      near_txs: string[];
+    } | null;
+    correlation_id: string | null;
+    verified: boolean;
+    signature: string | null;
+    timestamp: string | null;
+  };
+  problem: string | null;
+  timeline: { at: string; kind: string; label: string }[];
+  explorer: string;
+}
+
+// An error from a NEAR call: `field` "address" when it is about the address typed.
+export class NearError extends Error {
+  field: string | null;
+  code: string | null;
+  constructor(message: string, field: string | null = null, code: string | null = null) {
+    super(message);
+    this.field = field;
+    this.code = code;
+  }
+}
+
+async function near<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`/api/near${path}`, body === undefined ? undefined : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const data = (await res.json().catch(() => ({}))) as { error?: string; field?: string; code?: string };
+  if (!res.ok) throw new NearError(data.error ?? (res.status >= 500 ? "Couldn't reach NEAR Intents. Try again in a moment." : `${res.status} ${res.statusText}`), data.field ?? null, data.code ?? null);
+  return data as T;
+}
+
+// null: this server has no NEAR Intents (an older one, or FERRY_NEAR_QUOTES=0)
+export async function getNearInfo(): Promise<NearInfo | null> {
+  const res = await fetch("/api/near/tokens").catch(() => null);
+  if (!res || !res.ok) return null;
+  return (await res.json().catch(() => null)) as NearInfo | null;
+}
+// `exact`: the card's quote (the exact amount, and the address checked); else a picker row's
+export const getNearQuote = (body: { direction: Direction; zec_zat: number; asset: string; address?: string; exact?: boolean }) => near<NearQuote>("/quote", body);
+export const startNear = (body: { direction: Direction; zec_zat: number; asset: string; address: string; via: PairId; min_out?: string; max_in?: string }) => near<NearJob>("/swap", body);
+export const getNearJobs = () => near<NearJob[]>("/jobs");
+export const retryNear = (id: string) => near<NearJob>(`/jobs/${id}/retry`, {});
