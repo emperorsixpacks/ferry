@@ -20,3 +20,5 @@ HANDOFF.md
 .evm-testnet/
 .evm-testnet-fork/
 .demo-route/
+.mainnet-demo/
+.mainnet-demo-fork/
