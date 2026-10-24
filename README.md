@@ -404,4 +404,5 @@ LLFourn's `schnorr_fun` · the Zcash Foundation's frost-tools (`zcash-sign`) and
 
 ## License
 
-MIT or Apache-2.0, at your option (`license` in [Cargo.toml](Cargo.toml)).
+Licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or the
+[MIT license](LICENSE-MIT), at your option. Code under `third_party/` keeps its own license.
