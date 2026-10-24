@@ -1,0 +1,13 @@
+backend = "fetch"
+network = "Regtest"
+
+[grpc_settings]
+listen_address = "0.0.0.0:8137"
+
+[validator_settings]
+validator_jsonrpc_listen_address = "ferry-zebra:18232"
+validator_user = "regtest"
+validator_password = "regtest"
+
+[storage.database]
+path = "/app/data"
