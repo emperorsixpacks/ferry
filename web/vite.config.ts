@@ -1,7 +1,8 @@
-import { defineConfig, type ProxyOptions } from "vite";
+import { defineConfig, type Connect, type Plugin, type ProxyOptions } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
+import { makerDirectory, parseMakers } from "./server/makers.mjs";
 
 // The UI talks to two ferryd daemons. In dev and preview they are proxied under /daemon/z and
 // /daemon/b: the proxy adds each daemon's API token (FERRY_Z_TOKEN, FERRY_B_TOKEN; infra/demo.sh
@@ -10,6 +11,8 @@ import path from "node:path";
 // ferryd's --ui-origin allowlist keeps applying.
 const Z_URL = process.env.FERRY_Z_URL ?? "http://127.0.0.1:7101";
 const B_URL = process.env.FERRY_B_URL ?? "http://127.0.0.1:7102";
+const TOKENS: Record<string, string | undefined> = { z: process.env.FERRY_Z_TOKEN, b: process.env.FERRY_B_TOKEN };
+const TARGETS: Record<string, string> = { z: Z_URL, b: B_URL };
 
 function daemon(prefix: string, target: string, token: string | undefined): ProxyOptions {
   return {
@@ -30,16 +33,74 @@ function daemon(prefix: string, target: string, token: string | undefined): Prox
 }
 
 const proxy = {
-  "/daemon/z": daemon("/daemon/z", Z_URL, process.env.FERRY_Z_TOKEN),
-  "/daemon/b": daemon("/daemon/b", B_URL, process.env.FERRY_B_TOKEN),
+  "/daemon/z": daemon("/daemon/z", Z_URL, TOKENS.z),
+  "/daemon/b": daemon("/daemon/b", B_URL, TOKENS.b),
 };
 
+// The maker directory, as server/prod.mjs serves it: FERRY_MAKERS (or the one maker at
+// FERRY_MAKER_URL), GET /api/makers, and swap starts that name a maker are rewritten to its
+// allowlisted URL here, so the browser never sends one. The maker URL is handed to the daemon,
+// so it must be reachable from the daemon, not from the browser.
+function makers(): Plugin {
+  const dir = makerDirectory(parseMakers(process.env.FERRY_MAKERS, process.env.FERRY_MAKER_URL ?? B_URL));
+  const send = (res: Parameters<Connect.NextHandleFunction>[1], code: number, body: unknown) => {
+    res.statusCode = code;
+    res.setHeader("content-type", "application/json");
+    res.setHeader("cache-control", "no-store");
+    res.end(JSON.stringify(body));
+  };
+  const handle: Connect.NextHandleFunction = (req, res, next) => {
+    const url = req.url?.split("?")[0];
+    if (url === "/api/makers" && req.method === "GET") {
+      dir.list().then(
+        (list) => send(res, 200, { makers: list }),
+        () => send(res, 500, { error: "maker list failed" }),
+      );
+      return;
+    }
+    const m = url?.match(/^\/daemon\/(z|b)\/api\/swaps$/);
+    if (!m || req.method !== "POST") return next();
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", async () => {
+      let body: { maker?: unknown; zec_zat?: unknown };
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      } catch {
+        return send(res, 400, { error: "Send a JSON body like {\"zec_zat\": 10000000}" });
+      }
+      const maker = dir.resolve(body.maker);
+      if (!maker) return send(res, 400, { error: "Unknown maker. Pick one from the list." });
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      const token = TOKENS[m[1]];
+      if (token) headers.authorization = `Bearer ${token}`;
+      if (typeof req.headers.origin === "string") headers.origin = req.headers.origin;
+      try {
+        const up = await fetch(TARGETS[m[1]] + "/api/swaps", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ maker: maker.url, zec_zat: body.zec_zat }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        res.statusCode = up.status;
+        res.setHeader("content-type", up.headers.get("content-type") ?? "application/json");
+        res.end(await up.text());
+      } catch {
+        send(res, 502, { error: "Can't reach the daemon. Is it running?" });
+      }
+    });
+  };
+  return {
+    name: "ferry-makers",
+    configureServer: (server) => void server.middlewares.use(handle),
+    configurePreviewServer: (server) => void server.middlewares.use(handle),
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), makers()],
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
   define: {
-    // The maker URL is handed to Z's daemon, so it must be reachable from Z, not from the browser.
-    __FERRY_MAKER_URL__: JSON.stringify(process.env.FERRY_MAKER_URL ?? B_URL),
     // The party the swap app at / belongs to (z or b).
     __FERRY_LOCAL__: JSON.stringify(process.env.FERRY_LOCAL ?? "z"),
   },

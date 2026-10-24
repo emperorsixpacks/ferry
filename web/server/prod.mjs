@@ -9,8 +9,13 @@
 // Env (defaults in brackets):
 //   PORT [5300]  HOST [0.0.0.0]  DIST [web/dist next to this file]
 //   FERRY_Z_URL [http://127.0.0.1:7101]  FERRY_B_URL [http://127.0.0.1:7102]
-//   FERRY_MAKER_URL [http://127.0.0.1:7112]   B's peer URL, as reachable from Z's daemon; every
-//                                              swap is proposed to this maker, whatever the browser sends
+//   FERRY_MAKER_URL [http://127.0.0.1:7112]   B's peer URL, as reachable from Z's daemon; the only
+//                                              maker when FERRY_MAKERS is unset
+//   FERRY_MAKERS [unset]    the makers a visitor may pick, allowlisted by the operator: JSON
+//                           [{"name","url","pair"}] or "name|url|pair, ..." (see makers.mjs). URLs are
+//                           peer URLs as reachable from this server and from Z's daemon. GET
+//                           /api/makers lists their live offers (fetched here, cached 10 s); a swap
+//                           start names a maker by index or name, never by URL
 //   FERRY_Z_TOKEN / FERRY_Z_TOKEN_FILE, FERRY_B_TOKEN / FERRY_B_TOKEN_FILE
 //                                              the daemons' API tokens (<data-dir>/api-token); a file is
 //                                              re-read every 30 s, so a restarted daemon is picked up
@@ -32,6 +37,7 @@ import http from "node:http";
 import { createReadStream, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { makerDirectory, parseMakers } from "./makers.mjs";
 
 const env = process.env;
 const PORT = Number(env.PORT ?? 5300);
@@ -47,6 +53,8 @@ const SWAPS_PER_HOUR = Number(env.DEMO_SWAPS_PER_HOUR ?? 12);
 const FAULTS = env.DEMO_FAULTS === "1";
 const SSE_PER_IP = Number(env.DEMO_SSE_PER_IP ?? 8);
 const SSE_TOTAL = Number(env.DEMO_SSE_TOTAL ?? 200);
+// a bad FERRY_MAKERS stops the server here, with the reason
+const MAKERS = makerDirectory(parseMakers(env.FERRY_MAKERS, MAKER_URL));
 
 // ------------------------------------------------------------------------------------------------
 // daemons and their tokens
@@ -222,6 +230,13 @@ async function guard(key, path, req, res) {
       json(res, 400, { error: `The smallest demo swap is ${zec(DEMO_MIN_ZAT)} ZEC` });
       return false;
     }
+    // the browser names a maker (index or name); only an allowlisted URL reaches the daemon,
+    // which fetches whatever URL it's given
+    const maker = MAKERS.resolve(body?.maker);
+    if (!maker) {
+      json(res, 400, { error: "Unknown maker. Pick one from the list." });
+      return false;
+    }
     // the maker (B) finishes a moment after Z, and refuses a new swap until it has
     let lists;
     try {
@@ -253,8 +268,7 @@ async function guard(key, path, req, res) {
       const mine = rates.get(clientIp(req));
       if (mine?.length) mine.pop();
     };
-    // the maker is always ours: the daemon fetches whatever URL it's given
-    return JSON.stringify({ maker: MAKER_URL, zec_zat: zat });
+    return JSON.stringify({ maker: maker.url, zec_zat: zat });
   }
 
   if (/^\/api\/swaps\/[0-9a-fA-F]+\/fault$/.test(path)) {
@@ -411,6 +425,23 @@ async function proxy(key, path, search, req, res) {
 }
 
 // ------------------------------------------------------------------------------------------------
+// maker directory: GET /api/makers. Answers from the directory's cache, so however often it is
+// called, each maker gets at most one offer fetch per cache period. The demo's own limits apply
+// to every maker's range, as they do to the daemon's offer.
+
+async function serveMakers(req, res) {
+  if (req.method !== "GET" && req.method !== "HEAD") return json(res, 405, { error: "Method not allowed" });
+  const list = await MAKERS.list();
+  for (const m of list) {
+    if (m.max_zat != null) m.max_zat = Math.min(m.max_zat, DEMO_MAX_ZAT);
+    if (m.min_zat != null && DEMO_MIN_ZAT) m.min_zat = Math.max(m.min_zat, DEMO_MIN_ZAT);
+    if (m.liquidity_zat != null && m.max_zat != null) m.liquidity_zat = Math.min(m.liquidity_zat, m.max_zat);
+    delete m.error;
+  }
+  json(res, 200, { makers: list });
+}
+
+// ------------------------------------------------------------------------------------------------
 // static files
 
 const TYPES = {
@@ -468,12 +499,19 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === "/healthz") return json(res, 200, { ok: true });
+  if (url.pathname === "/api/makers") {
+    serveMakers(req, res).catch((e) => {
+      console.error("ferry-ui makers:", e);
+      if (!res.headersSent) json(res, 500, { error: "Internal error" });
+    });
+    return;
+  }
   serveStatic(url.pathname, req, res);
 });
 
 server.listen(PORT, HOST, () => {
   console.log(`ferry-ui on http://${HOST}:${PORT}  dist ${DIST}`);
-  console.log(`  Z ${DAEMONS.z.url.origin}  B ${DAEMONS.b.url.origin}  maker ${MAKER_URL}`);
+  console.log(`  Z ${DAEMONS.z.url.origin}  B ${DAEMONS.b.url.origin}  makers ${MAKERS.makers.map((m) => `${m.name} (${m.pair})`).join(", ") || "none"}`);
   console.log(`  demo: max ${zec(DEMO_MAX_ZAT)} ZEC, ${RATE_PER_HOUR} swaps/IP/hour, ${SWAPS_PER_HOUR} swaps/hour in all, ${SSE_PER_IP} streams/IP, ${SSE_TOTAL} streams in all, faults ${FAULTS ? "on" : "off"}${PUBLIC_ORIGIN ? `, origin ${PUBLIC_ORIGIN}` : ""}`);
 });
 
