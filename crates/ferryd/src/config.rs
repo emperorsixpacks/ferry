@@ -152,6 +152,29 @@ pub struct Cli {
     /// Accept proposals as maker: RATE_SAT_PER_ZEC[:MIN_ZAT:MAX_ZAT].
     #[arg(long)]
     pub maker_offer: Option<OfferArg>,
+    /// Follow the market instead of the fixed --maker-offer rate: `kraken`, `coingecko`, a comma
+    /// list, or `all`. The rate is the median of the sources that answer, times
+    /// (1 + --maker-spread-bps), refreshed every minute; the offer pauses when every source has
+    /// been failing for 5 minutes. MIN/MAX still come from --maker-offer.
+    #[arg(long, requires = "maker_offer")]
+    pub maker_price_feed: Option<crate::pricefeed::FeedArg>,
+    /// Spread over the feed price, in basis points (50 = +0.5%). May be negative: a B maker buying
+    /// ZEC quotes below the market.
+    #[arg(long, default_value_t = 0, allow_negative_numbers = true,
+          value_parser = clap::value_parser!(i32).range(-5_000..=5_000))]
+    pub maker_spread_bps: i32,
+    /// The pair the price feed quotes (BASE/QUOTE: ZEC/BTC, ZEC/LTC, ZEC/USD, ZEC/USDC).
+    #[arg(long, default_value = "ZEC/BTC")]
+    pub maker_price_pair: crate::pricefeed::Pair,
+    /// Testing and mirrors: SOURCE=BASE_URL to reach a feed somewhere else (repeatable).
+    #[arg(long, hide = true)]
+    pub maker_price_feed_url: Vec<String>,
+    /// Testing: seconds between feed refreshes (default 60).
+    #[arg(long, hide = true, default_value_t = crate::pricefeed::REFRESH.as_secs())]
+    pub maker_price_refresh_secs: u64,
+    /// Testing: pause the offer after this many seconds without a fresh price (default 300).
+    #[arg(long, hide = true, default_value_t = crate::pricefeed::STALE_AFTER.as_secs())]
+    pub maker_price_stale_secs: u64,
 
     #[arg(long, default_value_t = 12)]
     pub t1: u16,
@@ -261,7 +284,38 @@ impl Cli {
             min_zat: o.min_zat,
             max_zat: o.max_zat,
             terms: self.terms(),
+            rate_source: None,
+            rate_updated_at: None,
+            liquidity: None,
+            paused: false,
         }
+    }
+
+    /// The live rate behind the offer, when --maker-price-feed is given.
+    pub fn live_rate(&self) -> Option<crate::pricefeed::LiveRate> {
+        use crate::pricefeed::{FeedConfig, LiveRate, Source, GRACE};
+        use std::time::Duration;
+        let feed = self.maker_price_feed.as_ref()?;
+        let sources = feed
+            .0
+            .iter()
+            .map(|k| {
+                let prefix = format!("{}=", k.name());
+                let url = self
+                    .maker_price_feed_url
+                    .iter()
+                    .find_map(|o| o.strip_prefix(&prefix).map(str::to_string));
+                url.map_or_else(|| Source::public(*k), |base_url| Source { kind: *k, base_url })
+            })
+            .collect();
+        Some(LiveRate::new(FeedConfig {
+            pair: self.maker_price_pair,
+            sources,
+            spread_bps: self.maker_spread_bps,
+            refresh: Duration::from_secs(self.maker_price_refresh_secs.max(1)),
+            stale_after: Duration::from_secs(self.maker_price_stale_secs.max(1)),
+            grace: GRACE,
+        }))
     }
 }
 
@@ -325,6 +379,24 @@ pub struct Offer {
     pub min_zat: u64,
     pub max_zat: u64,
     pub terms: Terms,
+    /// `fixed`, or the feeds behind a live rate (`median(kraken,coingecko) +50bps`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_source: Option<String>,
+    /// Unix seconds of the price a live rate comes from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_updated_at: Option<u64>,
+    /// How much the maker can fill right now, from its balance (capped at `max_zat`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liquidity: Option<Liquidity>,
+    /// The live rate went stale: `making` is false until a feed answers again.
+    #[serde(default)]
+    pub paused: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Liquidity {
+    /// The largest ZEC amount the maker's balance covers right now.
+    pub zec_zat: u64,
 }
 
 impl Offer {

@@ -3,14 +3,16 @@ import { ArrowDown, ArrowsLeftRight, ShieldCheck } from "@phosphor-icons/react";
 import { startSwap, type Status, type SwapView } from "@/api";
 import { zec } from "@/format";
 import { Link, navigate } from "@/router";
-import { btcFor, btcText } from "@/swap/shared";
+import { btcText } from "@/swap/shared";
 import { phaseOf } from "@/swap/steps";
 import { confirmationsLabel, roughDuration, typicalSeconds, type BlockTimes } from "@/swap/timing";
 import { Detail, Label, Layout, PageHeader } from "../components/Layout";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { StatusBadge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
+import { MakerList } from "../components/MakerList";
 import { useLocal } from "../lib/daemon";
+import { quoteOf, selectable, useMakers, type Quote } from "../lib/makers";
 import { STATUS, amounts, direction, summary } from "../lib/swaps";
 
 // /app: the swap form and this party's swaps, laid out like SealPad's sale list.
@@ -61,38 +63,52 @@ export function AppHome() {
 
 function SwapForm({ status, bt, busySwap }: { status: Status | null; bt: BlockTimes; busySwap?: SwapView }) {
   const { role } = useLocal();
+  const makers = useMakers();
+  const [pick, setPick] = useState<string | null>(null);
+  // the picked maker while it takes swaps, else the first one that does
+  const usable = makers.list?.filter((m) => selectable(m, role)) ?? [];
+  const maker = usable.find((m) => m.name === pick) ?? usable[0] ?? null;
+  // with a maker directory the quote is the chosen maker's offer; an older server without one
+  // leaves the daemon's own offer
+  const offer: Quote | null = makers.list
+    ? maker && quoteOf(maker)
+    : makers.list === null && status
+      ? { rate: status.offer.rate_sat_per_zec, min: status.offer.min_zat, max: status.offer.max_zat, fee: status.offer.fee_sat ?? null, liquidity: null }
+      : null;
   const [amount, setAmount] = useState("1.00");
   const [touched, setTouched] = useState(false);
   // a host can cap swaps below the default amount (the public demo does): start at the cap
   useEffect(() => {
-    const max = status?.offer.max_zat;
+    const max = offer?.max;
     if (!touched && max != null && max < 1e8) setAmount(zec(max));
-  }, [status?.offer.max_zat, touched]);
+  }, [offer?.max, touched]);
   const [busy, setBusy] = useState(false);
   const [fail, setFail] = useState<string | null>(null);
-  const offer = status?.offer;
   const zat = Math.round(Number(amount) * 1e8);
   const valid = amount.trim() !== "" && Number.isFinite(zat) && zat > 0;
-  const gross = offer && valid ? Math.round((zat / 1e8) * offer.rate_sat_per_zec) : 0;
-  const btcSide = btcText(btcFor(role, gross, status));
+  const gross = offer && valid ? Math.round((zat / 1e8) * offer.rate) : 0;
+  // Z receives the locked amount less the fee of the transaction that pays it out
+  const btcSide = btcText(role === "Z" ? Math.max(0, gross - (offer?.fee ?? 0)) : gross);
 
   let problem: string | null = null;
   if (amount.trim() === "") problem = "Enter how much ZEC.";
   else if (!valid) problem = "Enter an amount, like 1.00.";
+  else if (makers.list && !maker) problem = "No maker is taking swaps right now.";
   else if (offer) {
-    if (zat < offer.min_zat) problem = `The smallest swap is ${zec(offer.min_zat)} ZEC.`;
-    else if (zat > offer.max_zat) problem = `The largest swap is ${zec(offer.max_zat)} ZEC.`;
+    if (zat < offer.min) problem = `The smallest swap is ${zec(offer.min)} ZEC.`;
+    else if (zat > offer.max) problem = `The largest swap is ${zec(offer.max)} ZEC.`;
+    else if (offer.liquidity != null && zat > offer.liquidity) problem = `${maker?.name ?? "The maker"} can fill up to ${zec(offer.liquidity)} ZEC right now.`;
     else if (role === "Z" && status && zat > status.balances.zec_shielded_zat) problem = `You have ${zec(status.balances.zec_shielded_zat)} shielded ZEC.`;
     else if (role === "B" && status && gross > status.balances.btc_sat) problem = `You have ${btcText(status.balances.btc_sat)} BTC.`;
   }
   const blocked = busySwap ? "Finish the swap in progress first." : null;
 
   const submit = async () => {
-    if (problem || blocked || busy) return;
+    if (problem || blocked || busy || !offer) return;
     setBusy(true);
     setFail(null);
     try {
-      const { id } = await startSwap(zat, role);
+      const { id } = await startSwap(zat, role, maker?.name);
       navigate(`/app/swap/${id}`);
     } catch (e) {
       setFail((e as Error).message);
@@ -140,14 +156,17 @@ function SwapForm({ status, bt, busySwap }: { status: Status | null; bt: BlockTi
             submit();
           }}
         >
+          {makers.list && makers.list.length > 0 ? (
+            <MakerList makers={makers.list} role={role} selected={maker?.name ?? null} onSelect={setPick} fetchedAt={makers.fetchedAt} now={makers.now} error={makers.error} />
+          ) : null}
           <div className="grid items-center gap-3 md:grid-cols-[1fr_auto_1fr]">
             {zecField}
             <ArrowDown size={18} weight="bold" className="mx-auto -rotate-90 text-slate-400 max-md:rotate-0" />
             {btcField}
           </div>
           <div className="grid grid-cols-2 gap-4 border-t border-slate-100 pt-4 text-sm md:grid-cols-4">
-            <Detail label="Rate" value={<span className="font-mono">{offer ? `1 ZEC = ${btcText(offer.rate_sat_per_zec)} BTC` : "–"}</span>} />
-            <Detail label="Network fee" value={<span className="font-mono">{offer?.fee_sat != null ? `${offer.fee_sat.toLocaleString("en-US")} sat` : "–"}</span>} />
+            <Detail label="Rate" value={<span className="font-mono">{offer ? `1 ZEC = ${btcText(offer.rate)} BTC` : "–"}</span>} />
+            <Detail label="Network fee" value={<span className="font-mono">{offer?.fee != null ? `${offer.fee.toLocaleString("en-US")} sat` : "–"}</span>} />
             <Detail
               label="Takes"
               value={
@@ -164,7 +183,7 @@ function SwapForm({ status, bt, busySwap }: { status: Status | null; bt: BlockTi
             <Detail label="If it fails" value="Your coins come back" />
           </div>
           <div className="flex flex-wrap items-center gap-4">
-            <Button type="submit" size="lg" disabled={!status || !!problem || !!blocked || busy}>
+            <Button type="submit" size="lg" disabled={!status || !offer || !!problem || !!blocked || busy}>
               {busy ? "Starting…" : "Swap"}
             </Button>
             {problem || fail || blocked ? (

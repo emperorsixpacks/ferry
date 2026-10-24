@@ -169,6 +169,8 @@ services:
       FERRY_Z_URL: http://ferryd-z:7101
       FERRY_B_URL: http://ferryd-b:7102
       FERRY_MAKER_URL: http://ferryd-b:7112
+      # optional maker list for /app (empty: the one maker above); see web/server/makers.mjs
+      FERRY_MAKERS: ${FERRY_MAKERS:-}
       FERRY_Z_TOKEN_FILE: /tokens/z/api-token
       FERRY_B_TOKEN_FILE: /tokens/b/api-token
       PUBLIC_ORIGIN: https://${DOMAIN:?set DOMAIN in infra/deploy/.env}

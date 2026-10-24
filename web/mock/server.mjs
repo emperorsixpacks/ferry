@@ -10,9 +10,12 @@
 //
 // Env: MOCK_SPEED (default 1, higher is faster), MOCK_Z_PORT, MOCK_B_PORT, MOCK_WALLET_LAG_MS,
 // MOCK_BTC_NETWORK / MOCK_ZEC_NETWORK (labels only; the mock still mines fast).
+//
+// B also serves the peer offers of a few mock makers (mock/makers.mjs) for the maker list.
 
 import http from "node:http";
 import { randomBytes } from "node:crypto";
+import { MOCK_MAKERS, mockMakerAt, mockMakerByUrl } from "./makers.mjs";
 
 const SPEED = Number(process.env.MOCK_SPEED ?? 1) || 1;
 const Z_PORT = Number(process.env.MOCK_Z_PORT ?? 7101);
@@ -92,8 +95,10 @@ function mine(chain) {
 // ---------------------------------------------------------------------------------------------
 // swaps
 
+const rateOf = (makerUrl) => mockMakerByUrl(makerUrl)?.rate ?? RATE;
+
 function newSwap(taker, makerUrl, zec_zat) {
-  const btc_sat = Math.round((zec_zat / 1e8) * RATE);
+  const btc_sat = Math.round((zec_zat / 1e8) * rateOf(makerUrl));
   const pts = { Z: { p: hex(32), s: point() }, B: { p: hex(32), s: point() } };
   const s = {
     id: hex(16),
@@ -473,6 +478,31 @@ function statusView(role) {
   };
 }
 
+const STARTED = now();
+
+// ferryd's GET /peer/offer for one mock maker. Live-rate makers refresh every 60 s, like
+// --maker-price-feed; a paused one stopped refreshing before the mock started.
+function peerOffer(m) {
+  const t = Math.floor(now() / 1000);
+  const up = Math.floor((now() - STARTED) / 1000);
+  const updated = m.source === "fixed" ? undefined : m.paused ? Math.floor(STARTED / 1000) - m.ageS : t - ((m.ageS + up) % 60);
+  // Bram is the mock's real B party: its liquidity follows its BTC balance
+  const liquidity = m.slug === null ? Math.max(0, Math.floor(((parties.B.balances.btc_sat - FEE_SAT) * 1e8) / m.rate)) : m.liquidity;
+  return {
+    role: "B",
+    network: chains.btc.network,
+    making: !m.paused,
+    paused: !!m.paused,
+    rate_sat_per_zec: m.rate,
+    min_zat: m.min,
+    max_zat: m.max,
+    terms: { t1: T1, t2: T2, btc_fee: FEE_SAT, btc_lock_confirmations: BTC_CONFS, zec_confirmations: ZEC_CONFS, cancel_confirmations: CANCEL_CONFS, redeem_margin: DELTA, refund_margin: DELTA, keypath: true },
+    rate_source: m.source,
+    ...(updated != null ? { rate_updated_at: updated } : {}),
+    liquidity: { zec_zat: Math.min(liquidity, m.max) },
+  };
+}
+
 // ---------------------------------------------------------------------------------------------
 // clock
 
@@ -549,6 +579,11 @@ function handler(role) {
 
     if (req.method === "GET" && path === "/api/status") return send(res, 200, statusView(role));
 
+    // the mock makers' public offers (ferryd's GET /peer/offer), on B only
+    const maker = role === "B" && req.method === "GET" ? mockMakerAt(path) : undefined;
+    if (maker === null) return send(res, 404, { error: "not found" });
+    if (maker) return maker.offline ? send(res, 503, { error: "offline" }) : send(res, 200, peerOffer(maker));
+
     // mock only, for screenshot and film scripts: forget every swap and restore the starting
     // balances, so each story starts from the same wallet. Chains keep their heights.
     if (req.method === "POST" && path === "/api/_mock/refuse-next-lock") {
@@ -569,10 +604,13 @@ function handler(role) {
       const body = await readBody(req);
       const zat = Number(body?.zec_zat);
       if (!body || !Number.isInteger(zat)) return send(res, 400, { error: "zec_zat must be an integer" });
-      if (zat < 10000000 || zat > 1000000000) return send(res, 400, { error: "Amount must be between 0.1 and 10 ZEC" });
+      const maker = mockMakerByUrl(body.maker) ?? MOCK_MAKERS[0];
+      if (maker.offline) return send(res, 502, { error: "maker unreachable: connection refused" });
+      if (maker.paused) return send(res, 400, { error: "the counterparty is not making offers" });
+      if (zat < maker.min || zat > maker.max) return send(res, 400, { error: `Amount must be between ${zecAmount(maker.min)} and ${zecAmount(maker.max)}` });
       if (swaps.some((s) => !(s.views.Z.outcome && s.views.B.outcome))) return send(res, 409, { error: "A swap is already in progress" });
       if (parties.Z.balances.zec_shielded_zat < zat) return send(res, 400, { error: "Z does not have enough shielded ZEC" });
-      if (parties.B.balances.btc_sat < Math.round((zat / 1e8) * RATE)) return send(res, 400, { error: "B does not have enough BTC" });
+      if (parties.B.balances.btc_sat < Math.round((zat / 1e8) * maker.rate)) return send(res, 400, { error: "B does not have enough BTC" });
       const s = newSwap(role, body.maker ?? null, zat);
       return send(res, 201, { id: s.id });
     }

@@ -94,6 +94,7 @@ Environment (defaults in brackets):
       [vendor/zcash-devtool + infra/patches/zcash-devtool-ferry.patch, built with --features regtest_support]; builds ZEC_SIGNER
       [tools/ferry-zec-signer] if missing. Extra ferryd flags: ZEC_ARGS_Z / ZEC_ARGS_B
   FERRYD_ARGS (extra flags for both daemons)   FERRY_DEMO_DIR [$STATE]
+  MAKER_ARGS (extra flags for B, e.g. "--maker-price-feed coingecko --maker-spread-bps 50")
 EOF
 }
 
@@ -408,7 +409,8 @@ cmd_up() {
   log "mined 101 blocks to the miner wallet"
 
   log "starting B ($B_NAME, maker at $RATE sat/ZEC): API :$B_PORT, peer :$B_PEER_PORT"
-  start_ferryd b b "$B_NAME" "$B_PORT" "$B_PEER_PORT" --maker-offer "$RATE"
+  # shellcheck disable=SC2086
+  start_ferryd b b "$B_NAME" "$B_PORT" "$B_PEER_PORT" --maker-offer "$RATE" ${MAKER_ARGS:-}
   log "starting Z ($Z_NAME): API :$Z_PORT, peer :$Z_PEER_PORT"
   if [ "$ZEC_BACKEND" = mock ]; then
     start_ferryd z z "$Z_NAME" "$Z_PORT" "$Z_PEER_PORT" --zec-mock-balance "$ZEC_BALANCE_ZAT"

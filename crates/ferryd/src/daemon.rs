@@ -60,6 +60,8 @@ pub struct Daemon<L> {
     pub cli: Cli,
     pub role: Role,
     pub offer: Offer,
+    /// The live rate behind `offer` (--maker-price-feed); see `pricefeed::live_offer`.
+    pub price: Option<Arc<crate::pricefeed::LiveRate>>,
     rpc: BitcoinRpc,
     pub leg: L,
     http: reqwest::Client,
@@ -209,6 +211,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         Ok(Arc::new(Daemon {
             role: cli.role.into(),
             offer: cli.offer(),
+            price: cli.live_rate().map(Arc::new),
             cli,
             rpc,
             leg,
@@ -244,13 +247,15 @@ impl<L: ZecLeg + 'static> Daemon<L> {
 
     pub async fn status_view(&self) -> anyhow::Result<StatusView> {
         let zec = self.leg.status().await?;
+        let balances = view::Balances {
+            zec_shielded_zat: zec.shielded_balance,
+            btc_sat: self.rpc.balance().await?.to_sat(),
+        };
+        let offer = self.offer_with(Some(&balances));
         Ok(StatusView {
             role: self.role,
             name: self.cli.name.clone(),
-            balances: view::Balances {
-                zec_shielded_zat: zec.shielded_balance,
-                btc_sat: self.rpc.balance().await?.to_sat(),
-            },
+            balances,
             chains: view::Chains {
                 btc: view::BtcChain {
                     network: self.network().to_string(),
@@ -262,17 +267,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     pool: "ironwood".into(),
                 },
             },
-            offer: view::OfferView {
-                pair: "ZEC/BTC".into(),
-                rate_sat_per_zec: self.offer.rate_sat_per_zec,
-                min_zat: self.offer.min_zat,
-                max_zat: self.offer.max_zat,
-                fee_sat: self.offer.terms.btc_fee,
-                t1_blocks: self.offer.terms.t1,
-                t2_blocks: self.offer.terms.t2,
-                btc_lock_confs: self.offer.terms.btc_lock_confirmations,
-                zec_confs: self.offer.terms.zec_confirmations,
-            },
+            offer: view::OfferView::of(&offer),
         })
     }
 
@@ -509,7 +504,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
 
     /// Maker: handle a `Propose`. Idempotent per session id.
     pub async fn accept_proposal(&self, req: ProposeRequest) -> Result<Envelope, ApiError> {
-        if !self.offer.making {
+        if !self.offer_with(None).making {
             return Err(ApiError(403, "not making offers".into()));
         }
         {
@@ -563,7 +558,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         if params.zec_amount < self.offer.min_zat || params.zec_amount > self.offer.max_zat {
             return Err(ApiError::bad("amount outside the offer's range"));
         }
-        if params.btc_amount != self.offer.btc_for(params.zec_amount) {
+        if !self.rate_matches(params.zec_amount, params.btc_amount) {
             return Err(ApiError::bad("BTC amount does not match the offer's rate"));
         }
         params

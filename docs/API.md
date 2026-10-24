@@ -24,10 +24,52 @@ The `maker` URL in `POST /api/swaps` is the maker's **peer** listener (demo: `ht
 exported as `FERRY_MAKER_URL`), not its control API.
 
 Peer protocol (JSON `Envelope`s from ferry-core; the taker initiates every request):
-`GET /peer/offer` (rate, role, network, terms), `POST /peer/swaps` (`{envelope: Propose, taker_url}`
+`GET /peer/offer` (rate, role, network, terms, and the live-rate fields below), `POST /peer/swaps` (`{envelope: Propose, taker_url}`
 → the `Accept` envelope), `POST /peer/swaps/:id/messages` (one taker envelope; a retry of the same
 envelope is not applied twice) and `GET /peer/swaps/:id/messages?after=n` (the maker's envelopes
 from index n). A stalled party answers `503`.
+
+### Live maker rate and the offer's extra fields
+
+A maker quotes the fixed `--maker-offer RATE[:MIN:MAX]` rate, or follows the market with
+`--maker-price-feed kraken,coingecko` (or `all`) and `--maker-spread-bps N` (may be negative; default
+0). `--maker-price-pair` picks the pair the feeds quote (default `ZEC/BTC`; `ZEC/LTC`, `ZEC/USD` and
+`ZEC/USDC` are understood, crossed through USD where a source lists no direct market). Every ~60 s
+ferryd asks each source (no API keys, 5 s timeout per call), takes the median of the ones that
+answered with a fresh positive price, and sets rate = median × (1 + N/10000), in the quote's smallest
+unit per ZEC. If no source has answered for 5 minutes the offer pauses (`making: false`,
+`paused: true`) rather than quote a stale price. A proposal at the previous rate is still accepted for
+2 minutes after a change (a taker's quote in flight). `/peer/offer` (and `offer` in `/api/status`)
+then carry:
+
+```json
+{ "rate_source": "median(kraken,coingecko) +50bps",  // or "fixed"
+  "rate_updated_at": 1792404387,                     // unix seconds of the price; absent when fixed
+  "liquidity": { "zec_zat": 240000000 },             // the largest ZEC amount the maker's balance
+                                                     // covers now, capped at max_zat
+  "paused": false }
+```
+
+All four are optional for a taker: an older maker leaves them out.
+
+## Maker directory (UI server, not ferryd)
+
+The UI servers (`web/server/prod.mjs`, and the Vite dev server) list the makers the operator
+allowlists in `FERRY_MAKERS` (JSON `[{"name","url","pair"}]` or `name|url|pair, …`; default: the one
+maker at `FERRY_MAKER_URL`). `GET /api/makers` returns, per maker, what its `/peer/offer` says,
+fetched server-side (2.5 s timeout, 16 KB cap, cached 10 s):
+
+```json
+{ "makers": [ { "index": 0, "name": "Kestrel", "pair": "ZEC/BTC", "online": true, "available": true,
+  "paused": false, "role": "B", "rate_sat_per_zec": 412350, "min_zat": 5000000, "max_zat": 500000000,
+  "fee_sat": 2000, "liquidity_zat": 240000000, "rate_source": "median(kraken,coingecko) +50bps",
+  "rate_updated_at": 1792404387, "rate_age_s": 20 } ] }
+```
+
+The browser starts a swap with `POST /daemon/z/api/swaps {"maker": "Kestrel" | 0, "zec_zat": …}`;
+the UI server replaces `maker` with that entry's allowlisted URL (leaving it out picks the first
+maker). Any other value, a URL included, is refused with `400`, so a client can never make a daemon
+fetch a URL of its choosing.
 
 ## GET /api/status
 

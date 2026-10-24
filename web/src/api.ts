@@ -22,6 +22,12 @@ export interface Status {
     t2_blocks?: number;
     btc_lock_confs?: number;
     zec_confs?: number;
+    // a maker's live rate (--maker-price-feed): "fixed" or the feeds; unix seconds of the price
+    rate_source?: string;
+    rate_updated_at?: number;
+    // the largest ZEC amount this party's balance covers as maker
+    liquidity_zat?: number;
+    paused?: boolean;
   };
 }
 
@@ -58,7 +64,6 @@ export interface SwapView {
 }
 
 export const DAEMONS: Record<Role, string> = { Z: "/daemon/z", B: "/daemon/b" };
-export const MAKER_URL: string = __FERRY_MAKER_URL__;
 // Which party this browser is: the swap app shows only that side. `?as=b` overrides it.
 export const LOCAL_ROLE: Role = (() => {
   const q = new URLSearchParams(window.location.search).get("as");
@@ -85,7 +90,39 @@ async function call<T>(base: string, path: string, body?: unknown): Promise<T> {
 
 export const getStatus = (role: Role) => call<Status>(DAEMONS[role], "/api/status");
 export const getSwaps = (role: Role) => call<SwapView[]>(DAEMONS[role], "/api/swaps");
-export const startSwap = (zec_zat: number, as: Role = "Z") =>
-  call<{ id: string }>(DAEMONS[as], "/api/swaps", { maker: MAKER_URL, zec_zat });
+// `maker` is a name from GET /api/makers; the UI server maps it to the maker's allowlisted URL
+// (the browser never sends a URL). Left out, the server's first maker.
+export const startSwap = (zec_zat: number, as: Role = "Z", maker?: string) =>
+  call<{ id: string }>(DAEMONS[as], "/api/swaps", maker === undefined ? { zec_zat } : { maker, zec_zat });
+
+// One maker the UI server allowlists, with its live offer (GET /api/makers).
+export interface Maker {
+  index: number;
+  name: string;
+  pair: string;
+  online: boolean;
+  // online, making and not paused: it takes a swap now
+  available: boolean;
+  paused: boolean;
+  role: Role | null;
+  rate_sat_per_zec: number | null;
+  min_zat: number | null;
+  max_zat: number | null;
+  fee_sat: number | null;
+  liquidity_zat: number | null;
+  rate_source: string | null;
+  rate_updated_at: number | null;
+  // seconds, as of the server's answer
+  rate_age_s: number | null;
+}
+
+// null: this server has no maker directory (an older server); the form then uses the daemon's offer
+export async function getMakers(): Promise<Maker[] | null> {
+  const res = await fetch("/api/makers");
+  if (res.status === 404) return null;
+  const data = (await res.json().catch(() => null)) as { makers?: Maker[] } | null;
+  if (!res.ok || !Array.isArray(data?.makers)) throw new Error("Can't load the maker list");
+  return data.makers;
+}
 export const injectStall = (role: Role, id: string) =>
   call<unknown>(DAEMONS[role], `/api/swaps/${id}/fault`, { fault: "stall" });

@@ -207,7 +207,7 @@ async fn addresses<L: ZecLeg + 'static>(
 }
 
 async fn offer<L: ZecLeg + 'static>(State(d): D<L>) -> Json<crate::config::Offer> {
-    Json(d.offer.clone())
+    Json(d.offer_now().await)
 }
 
 async fn propose<L: ZecLeg + 'static>(

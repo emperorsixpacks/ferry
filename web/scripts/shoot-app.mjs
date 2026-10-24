@@ -20,7 +20,6 @@ mkdirSync(ROOT + "b", { recursive: true });
 const env = REAL
   ? { ...process.env, PORT }
   : { ...process.env, MOCK_SPEED: process.env.MOCK_SPEED ?? "2", MOCK_Z_PORT: "7151", MOCK_B_PORT: "7152", FERRY_Z_URL: "http://127.0.0.1:7151", FERRY_B_URL: "http://127.0.0.1:7152", PORT };
-const MAKER = REAL ? env.FERRY_MAKER_URL ?? env.FERRY_B_URL : "http://127.0.0.1:7152";
 const deadEnv = { ...process.env, FERRY_Z_URL: "http://127.0.0.1:7159", FERRY_B_URL: "http://127.0.0.1:7158", FERRY_Z_TOKEN: "", FERRY_B_TOKEN: "", PORT: String(Number(PORT) + 1) };
 const procs = [spawn("pnpm", ["exec", "vite"], { env, stdio: "ignore" })];
 if (!REAL) {
@@ -92,7 +91,7 @@ async function shoot(name, { full = false, settle = 1800 } = {}) {
   }
   console.log("shot", (as === "b" ? "b/" : "") + name);
 }
-const start = async () => (await api("z", "/api/swaps", { maker: MAKER, zec_zat: 100000000 })).id;
+const start = async () => (await api("z", "/api/swaps", { zec_zat: 100000000 })).id;
 const stall = (who, id) => api(who, `/api/swaps/${id}/fault`, { fault: "stall" });
 
 // --- static pages
