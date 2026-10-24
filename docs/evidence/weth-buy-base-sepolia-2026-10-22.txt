@@ -1,0 +1,69 @@
+# Ferry: the first WETH -> ZEC buy on public test networks, 2026-10-22. One swap through the public
+# web card of the server deploy, on Base Sepolia (chain 84532) and the Zcash testnet.
+#
+# What ran: the same stack as docs/evidence/local-stack-base-sepolia-2026-10-21.txt
+# (`infra/deploy/deploy.sh local`, compose project "ferry-local", Caddy on https://localhost:7950,
+# public mode: FERRY_OWN_NODE unset), restarted on 2026-10-22 with its volumes and keys. Code:
+# 0b08ba9 (the code of the 10-21 final checks). Settings unchanged from that file:
+# BUY_ZEC=btc,ltc,usdc-base,weth-base, WETH_RATE 0.012 WETH per ZEC, swaps of 0.01-0.25 ZEC, the
+# demo guard's defaults (0.5 ZEC a swap, 3 swaps per IP and 12 in all per hour).
+# The swap was started by a headless Chromium (Playwright) using the swap card itself: press
+# "Switch direction" (receive ZEC), pick WETH, type 0.01, press Buy ZEC; the progress page was
+# read until it settled. Both sides are our wallets, as on the public demo: in a buy the visitor's
+# swap starts on the pair's B (bram, holds WETH) and the pair's Z (zoe) is the maker selling ZEC.
+# Wallets: ZEC/WETH B 0x8908B7bd0c6153121578f6ac78bF81069587B591, Z 0x4F6fF6162FA23883DCe2EadC9821113971f458AE.
+# FerryLock 0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef; WETH 0x4200000000000000000000000000000000000006.
+# Times are UTC. Zcash transactions are shielded, so they are given as txids only.
+
+## The card before the press (public page, through Caddy)
+# Swap · Demo maker (ZEC for WETH) · SELL 0.00012 WETH · You have 0.00092 WETH · BUY ZEC · Arrives
+# shielded · 1 ZEC = 0.012 WETH · from Demo maker (ZEC for WETH) · Partner online · can take your
+# swap now · Ferry · one swap · about 2-10 min · [Buy ZEC]
+
+## The swap: 0.01 ZEC for 0.00012 WETH, id 23400ae0a209098f9cfc6818a4c4c43dcfc475769971a877ea4fc99a882ca2e4
+# B (bram), the visitor's side: GET /api/swaps/<id> on ferryd-b-weth-base (ferry-api, inside its container)
+20:32:43 propose_sent        Sent Propose to Z: amounts, deadlines, Pallas and secp256k1 points, DLEQ proof, our EVM account
+20:32:43 dleq_verified       Verified Z's DLEQ proof: Z_p and Z_s share one discrete log. Derived the joint Ironwood address
+20:32:43 terms_agreed        nothing to presign on an EVM chain, FerryLock enforces the deadlines
+20:33:14 btc_lock_broadcast  0x8d2ba7ed272476ab8585f85dd7fda874bdfaee2c9befa801913ca85ff5f2c365  Locked 0.00012 WETH in FerryLock for Z
+20:34:20 evm_lock_confirmed  the lock is confirmed; waiting for Z's ZEC
+20:35:02 zec_note_seen       a2e1152d0bf86fdde62fafbbdab182c4b45c108c815bb4285573b82aafa58e04  Found the lock note at the joint address with the shared viewing key
+20:36:54 zec_confirmed       Lock note has 3 confirmations and holds 0.01 ZEC
+20:36:54 redeem_adaptor_sent Signed Ready(id) (EIP-712) and sent it to Z: Z may now claim. Nothing goes on chain
+20:37:10 claim_seen          0xdb0b11bd8b7178862bbb015514ff2aebe9ac1b437862474fd8ddade5668029a3  Saw Z's claim on FerryLock: z is now public
+20:37:10 secret_extracted    Read z from Z's claim (calldata and event) and checked it against Z's points
+20:37:10 sweep_delayed       Waiting 19s before sweeping, so the ZEC sweep does not line up with the FerryLock claim
+20:38:58 zec_sweep_broadcast 71b5d6227e10774b2f55f518d749fa45284839d8b9f646639217834399c9da63  Swept the joint note to B's own shielded address
+20:40:13 swap_complete       Swap complete. B holds 0.01 ZEC in its own Ironwood notes
+# outcome: B ZecSwept, swapped
+#
+# Z (zoe), the maker's side: GET /daemon/weth-base/api/swaps/<id> through the web server
+20:32:43 propose_received    Received B's Propose: 0.01 ZEC for 0.00012 WETH
+20:33:16 btc_lock_seen       0x8d2ba7ed...  FerryLock holds 0.00012 WETH for this swap, and every term matches
+20:33:35 zec_lock_broadcast  a2e1152d...    Sent 0.01 ZEC from Z's Ironwood notes to the joint address
+20:36:59 redeem_adaptor_received  Received B's Ready(id) signature and checked it recovers to B's account
+20:37:05 btc_redeem_broadcast 0xdb0b11bd... Claimed 0.00012 WETH from FerryLock with B's Ready signature
+20:37:06 swap_complete       Swap complete. 0.00012 WETH is at Z's address
+# outcome: Z Claimed, swapped
+#
+# The page (progress, through Caddy): "Your WETH is locked (done) 9:33:14 PM · Partner locks their
+# ZEC (done) 9:36:54 PM · You receive ZEC (done) 9:40:13 PM" (the browser's clock is UTC+1), then
+# "Updating wallet… The swap is finished. Your wallet is picking up the result."
+# Start to ZEC in B's own shielded notes: 7 min 30 s.
+
+## Both Base Sepolia transactions, read back from the chain (eth_getTransactionReceipt, sepolia.base.org)
+0x8d2ba7ed272476ab8585f85dd7fda874bdfaee2c9befa801913ca85ff5f2c365 status 1 block 48896605 from 0x8908b7bd0c6153121578f6ac78bf81069587b591 (B) to FerryLock, gasUsed 251056 (lock)
+0xdb0b11bd8b7178862bbb015514ff2aebe9ac1b437862474fd8ddade5668029a3 status 1 block 48897779 from 0x4f6ff6162fa23883dce2eadc9821113971f458ae (Z) to FerryLock, gasUsed 65850 (claim)
+
+## Balances (deploy.sh local status), before and after
+# before: B 0.00092 WETH, 0.001986 ETH, 0.0892 ZEC; Z 0.00108 WETH, 0.001497 ETH, 0.0892 ZEC
+# after:  B 0.0008  WETH, 0.001984 ETH, 0.0991 ZEC; Z 0.0012  WETH, 0.001496 ETH, 0.0791 ZEC
+# B paid 0.00012 WETH and got 0.0099 ZEC (0.01 less the sweep's fee); Z got 0.00012 WETH and
+# spent 0.0101 ZEC (0.01 plus the lock's fee). Gas: B 0.000002 ETH, Z 0.000001 ETH.
+
+## Seen on the way, not part of the swap
+# The page's first load logged one "HTTP 400 POST /api/quotes": the card asks for a quote at its
+# default amount before it moves to the demo's 0.5 ZEC cap. The swap itself was not affected.
+
+## Not shown here
+# A refund or a penalty on a public network (fork only, docs/evidence/evm-base-sepolia-fork-2026-10-20.txt).

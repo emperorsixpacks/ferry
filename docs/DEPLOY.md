@@ -142,8 +142,9 @@ infra/deploy/deploy.sh <ssh-host> addresses
 This prints B's **signet** address and Z's **Zcash testnet** unified address (`utest1…`), then
 the same for every enabled pair (section 7).
 
-- Send signet sats to B, for example from https://signet.bc-2.jp. B needs the swap amount plus a
-  little for fees; with the default rate (410 000 sat per ZEC), 0.5 ZEC needs about 205 000 sat.
+- Send signet sats to B from a signet faucet, for example https://faucet.coinbin.org or
+  https://bitcoinsignetfaucet.com (both ask for a human check; faucets come and go, and the old
+  signet.bc-2.jp is gone). B needs the swap amount plus a little for fees; with the default rate (410 000 sat per ZEC), 0.5 ZEC needs about 205 000 sat.
 - Send TAZ to Z from https://fauzec.com (1 TAZ a day). zcash-devtool only spends TAZ received
   from another wallet after **10 confirmations** (about 13 minutes), so fund Z first.
 
@@ -311,8 +312,10 @@ Same as ZEC/USDC (same RPC, same FerryLock, its own two accounts in
      <B's address> 12000000000000000 --rpc-url https://sepolia.base.org --account <your keystore>
    ```
 4. **Limits.** A fixed demo rate (`WETH_RATE`, 0.012 WETH per ZEC; `WETH_PRICE_FEED` follows
-   ZEC/ETH instead), swaps of 0.01 to 0.25 ZEC, the same deadlines as ZEC/USDC. ZEC/WETH has run
-   on a local fork of Base Sepolia, not yet live.
+   ZEC/ETH instead), swaps of 0.01 to 0.25 ZEC, the same deadlines as ZEC/USDC. ZEC → WETH has run
+   live on Base Sepolia through this deploy, eight swaps, up to three at once
+   (`docs/evidence/local-stack-base-sepolia-2026-10-21.txt`); WETH → ZEC (`BUY_ZEC=weth-base`) ran
+   once, on 2026-10-22 (`docs/evidence/weth-buy-base-sepolia-2026-10-22.txt`).
 
 ### 7.4 Verify
 

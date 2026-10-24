@@ -170,9 +170,13 @@ backups and operations are in [docs/DEPLOY.md](docs/DEPLOY.md).
   below); Litecoin has run only with the stand-in chain.
 - ZEC ⇄ USDC: FerryLock has 34 Foundry tests (5 fuzz, including the scalar check against an
   independent secp256k1 implementation); two daemons with `--counter evm` run happy, refund and
-  punish against anvil and on a fork of Base Sepolia, with the stand-in Zcash chain. One live swap
-  on public test networks, with real shielded notes: 0.05 test ZEC for 2 test USDC on Base Sepolia
-  and Zcash testnet, 2026-10-20 ([log](docs/evidence/evm-base-sepolia-live-2026-10-20.txt)). B's
+  punish against anvil and on a fork of Base Sepolia, with the stand-in Zcash chain. Fourteen
+  live swaps on public test networks (Base Sepolia and Zcash testnet), with real shielded notes:
+  0.05 test ZEC for 2 test USDC on 2026-10-20 ([log](docs/evidence/evm-base-sepolia-live-2026-10-20.txt)),
+  then twelve through the public swap card of the server deploy on 2026-10-21: ZEC → USDC twice,
+  USDC → ZEC twice, ZEC → WETH eight times, up to three at once
+  ([log](docs/evidence/local-stack-base-sepolia-2026-10-21.txt)), and the first WETH → ZEC buy on
+  2026-10-22 ([log](docs/evidence/weth-buy-base-sepolia-2026-10-22.txt)). B's
   go-ahead is an off-chain EIP-712 signature, so nothing on chain dates the ZEC lock.
 - Watchtower: with the owner offline, it broadcasts cancel then refund (B) or cancel then punish (Z)
   on Bitcoin and Litecoin regtest, with the stand-in Zcash chain; it holds no keys, and every

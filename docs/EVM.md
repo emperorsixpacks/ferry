@@ -329,7 +329,10 @@ Only the token changes.
   | Ethereum Sepolia | 11155111 | `0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14` |
   | Arbitrum Sepolia | 421614 | `0x980B62Da83eFf3D4576C647993b0c1D7faf17c73` |
 
-  So far WETH swaps have run only on anvil, against `MockWETH`.
+  ZEC → WETH has run live on Base Sepolia: eight swaps through the public card of the server
+  deploy, up to three at once ([log](evidence/local-stack-base-sepolia-2026-10-21.txt)). Before
+  that WETH ran only on anvil, against `MockWETH`. WETH → ZEC ran live once, on 2026-10-22
+  ([log](evidence/weth-buy-base-sepolia-2026-10-22.txt)).
 
 ## Code
 

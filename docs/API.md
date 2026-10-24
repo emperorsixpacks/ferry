@@ -272,8 +272,8 @@ operator's coins go. Without it (the public demo) the tokens and quotes still an
 runnable here, and `POST /api/near/swap` is `403`; the daemon proxy never forwards a browser's
 `payout_to`. NEAR Intents is mainnet only: a daemon on a test network gets quotes, not swaps
 (`reason: "mainnet"`), unless `FERRY_NEAR_TESTNET=1` and `FERRY_NEAR_URL` is a loopback mock
-(`web/mock/oneclick.mjs`). A start takes the swap guards (the caps, both rate limits, one live swap
-per pair, the router idle); quotes are limited to `DEMO_NEAR_QUOTES_PER_MIN` (40) per IP and
+(`web/mock/oneclick.mjs`). A start takes the swap guards (the caps and both rate limits; no sell
+while a route is moving on that pair, and no private swap while another route moves); quotes are limited to `DEMO_NEAR_QUOTES_PER_MIN` (40) per IP and
 `DEMO_NEAR_QUOTES_PER_MIN_TOTAL` (400) in all; `FERRY_NEAR_QUOTES=0` turns it all off.
 
 ## GET /api/status
