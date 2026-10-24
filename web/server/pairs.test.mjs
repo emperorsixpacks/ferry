@@ -29,6 +29,8 @@ test("GET /api/pairs: the old field, the buy side, and the main daemons", () => 
   const extra = extraDaemons(env);
   assert.deepEqual(pairsBody(extra), { pairs: ["ltc"], buy: ["ltc", "usdc-base"], main: { sell: true, buy: true } });
   assert.deepEqual(pairsBody([], { mainBuy: false }), { pairs: [], buy: [], main: { sell: true, buy: false } });
+  // a local demo whose Z is the maker: only buying on the main pair
+  assert.deepEqual(pairsBody([], { mainSell: false }).main, { sell: false, buy: true });
 });
 
 test("buy-side keys can't be caught by another daemon's exact proxy pattern", () => {

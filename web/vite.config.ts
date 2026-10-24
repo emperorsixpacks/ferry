@@ -14,12 +14,13 @@ import { extraDaemons, pairsBody } from "./server/pairs.mjs";
 // applying.
 // The daemons for other pairs (FERRY_LTC_URL, FERRY_USDC_BASE_URL, ... for selling ZEC,
 // FERRY_LTC_B_URL, ... for buying it, with FERRY_<PAIR>_TOKEN / FERRY_<PAIR>_B_TOKEN) are
-// proxied under /daemon/<pair> and /daemon/b-<pair>; see server/pairs.mjs. FERRY_B_BUYS=0 keeps
-// the page from starting swaps on the main B daemon (say, when it is a maker).
+// proxied under /daemon/<pair> and /daemon/b-<pair>; see server/pairs.mjs. FERRY_B_BUYS=0
+// (FERRY_Z_SELLS=0) keeps the page from starting swaps on the main B (Z) daemon, say when it is
+// the local demo's maker.
 const Z_URL = process.env.FERRY_Z_URL ?? "http://127.0.0.1:7101";
 const B_URL = process.env.FERRY_B_URL ?? "http://127.0.0.1:7102";
 const EXTRA = extraDaemons(process.env);
-const PAIRS_BODY = pairsBody(EXTRA, { mainBuy: process.env.FERRY_B_BUYS !== "0" });
+const PAIRS_BODY = pairsBody(EXTRA, { mainSell: process.env.FERRY_Z_SELLS !== "0", mainBuy: process.env.FERRY_B_BUYS !== "0" });
 const TOKENS: Record<string, string | undefined> = {
   z: process.env.FERRY_Z_TOKEN,
   b: process.env.FERRY_B_TOKEN,

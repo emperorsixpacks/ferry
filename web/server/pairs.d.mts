@@ -25,6 +25,6 @@ export interface PairsBody {
   buy: string[];
   main: { sell: boolean; buy: boolean };
 }
-export function pairsBody(extras: ExtraDaemon[], opts?: { mainBuy?: boolean }): PairsBody;
+export function pairsBody(extras: ExtraDaemon[], opts?: { mainSell?: boolean; mainBuy?: boolean }): PairsBody;
 
 export function samePair(key: string, extras: ExtraDaemon[]): string[];

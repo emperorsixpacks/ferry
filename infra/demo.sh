@@ -32,7 +32,20 @@ Z_PORT="${Z_PORT:-7101}"           # control API (/api/*, loopback)
 B_PORT="${B_PORT:-7102}"
 Z_PEER_PORT="${Z_PEER_PORT:-7111}" # peer protocol (/peer/*)
 B_PEER_PORT="${B_PEER_PORT:-7112}"
-MAKER_URL="http://127.0.0.1:$B_PEER_PORT"
+# Who makes offers: MAKER=b (default) is the sell-ZEC demo, B makes and Z takes; MAKER=z is the
+# buy-ZEC demo, Z makes (sells its shielded ZEC) and B takes (buys it). `up` and `test` take it;
+# the other commands use the one the running demo was started with.
+if [ "${1:-help}" = up ] || [ "${1:-help}" = test ]; then
+  MAKER="${MAKER:-b}"
+else
+  MAKER="${MAKER:-$(cat "$STATE/maker" 2>/dev/null || echo b)}"
+fi
+case "$MAKER" in
+  b) TAKER=z MAKER_URL="http://127.0.0.1:$B_PEER_PORT" ;;
+  z) TAKER=b MAKER_URL="http://127.0.0.1:$Z_PEER_PORT" ;;
+  *) echo "MAKER must be b or z" >&2; exit 2 ;;
+esac
+SWAP_ZAT="${SWAP_ZAT:-100000000}"
 UI_ORIGINS="${UI_ORIGINS:-http://localhost:5180 http://127.0.0.1:5180}"
 Z_NAME="${Z_NAME:-zoe}"
 B_NAME="${B_NAME:-bram}"
@@ -68,8 +81,13 @@ Ferry local demo: shielded ZEC <-> $TICKER atomic swap between two daemons on on
 CHAIN=ltc (or infra/demo-ltc.sh) runs it against litecoind instead of bitcoind.
 
   infra/demo.sh up       start bitcoind (regtest, Docker container $CONTAINER), build ferryd,
-                         start Z ($Z_NAME, :$Z_PORT) and B ($B_NAME, :$B_PORT, maker at $RATE sat/ZEC),
-                         fund B's BTC wallet and start the block producer. Starts from a fresh chain.
+                         start Z ($Z_NAME, :$Z_PORT) and B ($B_NAME, :$B_PORT), the maker (MAKER=b: B,
+                         MAKER=z: Z) at $RATE sat/ZEC, fund B's BTC wallet and start the block producer.
+                         Starts from a fresh chain.
+  infra/demo.sh happy | refund | punish
+                         run one story through the API: the taker ($TAKER now) proposes to the maker
+  infra/demo.sh test     up, happy, refund, punish, down; exits non-zero if any story fails
+                         (MAKER=z infra/demo.sh test: the same three stories buying ZEC)
   infra/demo.sh down     stop the daemons, the block producer and bitcoind (logs stay in $STATE/logs)
   infra/demo.sh status   chain height, daemon status and swaps at a glance
   infra/demo.sh logs [z|b|miner|bitcoind|zec-miner|zebra|zaino]   follow a log
@@ -77,14 +95,15 @@ CHAIN=ltc (or infra/demo-ltc.sh) runs it against litecoind instead of bitcoind.
   infra/demo.sh help     this text
 
 Each daemon has a loopback control API (Z :$Z_PORT, B :$B_PORT) that needs a bearer token, and a
-peer listener (Z :$Z_PEER_PORT, B :$B_PEER_PORT; takers are given B's as the maker URL). The tokens are
-in $STATE/{z,b}/api-token; \`up\` writes them to $STATE/env together with the UI's settings.
+peer listener (Z :$Z_PEER_PORT, B :$B_PEER_PORT; the taker is given the maker's as the maker URL). The
+tokens are in $STATE/{z,b}/api-token; \`up\` writes them to $STATE/env together with the UI's settings
+(with MAKER=z the swap page opens on Buy ZEC, the side the demo can swap).
 
 The UI (web/):
   cd web && source $STATE/env && pnpm dev:ui
   ($STATE/env exports FERRY_Z_URL, FERRY_B_URL, FERRY_MAKER_URL, FERRY_Z_TOKEN, FERRY_B_TOKEN)
 
-The three stories:
+The three stories (the same whoever takes; with MAKER=z, B starts them from the Buy ZEC page):
   happy   Start a swap from Z's panel. B locks BTC, Z locks ZEC, B sends the redeem adaptor,
           Z redeems (revealing z), B extracts z from the witness and sweeps the ZEC.
   refund  Stall Z once its ZEC is locked. B cancels after T1 and refunds (revealing b);
@@ -92,7 +111,7 @@ The three stories:
   punish  Stall B after it locks BTC. Z cancels after T1, B never refunds, Z punishes after T2.
   While a party is stalled the block producer mines every ${FAST_BLOCK_SECS}s instead of ${BLOCK_SECS}s.
 
-The same swap through the API:
+The same swap through the API (the taker's; with MAKER=z use B's port and FERRY_B_TOKEN):
   source $STATE/env; AUTH="authorization: Bearer \$FERRY_Z_TOKEN"
   curl -XPOST localhost:$Z_PORT/api/swaps -H "\$AUTH" -H 'content-type: application/json' \\
        -d '{"maker":"$MAKER_URL","zec_zat":100000000}'
@@ -114,7 +133,8 @@ Environment (defaults in brackets):
       [vendor/zcash-devtool + infra/patches/zcash-devtool-ferry.patch, built with --features regtest_support]; builds ZEC_SIGNER
       [tools/ferry-zec-signer] if missing. Extra ferryd flags: ZEC_ARGS_Z / ZEC_ARGS_B
   FERRYD_ARGS (extra flags for both daemons)   FERRY_DEMO_DIR [$STATE]
-  MAKER_ARGS (extra flags for B, e.g. "--maker-price-feed coingecko --maker-spread-bps 50")
+  MAKER [b|z, $MAKER]  SWAP_ZAT [$SWAP_ZAT] (the stories' amount)
+  MAKER_ARGS (extra flags for the maker, e.g. "--maker-price-feed coingecko --maker-spread-bps 50")
 EOF
 }
 
@@ -205,6 +225,7 @@ start_ferryd() { # start_ferryd <key> <role> <name> <api port> <peer port> [extr
     --t1 "$T1" --t2 "$T2" --delta "$DELTA" --btc-lock-confs "$BTC_LOCK_CONFS" --zec-confs "$ZEC_CONFS" \
     --poll-ms "$POLL_MS" "$@" ${extra[@]+"${extra[@]}"} >>"$STATE/logs/$key.log" 2>&1 &
   echo $! >"$STATE/$key.pid"
+  disown
   for _ in $(seq 1 60); do
     api "$key" /api/status >/dev/null 2>&1 && return 0
     alive "$key" || break
@@ -446,22 +467,35 @@ cmd_up() {
     log "mined 101 blocks to the miner wallet"
   fi
 
-  log "starting B ($B_NAME, maker at $RATE sat/ZEC): API :$B_PORT, peer :$B_PEER_PORT"
-  # shellcheck disable=SC2086
-  start_ferryd b b "$B_NAME" "$B_PORT" "$B_PEER_PORT" --maker-offer "$RATE" ${MAKER_ARGS:-}
-  log "starting Z ($Z_NAME): API :$Z_PORT, peer :$Z_PEER_PORT"
-  if [ "$ZEC_BACKEND" = mock ]; then
-    start_ferryd z z "$Z_NAME" "$Z_PORT" "$Z_PEER_PORT" --zec-mock-balance "$ZEC_BALANCE_ZAT"
+  # the maker's offer: B pays RATE per ZEC it buys (MAKER=b), or Z asks RATE per ZEC it sells (z)
+  local b_offer=() z_offer=() z_mock=()
+  # shellcheck disable=SC2206
+  if [ "$MAKER" = b ]; then b_offer=(--maker-offer "$RATE" ${MAKER_ARGS:-}); else z_offer=(--maker-offer "$RATE" ${MAKER_ARGS:-}); fi
+  [ "$ZEC_BACKEND" = mock ] && z_mock=(--zec-mock-balance "$ZEC_BALANCE_ZAT")
+  echo "$MAKER" >"$STATE/maker"
+  if [ "$MAKER" = b ]; then
+    log "starting B ($B_NAME, maker at $RATE sat/ZEC: buys ZEC): API :$B_PORT, peer :$B_PEER_PORT"
   else
-    start_ferryd z z "$Z_NAME" "$Z_PORT" "$Z_PEER_PORT"
+    log "starting B ($B_NAME, taker: buys ZEC): API :$B_PORT, peer :$B_PEER_PORT"
   fi
+  start_ferryd b b "$B_NAME" "$B_PORT" "$B_PEER_PORT" ${b_offer[@]+"${b_offer[@]}"}
+  if [ "$MAKER" = z ]; then
+    log "starting Z ($Z_NAME, maker at $RATE sat/ZEC: sells ZEC): API :$Z_PORT, peer :$Z_PEER_PORT"
+  else
+    log "starting Z ($Z_NAME, taker: sells ZEC): API :$Z_PORT, peer :$Z_PEER_PORT"
+  fi
+  start_ferryd z z "$Z_NAME" "$Z_PORT" "$Z_PEER_PORT" ${z_mock[@]+"${z_mock[@]}"} ${z_offer[@]+"${z_offer[@]}"}
   umask 077
+  # The UI: the maker's daemon takes no swaps from the page, so it opens on the other side.
   cat >"$STATE/env" <<ENV
 export FERRY_Z_URL=http://127.0.0.1:$Z_PORT
 export FERRY_B_URL=http://127.0.0.1:$B_PORT
 export FERRY_MAKER_URL=$MAKER_URL
 export FERRY_Z_TOKEN=$(cat "$STATE/z/api-token")
 export FERRY_B_TOKEN=$(cat "$STATE/b/api-token")
+export FERRY_LOCAL=$TAKER
+export FERRY_Z_SELLS=$([ "$MAKER" = z ] && echo 0 || echo 1)
+export FERRY_B_BUYS=$([ "$MAKER" = b ] && echo 0 || echo 1)
 ENV
 
   local b_addr
@@ -472,9 +506,11 @@ ENV
 
   producer "$miner" >>"$STATE/logs/miner.log" 2>&1 &
   echo $! >"$STATE/miner.pid"
+  disown
   if [ "$ZEC_BACKEND" = devtool ]; then
     zec_producer >>"$STATE/logs/zec-miner.log" 2>&1 &
     echo $! >"$STATE/zec-miner.pid"
+    disown
   fi
 
   log "ready (ZEC/$TICKER): Z http://127.0.0.1:$Z_PORT  B http://127.0.0.1:$B_PORT (maker $MAKER_URL)  $TICKER node $BTC_RPC  (ZEC: $ZEC_BACKEND, a block every ${BLOCK_SECS}s)"
@@ -548,12 +584,118 @@ cmd_mine() {
   echo "height $(rpc "" getblockcount | result)"
 }
 
+# ---------------------------------------------------------------- the three stories, through the API
+# The taker ($TAKER) proposes to the maker ($MAKER); which party stalls is the same either way.
+
+# swap_field <z|b> <python expr on s, the latest swap> (the expressions are this script's own)
+swap_field() {
+  api "$1" /api/swaps | python3 -c '
+import json, sys
+swaps = json.load(sys.stdin)
+s = max(swaps, key=lambda s: s["timeline"][0]["at"] if s["timeline"] else "") if swaps else None
+print(eval(sys.argv[1]) if s else "")' "$2"
+}
+
+balance() { api "$1" /api/status | python3 -c 'import json, sys; print(json.load(sys.stdin)["balances"][sys.argv[1]])' "$2"; }
+fee_sat() { api "$1" /api/status | python3 -c 'import json, sys; print(json.load(sys.stdin)["offer"]["fee_sat"])'; }
+state_is() { [ "$(swap_field "$1" 's["state"]')" = "$2" ]; }
+outcome_is() { [ "$(swap_field "$1" 's["outcome"]')" = "$2" ]; }
+
+# wait_for <secs> <description> <shell condition> (conditions are this script's own constants)
+wait_for() {
+  local secs=$1 what=$2 cond=$3 i=0
+  while ! eval "$cond" >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ $i -gt $((secs * 4)) ]; then
+      log "Z: $(swap_field z 's["state"]')  B: $(swap_field b 's["state"]')"
+      die "timed out waiting for $what"
+    fi
+    sleep 0.25
+  done
+}
+
+# The taker's POST /api/swaps: one call, whichever role takes.
+new_swap() {
+  local port=$Z_PORT out
+  [ "$TAKER" = b ] && port=$B_PORT
+  out=$(curl -s -H "authorization: Bearer $(cat "$STATE/$TAKER/api-token")" -H 'content-type: application/json' \
+    -d "{\"maker\":\"$MAKER_URL\",\"zec_zat\":$SWAP_ZAT}" "http://127.0.0.1:$port/api/swaps")
+  echo "$out" | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])' 2>/dev/null || die "the swap did not start: $out"
+}
+
+fault() { api "$1" "/api/swaps/$2/fault" -X POST -H 'content-type: application/json' -d '{"fault":"stall"}' >/dev/null || die "could not stall $1"; }
+
+who() { if [ "$1" = z ]; then echo "Z ($Z_NAME)"; else echo "B ($B_NAME)"; fi; }
+
+story_happy() {
+  log "--- happy: $(who "$TAKER") takes from $(who "$MAKER"); B locks $TICKER, Z locks ZEC, Z redeems, B sweeps"
+  local z0 b0 id sat fee
+  z0=$(balance z btc_sat)
+  b0=$(balance b zec_shielded_zat)
+  id=$(new_swap)
+  log "swap $id"
+  wait_for 300 "both sides to finish" 'outcome_is z swapped && outcome_is b swapped'
+  sat=$(swap_field z 's["amounts"]["btc_sat"]')
+  fee=$(fee_sat z)
+  # Z's payout is the locked amount less the presigned redeem's fee
+  wait_for 60 "Z's $TICKER to arrive" "[ \"\$(balance z btc_sat)\" = \"$((z0 + sat - fee))\" ]"
+  if [ "$ZEC_BACKEND" = mock ]; then
+    wait_for 60 "B's ZEC to arrive" "[ \"\$(balance b zec_shielded_zat)\" = \"$((b0 + SWAP_ZAT))\" ]"
+  else
+    wait_for 120 "B's ZEC to arrive" "[ \"\$(balance b zec_shielded_zat)\" -gt \"$b0\" ]"
+  fi
+  log "happy: Z received $((sat - fee)) sat of $TICKER, B $SWAP_ZAT zat of shielded ZEC"
+}
+
+story_refund() {
+  log "--- refund: Z stalls once its ZEC is locked; B cancels at T1 and refunds; Z reclaims its ZEC"
+  local z0 id
+  z0=$(balance z zec_shielded_zat)
+  id=$(new_swap)
+  log "swap $id"
+  wait_for 300 "Z to lock ZEC" 'state_is z ZecLocked'
+  fault z "$id"
+  log "Z is stalled: it will not redeem"
+  wait_for 600 "B's refund and Z's reclaim" 'outcome_is b refunded && outcome_is z refunded'
+  if [ "$ZEC_BACKEND" = mock ]; then
+    wait_for 60 "Z's ZEC to come back" "[ \"\$(balance z zec_shielded_zat)\" = \"$z0\" ]"
+  fi
+  log "refund: B refunded its $TICKER (B: $(swap_field b 's["state"]')), Z reclaimed its ZEC (Z: $(swap_field z 's["state"]'))"
+}
+
+story_punish() {
+  log "--- punish: B stalls once its $TICKER is locked; Z cancels at T1 and, with no refund by T2, punishes"
+  local z0 id
+  z0=$(balance z btc_sat)
+  id=$(new_swap)
+  log "swap $id"
+  wait_for 300 "B's lock to confirm" 'state_is b BtcLocked || state_is b ZecSeen'
+  fault b "$id"
+  log "B is stalled: it will neither send the redeem signature nor refund"
+  wait_for 900 "Z's punish" 'outcome_is z punished && outcome_is b punished'
+  wait_for 60 "Z's $TICKER to arrive" "[ \"\$(balance z btc_sat)\" -gt \"$z0\" ]"
+  log "punish: Z holds the $TICKER ($(($(balance z btc_sat) - z0)) sat); its ZEC stays in the joint note, B's penalty"
+}
+
+cmd_test() {
+  trap cmd_down EXIT
+  cmd_up
+  story_happy
+  story_refund
+  story_punish
+  log "all three stories passed (MAKER=$MAKER: $(who "$TAKER") took from $(who "$MAKER"))"
+}
+
 case "${1:-help}" in
   up) cmd_up ;;
   down) cmd_down ;;
   status) cmd_status ;;
   logs) cmd_logs "${2:-z}" ;;
   mine) cmd_mine "${2:-1}" ;;
+  happy) story_happy ;;
+  refund) story_refund ;;
+  punish) story_punish ;;
+  test) cmd_test ;;
   help | -h | --help) usage ;;
   *) usage; exit 2 ;;
 esac

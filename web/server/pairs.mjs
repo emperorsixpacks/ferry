@@ -67,11 +67,11 @@ export function extraDaemons(env) {
 // still finds them); `buy` lists the other pairs with a B daemon; `main` says which of the main
 // daemons the page may start swaps on: Z sells ZEC, B buys it (whatever pair they run, which the
 // page learns from their status).
-export function pairsBody(extras, { mainBuy = true } = {}) {
+export function pairsBody(extras, { mainSell = true, mainBuy = true } = {}) {
   return {
     pairs: extras.filter((d) => d.side === "sell").map((d) => d.id),
     buy: extras.filter((d) => d.side === "buy").map((d) => d.id),
-    main: { sell: true, buy: mainBuy },
+    main: { sell: mainSell, buy: mainBuy },
   };
 }
 

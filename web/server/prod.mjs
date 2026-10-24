@@ -30,6 +30,8 @@
 //   FERRY_BTC_B_URL, FERRY_USDC_BASE_B_URL, ... [unset]
 //                           B's daemons for other pairs (buying ZEC), with FERRY_<PAIR>_B_TOKEN /
 //                           FERRY_<PAIR>_B_TOKEN_FILE; proxied at /daemon/b-<pair>
+//   FERRY_Z_SELLS [1]       0: visitors can't start swaps on FERRY_Z_URL's daemon (selling ZEC on the
+//                           main pair), e.g. when it is the demo's maker
 //   FERRY_B_BUYS [1]        0: visitors can't start swaps on FERRY_B_URL's daemon (buying ZEC on the
 //                           main pair), e.g. when it is the demo's maker. Buy starts take the same
 //                           guards as sell starts: the caps, both rate limits, the maker allowlist and
@@ -102,15 +104,16 @@ function tokenSource(name) {
 }
 
 const EXTRA = extraDaemons(env);
+const MAIN_SELL = env.FERRY_Z_SELLS !== "0";
 const MAIN_BUY = env.FERRY_B_BUYS !== "0";
-const PAIRS_BODY = pairsBody(EXTRA, { mainBuy: MAIN_BUY });
+const PAIRS_BODY = pairsBody(EXTRA, { mainSell: MAIN_SELL, mainBuy: MAIN_BUY });
 const DAEMONS = {
   z: { url: new URL(env.FERRY_Z_URL ?? "http://127.0.0.1:7101"), token: tokenSource("Z") },
   b: { url: new URL(env.FERRY_B_URL ?? "http://127.0.0.1:7102"), token: tokenSource("B") },
   ...Object.fromEntries(EXTRA.map((d) => [d.key, { url: new URL(d.url), token: tokenSource(d.tokenName) }])),
 };
 // the daemons a visitor starts swaps on: Z's (selling ZEC) and B's (buying it), for every pair
-const TAKERS = new Set(["z", ...(MAIN_BUY ? ["b"] : []), ...EXTRA.map((d) => d.key)]);
+const TAKERS = new Set([...(MAIN_SELL ? ["z"] : []), ...(MAIN_BUY ? ["b"] : []), ...EXTRA.map((d) => d.key)]);
 
 // one request to a daemon from this server, for the guard's own checks
 function daemonJson(key, path) {
@@ -589,7 +592,7 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`ferry-ui on http://${HOST}:${PORT}  dist ${DIST}`);
-  console.log(`  Z ${DAEMONS.z.url.origin}  B ${DAEMONS.b.url.origin}${MAIN_BUY ? "" : " (no buy starts)"}${EXTRA.map((d) => `  ${d.key.toUpperCase()} ${d.url}`).join("")}  makers ${MAKERS.makers.map((m) => `${m.name} (${m.pair})`).join(", ") || "none"}`);
+  console.log(`  Z ${DAEMONS.z.url.origin}${MAIN_SELL ? "" : " (no sell starts)"}  B ${DAEMONS.b.url.origin}${MAIN_BUY ? "" : " (no buy starts)"}${EXTRA.map((d) => `  ${d.key.toUpperCase()} ${d.url}`).join("")}  makers ${MAKERS.makers.map((m) => `${m.name} (${m.pair})`).join(", ") || "none"}`);
   console.log(`  demo: max ${zec(DEMO_MAX_ZAT)} ZEC, ${RATE_PER_HOUR} swaps/IP/hour, ${SWAPS_PER_HOUR} swaps/hour in all, ${SSE_PER_IP} streams/IP, ${SSE_TOTAL} streams in all, faults ${FAULTS ? "on" : "off"}${PUBLIC_ORIGIN ? `, origin ${PUBLIC_ORIGIN}` : ""}`);
 });
 
