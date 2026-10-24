@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getMakers, pairChain, pairCoin, type Maker, type PairId, type Role, type Status } from "@/api";
+import { counterBalance, getMakers, pairChain, pairCoin, type Maker, type PairId, type Role, type Status } from "@/api";
 import { coin, coinInfo } from "@/format";
 
 // The UI server's maker directory (GET /api/makers), polled. The server caches each maker's offer
@@ -80,19 +80,48 @@ export const isBusyText = (s: string | null | undefined) => !!s && s.startsWith(
 // A partner that swaps this way but is full right now (it takes more once a swap of its finishes).
 export const busyFor = (m: Maker, role: "Z" | "B") => !!m.busy && swappable(m) && (m.role == null || m.role !== role);
 
-// "can take 3 more swaps", "can take 1 more swap"; null when the partner doesn't say (an older ferryd)
-export const slotsText = (m: Maker) => (m.free_slots == null ? null : `can take ${m.free_slots} more ${m.free_slots === 1 ? "swap" : "swaps"}`);
+// What a ZEC lock needs on top of its amount (ferry-zec's SEND_FEE_RESERVE), and a Bitcoin or
+// Litecoin lock (ferryd's B keeps as much for the lock's own fee): ferryd's admission adds the same.
+export const ZEC_FEE_RESERVE = 50_000;
+export const LOCK_FEE_RESERVE = 10_000;
 
-// One small line on whether a partner takes swaps now: "Partner online · can take 3 more swaps",
-// "Partner busy · usually free again within about 20–40 min" (`about`: typicalText, a swap's own
-// time; without it no time is given), "Partner offline". null: no partner to speak of.
-export function availability(m: Maker | null | undefined, about?: string | null): string | null {
+// Whether the node you swap through takes a swap of `zat` ZEC now, by its own status (ferryd's
+// capacity and free funds, docs/API.md "Several swaps at once"): "yes" with a free slot and free
+// funds for the amount and its fee (selling ZEC: free shielded ZEC, which ferryd already counts
+// with the notes its locks may take; buying it: the free coin, `gross` in its base units), "busy"
+// with no free slot or the funds held by its swaps in progress, "short" when its wallet doesn't
+// hold that much at all (the card says so), null when it doesn't say (an older ferryd) or there is
+// no amount.
+export function nodeRoom(status: Status | null, role: Role, zat: number, gross: number, evm: boolean): "yes" | "busy" | "short" | null {
+  if (!status?.capacity || !status.free || zat <= 0) return null;
+  if (status.capacity.free_slots === 0) return "busy";
+  const z = role === "Z";
+  const need = z ? zat + ZEC_FEE_RESERVE : gross + (evm ? 0 : LOCK_FEE_RESERVE);
+  const free = z ? status.free.zec_shielded_zat : counterBalance({ ...status, balances: status.free });
+  if (free >= need) return "yes";
+  const have = z ? status.balances.zec_shielded_zat : counterBalance(status);
+  return have >= need && status.capacity.live > 0 ? "busy" : "short";
+}
+
+// One small line on whether this swap can start now, saying only what both sides of it say: the
+// partner (its offer: online, making offers, a free slot, and free funds that cover the amount) and
+// the node you swap through (nodeRoom). "Partner online · can take your swap now" when both can;
+// "Partner busy · usually free again within about 20–40 min" when either is full or its funds are
+// held by swaps in progress (`about`: typicalText, a swap's own time; without it no time is given);
+// "Partner offline", "Partner paused"; plain "Partner online" when it can't be said for sure (no
+// amount yet, an amount the partner can't fill now, an older ferryd). null: no partner to speak of.
+export function availability(m: Maker | null | undefined, about?: string | null, take?: { status: Status | null; role: Role; zat: number; gross: number; evm: boolean; offline?: boolean }): string | null {
+  if (take?.offline) return "Partner offline";
   if (!m) return null;
   if (!m.online) return "Partner offline";
-  if (m.busy) return about ? `Partner busy · usually free again within ${about}` : "Partner busy · free again when a swap finishes";
+  const node = take ? nodeRoom(take.status, take.role, take.zat, take.gross, take.evm) : null;
+  if (m.busy || node === "busy") return about ? `Partner busy · usually free again within ${about}` : "Partner busy · free again when a swap finishes";
   if (m.paused || !m.available) return "Partner paused";
-  const slots = slotsText(m);
-  return slots ? `Partner online · ${slots}` : "Partner online";
+  const q = quoteOf(m);
+  // the partner's own figures: a free slot, and free funds (its liquidity, which ferryd counts with
+  // the notes its locks may take) covering this amount
+  const partner = !!q && m.free_slots != null && m.free_slots > 0 && m.liquidity_zat != null && !!take && fits(q, take.zat);
+  return partner && node === "yes" ? "Partner online · can take your swap now" : "Partner online";
 }
 
 // The daemon's own offer, for a server without a maker directory only: a taker's status.offer is
@@ -127,6 +156,13 @@ export function forPair(m: Maker, id: PairId, onScreen: PairId): boolean {
   if (id === onScreen) return swappable(m);
   const c = coinInfo(pairCoin(id));
   return m.pair === `ZEC/${c.ticker}` && (c.kind !== "evm" || (m.chain ?? null) === pairChain(id));
+}
+
+// Every partner listed for pair `id` this way (`role`: the side you take) is offline; false when none
+// is listed, or the list isn't in yet.
+export function partnersOffline(makers: Makers | undefined, id: PairId, onScreen: PairId, role: Role): boolean {
+  const listed = (makers?.list ?? []).filter((m) => (m.role == null || m.role !== role) && forPair(m, id, onScreen));
+  return listed.length > 0 && listed.every((m) => !m.online);
 }
 
 // The most ZEC a maker takes in one swap right now: its range's top, or less if its balance is lower.

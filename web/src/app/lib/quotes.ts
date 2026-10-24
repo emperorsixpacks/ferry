@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Maker, PairId, Role } from "@/api";
+import { standIn } from "../../../server/firm.mjs";
 import { quoteOf, type Quote } from "./makers";
 
 // Firm prices (POST /api/quotes). The UI server rounds the amount up to a bucket (0.1, 0.25, 0.5,
@@ -97,6 +98,19 @@ export function useQuotes(pair: PairId, role: Role, zat: number): Quotes {
 
 // whole seconds a firm price has left
 export const secondsLeft = (q: FirmQuote, now: number) => Math.max(0, Math.floor((q.until - now) / 1000));
+
+// A start refused because its firm price is gone: the UI server's words, or the maker's (unknown,
+// expired, or already used for another swap).
+export const firmGone = (msg: string) => /firm (quote|price)/i.test(msg);
+
+// One more try for such a start, without the person pressing again: a firm price asked now, from the
+// same partner, that covers the amount and is no worse for them than the one they pressed on (selling
+// ZEC: at least that rate; buying: at most it; server/firm.mjs). null: none, and the card shows the
+// new price for them to decide on.
+export async function standInFor(pair: PairId, role: Role, zat: number, pressed: FirmQuote): Promise<FirmQuote | null> {
+  const list = await getQuotes(pair, role, zat).catch(() => null);
+  return standIn(list, pressed, zat, role);
+}
 
 // The price to show and start with: a firm one when there is one (with no partner picked, the best
 // of all; with one picked, that partner's), else the indicative offer `live` came up with. Only from

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { ArrowRight, ArrowsLeftRight } from "@phosphor-icons/react";
 import { directionOf, getSwaps, isMine, pairChain, pairCoin, type ComboJob, type Direction, type NearJob, type PairId, type RouteView, type Status, type SwapView } from "@/api";
 import { coin, coinOf } from "@/format";
@@ -11,6 +11,7 @@ import { ToneBadge } from "../components/ui/badge";
 import { useLocal } from "../lib/daemon";
 import { chainName, comboGot, comboIn, comboOut, comboWord, jobIn, jobOut, nearText, nearWord, useNear } from "../lib/near";
 import { pairName } from "../lib/pairs";
+import { usePoll } from "../lib/poll";
 import { STATUS_WORD, swapAmounts, wordsFor, type Words } from "../lib/progress";
 import { ROUTE_WORD, legSwapIds, routeAmounts, tickerOf, unitsText, useRoutes, zecText } from "../lib/routes";
 
@@ -59,25 +60,12 @@ export function useActivityRows(): ActivityRow[] {
       if (daemon && !sources.some((x) => x.daemon === daemon)) sources.push({ pair: p.id, dir, daemon, status: p[dir].status });
     }
   if (d.daemon && !sources.some((x) => x.daemon === d.daemon)) sources.push({ pair: d.pair, dir: d.dir, daemon: d.daemon, status: d.status });
-  const polled = sources.filter((x) => x.daemon !== d.daemon);
-  const key = polled.map((x) => x.daemon).join(",");
-  const [extra, setExtra] = useState<Record<string, SwapView[]>>({});
-
-  useEffect(() => {
-    if (!polled.length) return;
-    let alive = true;
-    const load = async () => {
-      const got = await Promise.all(polled.map((x) => getSwaps(x.daemon).catch(() => [] as SwapView[])));
-      if (alive) setExtra(Object.fromEntries(polled.map((x, i) => [x.daemon, got[i]])));
-    };
-    load();
-    const id = setInterval(load, POLL_MS);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  // each on its own (lib/poll): one daemon that is slow or stuck holds up only its own swaps
+  const extra = usePoll(
+    sources.filter((x) => x.daemon !== d.daemon).map((x) => x.daemon),
+    getSwaps,
+    { every: POLL_MS },
+  ).data;
 
   const routes = useRoutes();
   const near = useNear();

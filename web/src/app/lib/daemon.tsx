@@ -1,9 +1,10 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import { getSwaps, isMine, pairChain, pairCoin, roleOf, type Direction, type PairId, type PairsInfo, type Role, type Status, type SwapView } from "@/api";
 import { setChainHint, setCoinFrom } from "@/format";
 import { useDaemon, type Daemon } from "@/useDaemon";
 import { useBlockTimes, type BlockTimes } from "@/swap/timing";
 import { canSwap, daemonFor, pairOf, storeDirection, storePair, storedDirection, storedPair, usePairs, type Pair } from "./pairs";
+import { usePoll } from "./poll";
 import { noteRunning } from "./walletSync";
 
 // One connection to the person's ferryd for the pair and direction on screen (fetch + SSE),
@@ -23,8 +24,10 @@ interface LocalDaemon extends Daemon {
   daemon: string | null;
   pairs: Pair[];
   info: PairsInfo;
-  // the server said which daemons it has, and each was asked which pair it swaps
+  // the server said which daemons it has, and the main ones were asked which pair they swap
   known: boolean;
+  // the followed daemon isn't answering (its probes fail or it stays silent, and its stream is shut)
+  offline: boolean;
   // the pair on screen: the followed daemon's coin, or the one picked while it connects
   pair: PairId;
   choosePair: (id: PairId, on?: Direction) => void;
@@ -37,23 +40,12 @@ const Ctx = createContext<LocalDaemon | null>(null);
 const POLL_MS = 10_000;
 const flip = (d: Direction): Direction => (d === "sell" ? "buy" : "sell");
 
-// The swaps of a daemon this page doesn't follow, polled.
+// The swaps of a daemon this page doesn't follow, polled (one ask at a time: lib/poll).
 function usePolledSwaps(base: string | null): SwapView[] {
-  const [list, setList] = useState<SwapView[]>([]);
-  useEffect(() => {
-    setList([]);
-    if (!base) return;
-    let alive = true;
-    const load = () => getSwaps(base).then((l) => alive && setList(l), () => {});
-    load();
-    const id = setInterval(load, POLL_MS);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-  }, [base]);
-  return list;
+  const polled = usePoll(base ? [base] : [], getSwaps, { every: POLL_MS });
+  return (base && polled.data[base]) || NO_SWAPS;
 }
+const NO_SWAPS: SwapView[] = [];
 
 export function DaemonProvider({ children }: { children: ReactNode }) {
   const pairs = usePairs();
@@ -123,6 +115,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
     pairs: pairs.list,
     info: pairs.info,
     known: pairs.probed,
+    offline: !!daemon && !d.connected && pairs.state(daemon) === "down",
     pair,
     choosePair,
     chooseDirection,

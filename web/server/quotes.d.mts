@@ -18,10 +18,17 @@ export interface FoundQuote {
   entry: unknown;
 }
 
+// a quote claimed for one start (claim()): give it back with release() if the start goes no further
+export interface ClaimedQuote extends FoundQuote {
+  rate_sat_per_zec: number;
+  release: () => void;
+}
+
 export interface QuoteDesk {
   request(body: unknown): Promise<{ status: number; body: { bucket_zat?: number | null; quotes?: FirmQuote[]; error?: string } }>;
   find(makerIndex: number, quoteId: unknown): FoundQuote | null;
-  take(found: FoundQuote): void;
+  take(found: Pick<FoundQuote, "entry">): void;
+  claim(makerIndex: number, quoteId: unknown, zat: number): Promise<ClaimedQuote | null>;
 }
 
 export const BUCKETS_ZAT: number[];

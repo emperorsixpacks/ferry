@@ -18,6 +18,7 @@
     "shoot:watchtower": "node scripts/shoot-watchtower.mjs",
     "start": "node server/prod.mjs",
     "shoot:evm": "node scripts/shoot-evm.mjs",
+    "shoot:hang": "node scripts/shoot-hang.mjs",
     "shoot:near": "node scripts/shoot-near.mjs",
     "test:server": "node --test server/*.test.mjs"
   },
