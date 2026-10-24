@@ -18,6 +18,7 @@
 //!   held, and it no longer keeps a real user out. At most `--max-swaps` late swaps are kept on
 //!   top of the cap, so the node never runs more than twice the cap.
 
+use ferry_core::ZecNotes;
 use serde::Serialize;
 
 use crate::daemon::ApiError;
@@ -168,32 +169,48 @@ impl CapacityView {
 
 // ---------------------------------------------------------------------- ZEC notes
 
-/// Whether our notes fund every lock in `needs` (each its amount plus the fee reserve), however
-/// the wallet picks them. The wallet picks whole notes until they cover a lock, so a lock can
-/// take up to one note more than it needs, and the extra notes of different locks are
-/// different notes: n locks need at most the sum of `needs` plus the n−1 largest notes (the
-/// last lock built needs only what it needs). `largest`: our largest notes, largest first;
-/// empty when the balance isn't made of notes, where only the value counts. Change waits for
-/// confirmations, so it is not in `spendable` and never counted.
-pub fn zec_locks_fit(spendable: u64, largest: &[u64], needs: &[u64]) -> bool {
+/// ZIP-317's marginal fee: a Zcash transaction pays it for every note it spends, two at least.
+pub const ZEC_FEE_PER_NOTE: u64 = 5_000;
+
+/// Whether our notes fund every lock in `needs` at once, however the wallet picks them. Each
+/// need is a lock's amount plus a fee reserve of at least two notes' fee (the caller passes
+/// the backend's reserve, 50000 zat for devtool).
+/// - The wallet picks whole notes until they cover a lock and its fee, so a lock can take up to
+///   one note more than it needs, and the extra notes of different locks are different notes:
+///   the n−1 largest notes cover that (the last lock built needs only what it needs).
+/// - The fee grows by [`ZEC_FEE_PER_NOTE`] with every note a lock spends, so a lock spending
+///   more notes than its reserve covers pays more than its hold. Every note any lock can spend
+///   is one of ours, so that fee per note we hold covers all of it.
+///
+/// `notes`: our largest notes (at least `needs.len() - 1` of them, when there are that many) and
+/// how many there are; empty when the balance isn't made of notes (the mock), where only the
+/// value counts. Change waits for confirmations, so it is not in `spendable` and never counted.
+pub fn zec_locks_fit(spendable: u64, notes: &ZecNotes, needs: &[u64]) -> bool {
     let need: u128 = needs.iter().map(|&n| u128::from(n)).sum();
-    let extra: u128 = largest
+    let extra: u128 = notes
+        .largest
         .iter()
         .take(needs.len().saturating_sub(1))
         .map(|&n| u128::from(n))
         .sum();
-    need + extra <= u128::from(spendable)
+    need + extra + per_note_fees(notes) <= u128::from(spendable)
+}
+
+fn per_note_fees(notes: &ZecNotes) -> u128 {
+    u128::from(notes.count) * u128::from(ZEC_FEE_PER_NOTE)
 }
 
 /// The largest lock amount (its fee reserve set aside) that still fits next to `needs` by
-/// [`zec_locks_fit`]: `largest` must hold at least `needs.len()` notes when there are that many.
-pub fn zec_room(spendable: u64, largest: &[u64], needs: &[u64], fee_reserve: u64) -> u64 {
+/// [`zec_locks_fit`]: `notes.largest` must hold at least `needs.len()` notes when there are that
+/// many.
+pub fn zec_room(spendable: u64, notes: &ZecNotes, needs: &[u64], fee_reserve: u64) -> u64 {
     let used: u128 = needs
         .iter()
-        .chain(largest.iter().take(needs.len()))
+        .chain(notes.largest.iter().take(needs.len()))
         .map(|&n| u128::from(n))
         .sum::<u128>()
-        + u128::from(fee_reserve);
+        + u128::from(fee_reserve)
+        + per_note_fees(notes);
     u64::try_from(u128::from(spendable).saturating_sub(used)).unwrap_or(u64::MAX)
 }
 
@@ -316,26 +333,130 @@ mod tests {
     fn zec_locks_and_notes() {
         let fee = 50_000;
         let half = 50_000_000 + fee;
+        let notes = |largest: &[u64], count: u64| ZecNotes {
+            largest: largest.to_vec(),
+            count,
+        };
         // One 5 ZEC note: one 0.5 ZEC lock fits, a second may find the note gone (its change
         // is unconfirmed), so it does not.
-        assert!(zec_locks_fit(500_000_000, &[500_000_000], &[half]));
-        assert!(!zec_locks_fit(500_000_000, &[500_000_000], &[half, half]));
+        let one = notes(&[500_000_000], 1);
+        assert!(zec_locks_fit(500_000_000, &one, &[half]));
+        assert!(!zec_locks_fit(500_000_000, &one, &[half, half]));
         // 5, 1, 1, 1, 1 ZEC: three such locks fit, a fourth does not.
-        let notes = [500_000_000, 100_000_000, 100_000_000, 100_000_000];
+        let five = notes(&[500_000_000, 100_000_000, 100_000_000, 100_000_000], 5);
         let total = 900_000_000;
-        assert!(zec_locks_fit(total, &notes, &[half, half, half]));
-        assert!(!zec_locks_fit(total, &notes, &[half, half, half, half]));
+        assert!(zec_locks_fit(total, &five, &[half, half, half]));
+        assert!(!zec_locks_fit(total, &five, &[half, half, half, half]));
         // Without notes (the mock), the value alone.
-        assert!(zec_locks_fit(2 * half, &[], &[half, half]));
-        assert!(!zec_locks_fit(2 * half - 1, &[], &[half, half]));
-        assert!(zec_locks_fit(0, &[], &[]));
-        // Room for one more lock next to one 0.5 ZEC lock in flight: 9 − 0.5005 − 5 − fee.
-        let room = zec_room(total, &notes, &[half], fee);
-        assert_eq!(room, total - half - 500_000_000 - fee);
-        assert!(zec_locks_fit(total, &notes, &[half, room + fee]));
-        assert!(!zec_locks_fit(total, &notes, &[half, room + fee + 1]));
-        // Nothing in flight: the balance less the fee.
-        assert_eq!(zec_room(total, &notes, &[], fee), total - fee);
-        assert_eq!(zec_room(1, &notes, &[half], fee), 0, "no underflow");
+        let none = ZecNotes::default();
+        assert!(zec_locks_fit(2 * half, &none, &[half, half]));
+        assert!(!zec_locks_fit(2 * half - 1, &none, &[half, half]));
+        assert!(zec_locks_fit(0, &none, &[]));
+        // Room for one more lock next to one 0.5 ZEC lock in flight:
+        // 9 − 0.5005 − 5 − the fee reserve − 5 notes' fees.
+        let room = zec_room(total, &five, &[half], fee);
+        assert_eq!(
+            room,
+            total - half - 500_000_000 - fee - 5 * ZEC_FEE_PER_NOTE
+        );
+        assert!(zec_locks_fit(total, &five, &[half, room + fee]));
+        assert!(!zec_locks_fit(total, &five, &[half, room + fee + 1]));
+        // Nothing in flight: the balance less the fee and the notes' fees.
+        assert_eq!(
+            zec_room(total, &five, &[], fee),
+            total - fee - 5 * ZEC_FEE_PER_NOTE
+        );
+        assert_eq!(zec_room(1, &five, &[half], fee), 0, "no underflow");
+    }
+
+    /// Many small notes: a lock that spends more of them than its fee reserve covers pays more
+    /// than its hold, and the check counts that (without the fee per note it would admit this).
+    #[test]
+    fn zec_fees_per_note_count() {
+        // 100 notes of 0.01 ZEC (1 ZEC), locks of 0.5 and 0.4855 ZEC with 0.0005 reserves.
+        let small = ZecNotes {
+            largest: vec![1_000_000; 2],
+            count: 100,
+        };
+        let needs = [50_050_000, 48_600_000];
+        let old_bound: u64 = needs.iter().sum::<u64>() + 1_000_000;
+        assert!(
+            old_bound <= 100_000_000,
+            "the bound without fees per note admits it"
+        );
+        assert!(!zec_locks_fit(100_000_000, &small, &needs));
+        assert!(zec_locks_fit(
+            100_000_000,
+            &small,
+            &[50_050_000, 48_400_000]
+        ));
+    }
+
+    /// The bound against a model of the wallet: notes are picked in some order (oldest first in
+    /// the wallet; any order here) until they cover the lock and its fee, 5000 zat per note
+    /// spent and two at least; change waits for confirmations. Whenever `zec_locks_fit` admits
+    /// a set of locks, every one of them is funded, whatever the order of the notes and of the
+    /// locks.
+    #[test]
+    fn zec_bound_holds_against_the_wallet() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let reserve = 50_000;
+        let mut admitted = 0;
+        for _ in 0..20_000 {
+            let n_notes = 1 + rnd(40) as usize;
+            let scale = [20_000, 1_000_000, 100_000_000][rnd(3) as usize];
+            let mut values: Vec<u64> = Vec::new();
+            for _ in 0..n_notes {
+                // the wallet never spends a note worth no more than its fee
+                values.push(ZEC_FEE_PER_NOTE + 1 + rnd(scale));
+            }
+            // amounts near what the notes hold, so admissions land close to the bound
+            let total: u64 = values.iter().sum();
+            let n_locks = 1 + rnd(4) as usize;
+            let mut amounts: Vec<u64> = Vec::new();
+            for _ in 0..n_locks {
+                amounts.push(1 + rnd(total / n_locks as u64 + 1));
+            }
+            let needs: Vec<u64> = amounts.iter().map(|a| a + reserve).collect();
+            let mut sorted = values.clone();
+            sorted.sort_unstable_by(|a, b| b.cmp(a));
+            sorted.truncate(n_locks);
+            let notes = ZecNotes {
+                largest: sorted,
+                count: n_notes as u64,
+            };
+            if !zec_locks_fit(values.iter().sum(), &notes, &needs) {
+                continue;
+            }
+            admitted += 1;
+            for i in (1..values.len()).rev() {
+                values.swap(i, rnd(i as u64 + 1) as usize);
+            }
+            let mut order: Vec<usize> = (0..n_locks).collect();
+            for i in (1..order.len()).rev() {
+                order.swap(i, rnd(i as u64 + 1) as usize);
+            }
+            let mut left = values.clone();
+            for &l in &order {
+                let (mut sum, mut k) = (0u64, 0u64);
+                while sum < amounts[l] + ZEC_FEE_PER_NOTE * k.max(2) {
+                    assert!(
+                        (k as usize) < left.len(),
+                        "lock {} of {amounts:?} not funded from {values:?}",
+                        amounts[l]
+                    );
+                    sum += left[k as usize];
+                    k += 1;
+                }
+                left.drain(..k as usize);
+            }
+        }
+        assert!(admitted > 1_000, "only {admitted} cases admitted");
     }
 }

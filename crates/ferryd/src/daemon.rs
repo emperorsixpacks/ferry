@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -84,7 +85,19 @@ pub struct Daemon<L> {
     pub withdrawals: crate::withdraw::Withdrawals,
     /// `--max-swaps`, or the network's default (crate::capacity).
     pub max_swaps: u32,
+    /// Set by the tick for its second pass only: slow work (funding a lock, a ZEC lock or
+    /// sweep) runs then, after every swap's deadline actions ([`Self::tick`]).
+    slow_ok: AtomicBool,
+    /// A Zcash call this tick took [`ZEC_STUCK`] or longer (a hung wallet server, a wallet lock
+    /// held by a stuck sync): the rest of this tick's Zcash work waits for the next tick instead
+    /// of paying the same wait again for every swap.
+    zec_paused: AtomicBool,
 }
+
+/// A Zcash call this slow pauses the tick's other Zcash work until the next tick.
+const ZEC_STUCK: Duration = Duration::from_secs(60);
+/// While the tick's slow pass runs, every swap's deadline actions run again this often.
+const DEADLINES_EVERY: Duration = Duration::from_secs(20);
 
 /// At most this many proposals per minute reach the maker's negotiation code.
 const PROPOSALS_PER_MINUTE: usize = 6;
@@ -240,6 +253,8 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         );
         let daemon = Arc::new(Daemon {
             max_swaps,
+            slow_ok: AtomicBool::new(false),
+            zec_paused: AtomicBool::new(false),
             withdrawals,
             role: cli.role.into(),
             offer: Offer {
@@ -262,19 +277,13 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             proposals: std::sync::Mutex::new(VecDeque::new()),
             starts: crate::route::Starts::default(),
         });
-        // The node forgets which coins it locked when it restarts: the locks we funded but that
-        // aren't out yet keep theirs, and those of swaps aborted before going out give theirs
-        // back (in case that was missed).
+        // The wallet's coin locks are ours alone (ferryd owns its wallet): the locks we funded but
+        // that aren't out yet keep theirs (locked again: the node forgets locks when it
+        // restarts), and every other locked coin goes back, from a swap aborted before its lock
+        // went out, or a funding interrupted before it was recorded.
         {
             let st = daemon.state.lock().await;
-            match daemon.relock_inflight(&st).await {
-                Ok(None) => {}
-                Ok(Some(why)) => tracing::warn!("{why}"),
-                Err(e) => tracing::warn!("locking the coins of unbroadcast locks: {e}"),
-            }
-            for rec in st.swaps.values().filter(|r| r.state() == "Aborted") {
-                daemon.release_lock_coins(rec).await;
-            }
+            daemon.reconcile_coins(&st).await;
         }
         tracing::info!(max_swaps, "runs up to {max_swaps} swaps at once");
         Ok(daemon)
@@ -758,11 +767,13 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             let held = crate::withdraw::held(&self.btc_holds(&st));
             (needs, held, self.count(&st))
         };
-        let zec = if needs.is_empty() {
-            balances.zec_shielded_zat
+        // Z: what one more lock may use, its fee reserve included: next to the locks still to
+        // send, less the notes they may take and the fee every note costs to spend.
+        let zec = if self.role == Role::Z {
+            let notes = self.leg.notes(needs.len()).await?;
+            crate::capacity::zec_room(balances.zec_shielded_zat, &notes, &needs, 0)
         } else {
-            let largest = self.leg.largest_notes(needs.len()).await?;
-            crate::capacity::zec_room(balances.zec_shielded_zat, &largest, &needs, 0)
+            balances.zec_shielded_zat
         };
         let btc = match self.role {
             Role::B => self.rpc.spendable_balance().await?.to_sat(),
@@ -778,11 +789,8 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         ))
     }
 
-    /// B: the coins of every lock we funded that the node hasn't seen go out stay locked in the
-    /// wallet, so nothing else it funds can pick them. The wallet locks them when funding, but
-    /// forgets on a restart; this locks them again. A lock that is out has spent its coins.
-    /// Returns why a withdrawal must wait, if some of them can't be locked.
-    async fn relock_inflight(&self, st: &State) -> Result<Option<String>, RpcError> {
+    /// B: the coins of every lock we funded that the node hasn't seen go out (of swaps not over).
+    async fn inflight_coins(&self, st: &State) -> Result<Vec<OutPoint>, RpcError> {
         let mut coins = vec![];
         for r in st.swaps.values().filter(|r| !r.swap.is_final()) {
             let inputs = r.lock_inputs();
@@ -793,6 +801,43 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 coins.extend(inputs);
             }
         }
+        Ok(coins)
+    }
+
+    /// Put the wallet's coin locks right, assuming ferryd owns its wallet (docs/API.md, "Several
+    /// swaps at once"): every coin it has locked that no unbroadcast lock of a live swap needs
+    /// is unlocked (a swap aborted before its lock went out, a funding interrupted before it was
+    /// recorded), then those that are needed are locked (again). Best effort, logged.
+    async fn reconcile_coins(&self, st: &State) {
+        let plan = async {
+            let keep = self.inflight_coins(st).await?;
+            let locked = self.rpc.locked_coins().await?;
+            let (unlock, _) = coin_plan(&locked, &keep);
+            if !unlock.is_empty() {
+                self.rpc.unlock_coins(&unlock).await?;
+                tracing::info!(
+                    "released {} wallet coin(s) no unbroadcast swap lock needs",
+                    unlock.len()
+                );
+            }
+            Ok::<_, RpcError>(())
+        };
+        if let Err(e) = plan.await {
+            tracing::warn!("putting the wallet's coin locks right: {e}");
+        }
+        match self.relock_inflight(st).await {
+            Ok(None) => {}
+            Ok(Some(why)) => tracing::warn!("{why}"),
+            Err(e) => tracing::warn!("locking the coins of unbroadcast locks: {e}"),
+        }
+    }
+
+    /// B: the coins of every lock we funded that the node hasn't seen go out stay locked in the
+    /// wallet, so nothing else it funds can pick them. The wallet locks them when funding, but
+    /// forgets on a restart; this locks them again. A lock that is out has spent its coins.
+    /// Returns why a withdrawal must wait, if some of them can't be locked.
+    async fn relock_inflight(&self, st: &State) -> Result<Option<String>, RpcError> {
+        let coins = self.inflight_coins(st).await?;
         if coins.is_empty() {
             return Ok(None);
         }
@@ -882,7 +927,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 needs.push(need);
                 let largest = self
                     .leg
-                    .largest_notes(needs.len() - 1)
+                    .notes(needs.len() - 1)
                     .await
                     .map_err(|e| unavailable(e.to_string()))?;
                 if crate::capacity::zec_locks_fit(have, &largest, &needs) {
@@ -1006,7 +1051,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         let _turn = self.starts.try_turn().ok_or_else(|| {
             ApiError::busy("this node is starting another swap right now; try again in a moment")
         })?;
-        let mut st = self.state.lock().await;
+        let st = self.state.lock().await;
         if let Some(reply) = again(&st) {
             return reply;
         }
@@ -1048,6 +1093,11 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             .check_policy(&self.policy)
             .map_err(|e| ApiError::bad(e.to_string()))?;
         self.check_funds(&st, params).await?;
+        // The state goes while the swap is set up (watching its outputs rescans recent blocks,
+        // which can take minutes): the tick runs every other swap meanwhile. The turn stays held
+        // until the record is in, so no other start, Propose or withdrawal counts the funds
+        // this one was checked against.
+        drop(st);
         let address = self
             .rpc
             .new_address(self.network())
@@ -1091,6 +1141,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         if !self.save(&rec) {
             return Err(ApiError(500, "could not save the swap".into()));
         }
+        let mut st = self.state.lock().await;
         st.swaps.insert(id, rec);
         self.publish(&mut st);
         if let Some(q) = quote {
@@ -1338,7 +1389,22 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             if rec.stalled || !self.save(rec) {
                 break;
             }
-            let zec = matches!(p, Pending::SendZec { .. } | Pending::SweepZec { .. });
+            let zec = p.is_zec();
+            // Slow work waits for the tick's second pass, and Zcash work for the next tick
+            // while the wallet server is stuck: as if it had to retry.
+            match crate::record::now_for(
+                p.is_slow(),
+                zec,
+                self.slow_ok.load(Relaxed),
+                self.zec_paused.load(Relaxed),
+            ) {
+                crate::record::Now::Run => {}
+                crate::record::Now::Skip => {
+                    i += 1;
+                    continue;
+                }
+                crate::record::Now::Stop => break,
+            }
             match self.execute(rec, p).await {
                 Ok(ev) => follow.extend(ev),
                 // A Zcash action waiting on its chain stays queued but never holds up what
@@ -1387,12 +1453,20 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             }
             Pending::Broadcast { tx } => {
                 // The state machine has moved on; from here the transaction lives in the
-                // rebroadcast set until it (or a conflicting spend) is buried.
+                // rebroadcast set until it (or a conflicting spend) is buried. The first send
+                // follows the same timing rules as every later one, with confirmations read
+                // now: a redeem decided when Z's message came in, but reached by the tick only
+                // later, must not go out once its window has closed.
                 let mut r = Rebroadcast {
                     tx,
                     announced: false,
                 };
-                self.try_broadcast(rec, &mut r).await;
+                match self.broadcast_decision(rec, &r.tx).await {
+                    Err(()) => return Err(Retry),
+                    Ok(RebroadcastDecision::Done) => return Ok(None),
+                    Ok(RebroadcastDecision::Wait) => {}
+                    Ok(RebroadcastDecision::Send) => self.try_broadcast(rec, &mut r).await,
+                }
                 let txid = r.tx.compute_txid();
                 if !rec.rebroadcast.iter().any(|x| x.tx.compute_txid() == txid) {
                     rec.rebroadcast.push(r);
@@ -1457,7 +1531,10 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     rec.zec_send_intent = false;
                     return Err(Retry);
                 }
-                match self.leg.send(&fvk, amount).await {
+                let started = Instant::now();
+                let sent = self.leg.send(&fvk, amount).await;
+                self.zec_slow(started);
+                match sent {
                     Ok(txid) => {
                         rec.zec_lock_txid = Some(txid.clone());
                         rec.log(
@@ -1528,11 +1605,13 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                     Role::B => rec.sweep_to.clone(),
                     Role::Z => None,
                 };
-                match self
+                let started = Instant::now();
+                let swept = self
                     .leg
                     .sweep(&fvk, ask.expose(), lock_value, to.as_deref())
-                    .await
-                {
+                    .await;
+                self.zec_slow(started);
+                match swept {
                     Ok(txid) => {
                         rec.zec_sweep_txid = Some(txid.clone());
                         let (kind, label) = match (rec.role(), &to) {
@@ -1606,17 +1685,18 @@ impl<L: ZecLeg + 'static> Daemon<L> {
 
     /// Rebroadcast our presigned spends until they, or a conflicting spend of the same output,
     /// have k confirmations, while the timing rules still allow them.
-    async fn rebroadcast(&self, rec: &mut SwapRecord) {
-        if rec.rebroadcast.is_empty() {
-            return;
-        }
+    /// The lock, the swap's presigned spends and the confirmations of those the node knows,
+    /// for [`Rebroadcaster`]. `Ok(None)`: no lock yet. `Err`: the node did not answer.
+    async fn spend_confs(
+        &self,
+        rec: &SwapRecord,
+    ) -> Result<Option<(OutPoint, ferry_btc::SwapTxs, HashMap<Txid, u32>)>, ()> {
         let Some(lock) = rec.swap.lock_outpoint() else {
-            return;
+            return Ok(None);
         };
         let Ok(txs) = rec.swap.session().txs(lock) else {
-            return;
+            return Ok(None);
         };
-        let params = rec.swap.session().params.clone();
         let mut confs: HashMap<Txid, u32> = HashMap::new();
         let candidates =
             [Spend::Cancel, Spend::Redeem, Spend::Refund, Spend::Punish].map(|s| txs.txid(s));
@@ -1628,10 +1708,40 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 Ok(None) => {}
                 Err(e) => {
                     tracing::warn!(id = %rec.id, "rebroadcast check: {e}");
-                    return;
+                    return Err(());
                 }
             }
         }
+        Ok(Some((lock, txs, confs)))
+    }
+
+    /// Whether `tx`, one of this swap's transactions, may go out now ([`Rebroadcaster`]).
+    async fn broadcast_decision(
+        &self,
+        rec: &SwapRecord,
+        tx: &Transaction,
+    ) -> Result<RebroadcastDecision, ()> {
+        let Some((lock, txs, confs)) = self.spend_confs(rec).await? else {
+            return Ok(RebroadcastDecision::Send);
+        };
+        let params = rec.swap.session().params.clone();
+        Ok(Rebroadcaster {
+            params: &params,
+            lock: lock.txid,
+            txs: &txs,
+            confs: &confs,
+        }
+        .decide(tx))
+    }
+
+    async fn rebroadcast(&self, rec: &mut SwapRecord) {
+        if rec.rebroadcast.is_empty() {
+            return;
+        }
+        let Ok(Some((lock, txs, confs))) = self.spend_confs(rec).await else {
+            return;
+        };
+        let params = rec.swap.session().params.clone();
         let decision = Rebroadcaster {
             params: &params,
             lock: lock.txid,
@@ -1923,25 +2033,72 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         }
     }
 
+    /// One round over every swap, with the state held: no two swaps fund, sign or send from the
+    /// same wallet at once. In two passes, so one swap's slow work never delays another's
+    /// deadline:
+    /// 1. every swap's Bitcoin events, peer messages, rebroadcasts and deadline actions (cancel,
+    ///    refund, punish, redeem), with slow work left queued; then every swap's look at the
+    ///    Zcash chain, so a slow wallet server holds up no deadline;
+    /// 2. the slow work (funding a lock from the wallet, a ZEC lock or sweep), one swap at a
+    ///    time, with pass 1 run again whenever [`DEADLINES_EVERY`] has gone by.
+    ///
+    /// A Zcash call that takes [`ZEC_STUCK`] or longer pauses the tick's other Zcash work until
+    /// the next tick, so a hung wallet server costs one wait per tick, not one per swap.
     pub async fn tick(&self) {
         let mut st = self.state.lock().await;
-        // Swaps run one after the other in a tick, with the state held: no two of them fund,
-        // sign or send from the same wallet at once. Before a lock is funded, the coins of the
-        // locks funded earlier and not out yet are locked again if the node forgot them, so the
-        // wallet can't pick them twice.
-        let funding = st.swaps.values().any(|r| {
-            !r.swap.is_final()
-                && r.pending
-                    .iter()
-                    .any(|p| matches!(p, Pending::FundLock { .. }))
-        });
-        if funding {
-            match self.relock_inflight(&st).await {
-                Ok(None) => {}
-                Ok(Some(why)) => tracing::warn!("{why}"),
-                Err(e) => tracing::warn!("locking the coins of unbroadcast locks: {e}"),
-            }
+        self.zec_paused.store(false, Relaxed);
+        self.deadline_pass(&mut st).await;
+        self.slow_pass(&mut st).await;
+        self.publish(&mut st);
+    }
+
+    /// The tick's second pass: the slow work, swap by swap.
+    async fn slow_pass(&self, st: &mut State) {
+        let slow: Vec<String> = st
+            .swaps
+            .iter()
+            .filter(|(_, r)| !r.settled() && !r.stalled && r.pending.iter().any(Pending::is_slow))
+            .map(|(id, _)| id.clone())
+            .collect();
+        if slow.is_empty() {
+            return;
         }
+        // Before a lock is funded, the wallet's coin locks are put right (see
+        // [`Self::reconcile_coins`]), so it can't pick a coin twice.
+        if st.swaps.values().any(|r| {
+            r.pending
+                .iter()
+                .any(|p| matches!(p, Pending::FundLock { .. }))
+        }) {
+            self.reconcile_coins(st).await;
+        }
+        let mut deadlines = Instant::now();
+        for id in slow {
+            if deadlines.elapsed() >= DEADLINES_EVERY {
+                self.deadline_pass(st).await;
+                deadlines = Instant::now();
+            }
+            let Some(rec) = st.swaps.get_mut(&id) else {
+                continue;
+            };
+            if rec.settled() || rec.stalled {
+                continue;
+            }
+            self.slow_ok.store(true, Relaxed);
+            let done = AssertUnwindSafe(self.drive_pending(rec))
+                .catch_unwind()
+                .await;
+            self.slow_ok.store(false, Relaxed);
+            if done.is_err() {
+                tracing::error!(%id, "slow work panicked; the swap is kept and retried next tick");
+            }
+            self.save(rec);
+        }
+    }
+
+    /// The tick's first pass: every swap's events and deadline actions, no slow work.
+    async fn deadline_pass(&self, st: &mut State) {
+        self.slow_ok.store(false, Relaxed);
         let ids: Vec<String> = st.swaps.keys().cloned().collect();
         for id in ids {
             let Some(rec) = st.swaps.get_mut(&id) else {
@@ -1961,7 +2118,52 @@ impl<L: ZecLeg + 'static> Daemon<L> {
             }
             self.save(rec);
         }
-        self.publish(&mut st);
+        // Then every swap's Zcash look, after all the deadline steps above: a slow wallet server
+        // (the first look at a joint address waits for the wallet) holds up none of them.
+        for id in st.swaps.keys().cloned().collect::<Vec<_>>() {
+            let Some(rec) = st.swaps.get_mut(&id) else {
+                continue;
+            };
+            if rec.settled() {
+                continue;
+            }
+            match AssertUnwindSafe(self.zec_round(rec)).catch_unwind().await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(%id, "tick: {e}"),
+                Err(_) => tracing::error!(%id, "zcash look panicked; the swap is kept"),
+            }
+            self.save(rec);
+        }
+    }
+
+    /// One swap's Zcash look: the joint address's notes and the public view of its ZEC
+    /// transactions, and the events they make.
+    async fn zec_round(&self, rec: &mut SwapRecord) -> anyhow::Result<()> {
+        let mut out = vec![];
+        if let Err(e) = self.zec_events(rec, &mut out).await {
+            tracing::warn!(id = %rec.id, "zcash watch (skipped this tick): {e}");
+        }
+        self.zec_observer(rec).await;
+        for ev in out {
+            if rec.stalled {
+                self.observe(rec, ev);
+            } else if let Err(e) = self.process(rec, ev).await {
+                tracing::warn!(id = %rec.id, "chain event rejected: {e}");
+            }
+        }
+        self.fill_heights(rec, true).await
+    }
+
+    /// A Zcash call that started at `started` is over: if it took [`ZEC_STUCK`] or longer, the
+    /// rest of this tick's Zcash work waits for the next tick.
+    fn zec_slow(&self, started: Instant) {
+        if started.elapsed() >= ZEC_STUCK {
+            tracing::warn!(
+                "a Zcash call took {:?}; the rest of this round's Zcash work waits for the next",
+                started.elapsed()
+            );
+            self.zec_paused.store(true, Relaxed);
+        }
     }
 
     async fn tick_swap(&self, rec: &mut SwapRecord) -> anyhow::Result<()> {
@@ -1982,7 +2184,7 @@ impl<L: ZecLeg + 'static> Daemon<L> {
                 tracing::warn!(id = %rec.id, "chain event rejected: {e}");
             }
         }
-        self.fill_heights(rec).await?;
+        self.fill_heights(rec, false).await?;
         Ok(())
     }
 
@@ -2120,10 +2322,6 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         if let Err(e) = self.btc_events(rec, &mut out).await {
             tracing::warn!(id = %rec.id, "bitcoin watch: {e}");
         }
-        if let Err(e) = self.zec_events(rec, &mut out).await {
-            tracing::warn!(id = %rec.id, "zcash watch (skipped this tick): {e}");
-        }
-        self.zec_observer(rec).await;
         out
     }
 
@@ -2186,12 +2384,15 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     }
 
     async fn zec_events(&self, rec: &mut SwapRecord, out: &mut Vec<Event>) -> anyhow::Result<()> {
-        if rec.swap.lock_outpoint().is_none() {
+        if rec.swap.lock_outpoint().is_none() || self.zec_paused.load(Relaxed) {
             return Ok(());
         }
         let fvk = rec.swap.session().joint_fvk()?;
         let amount = rec.swap.session().params.zec_amount;
-        let notes = self.leg.watch(&fvk).await?;
+        let started = Instant::now();
+        let notes = self.leg.watch(&fvk).await;
+        self.zec_slow(started);
+        let notes = notes?;
         let lock_spent_by = track_lock_note(rec, &notes, amount);
         for note in notes {
             out.push(Event::Chain(ChainEvent::ZecNoteSeen {
@@ -2215,6 +2416,9 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     /// Both parties describe the same public transactions: the lock and whoever's sweep.
     /// Best effort: a failing description never blocks anything.
     async fn zec_observer(&self, rec: &mut SwapRecord) {
+        if self.zec_paused.load(Relaxed) {
+            return;
+        }
         let sweep = rec.zec_spent_by.clone().or(rec.zec_sweep_txid.clone());
         for (key, txid) in [("lock", rec.zec_lock_txid.clone()), ("sweep", sweep)] {
             let Some(txid) = txid else { continue };
@@ -2228,7 +2432,8 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     }
 
     /// Fill in the confirmation height of timeline entries whose transaction confirmed.
-    async fn fill_heights(&self, rec: &mut SwapRecord) -> anyhow::Result<()> {
+    /// `zec`: the Zcash heights too (the tick's Zcash look; otherwise only Bitcoin's).
+    async fn fill_heights(&self, rec: &mut SwapRecord, zec: bool) -> anyhow::Result<()> {
         if rec
             .timeline
             .iter()
@@ -2236,7 +2441,11 @@ impl<L: ZecLeg + 'static> Daemon<L> {
         {
             return Ok(());
         }
-        let zec_tip = self.leg.status().await.ok().map(|s| s.height);
+        let zec_tip = if !zec || self.zec_paused.load(Relaxed) {
+            None
+        } else {
+            self.leg.status().await.ok().map(|s| s.height)
+        };
         for e in rec.timeline.iter_mut().filter(|e| e.height.is_none()) {
             let Some(txid) = e.txid.clone() else { continue };
             e.height = match e.chain.as_str() {
@@ -2256,6 +2465,22 @@ impl<L: ZecLeg + 'static> Daemon<L> {
     }
 }
 
+/// What to do with the wallet's coin locks: unlock those locked that no unbroadcast lock needs
+/// (`keep`), lock those needed that aren't locked.
+fn coin_plan(locked: &[OutPoint], keep: &[OutPoint]) -> (Vec<OutPoint>, Vec<OutPoint>) {
+    let unlock = locked
+        .iter()
+        .filter(|c| !keep.contains(c))
+        .copied()
+        .collect();
+    let lock = keep
+        .iter()
+        .filter(|c| !locked.contains(c))
+        .copied()
+        .collect();
+    (unlock, lock)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2268,6 +2493,20 @@ mod tests {
             confirmations: 12,
             spent_by: spent_by.map(Into::into),
         }
+    }
+
+    /// Locked coins no unbroadcast lock needs go back; needed ones not locked get locked.
+    #[test]
+    fn coin_locks_are_put_right() {
+        use ferry_btc::bitcoin::hashes::Hash;
+        let c = |n: u8| OutPoint {
+            txid: Txid::from_byte_array([n; 32]),
+            vout: u32::from(n),
+        };
+        let (unlock, lock) = coin_plan(&[c(1), c(2), c(3)], &[c(2), c(4)]);
+        assert_eq!((unlock, lock), (vec![c(1), c(3)], vec![c(4)]));
+        assert_eq!(coin_plan(&[], &[]), (vec![], vec![]));
+        assert_eq!(coin_plan(&[c(1)], &[c(1)]), (vec![], vec![]));
     }
 
     /// Our sweep expires unmined: the record lets go of it, so the still-queued SweepZec builds
