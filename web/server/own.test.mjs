@@ -50,10 +50,12 @@ test("receive addresses and fields", () => {
 });
 
 test("withdraw bodies are rebuilt", () => {
-  assert.deepEqual(withdrawBody({ asset: "zec", amount: 50_000_000, to: "utest1abcdefgh", extra: 1 }), { body: { asset: "zec", amount: 50_000_000, to: "utest1abcdefgh" } });
-  assert.deepEqual(withdrawBody({ asset: "btc", amount: "1500", to: "bcrt1qn7uqc8hytxc7mhtsdszr" }).body.amount, 1500);
-  assert.deepEqual(withdrawBody({ asset: "eth", amount: "20000000000000000", to: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" }).body.amount, "20000000000000000");
-  assert.equal(withdrawBody({ asset: "token", amount: 5, to: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" }).body.amount, "5");
+  // amounts go on as digit strings (ferryd takes them for every asset; wei doesn't fit a number)
+  assert.deepEqual(withdrawBody({ asset: "zec", amount: 50_000_000, to: "utest1abcdefgh", extra: 1 }), { body: { asset: "zec", amount: "50000000", to: "utest1abcdefgh" } });
+  assert.equal(withdrawBody({ asset: "btc", amount: "1500", to: "bcrt1qn7uqc8hytxc7mhtsdszr" }).body.amount, "1500");
+  assert.equal(withdrawBody({ asset: "ltc", amount: "1500", to: "rltc1qn7uqc8hytxc7mhtsdszr" }).body.asset, "ltc");
+  assert.equal(withdrawBody({ asset: "eth", amount: "20000000000000000", to: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" }).body.amount, "20000000000000000");
+  assert.equal(withdrawBody({ asset: "usdc", amount: 5, to: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" }).body.amount, "5");
   for (const b of [{ asset: "doge", amount: 1, to: "utest1abcdefgh" }, { asset: "zec", amount: 0, to: "utest1abcdefgh" }, { asset: "zec", amount: 1.5, to: "utest1abcdefgh" }, { asset: "zec", amount: 1, to: "u1 x" }, { asset: "token", amount: "-3", to: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" }])
     assert.ok(withdrawBody(b).error, JSON.stringify(b));
   // a dry run only reaches a daemon that previews; anything else would send for real

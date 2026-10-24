@@ -542,20 +542,25 @@ function heldInWallet(role, asset) {
 const books = { Z: sendBook(), B: sendBook() };
 function walletAssets(role, coin) {
   const p = parties[role];
-  const slot = (key, sym, check, fee) => ({
+  const slot = (key, sym, c, check, fee, alias) => ({
     sym,
+    coin: c,
     decimals: 8,
     check,
     fee,
+    alias,
+    units: () => BigInt(p.balances[key]),
     free: () => BigInt(Math.max(0, p.balances[key] - heldInWallet(role, key))),
     take: (n) => (p.balances[key] -= Number(n)),
     give: (n) => (p.balances[key] += Number(n)),
   });
+  const own = zecAddressOf(p);
   return {
-    zec: slot("zec_shielded_zat", "ZEC", (to) => zecProblem(to, chains.zec.network), FEES.zec),
-    btc: slot("btc_sat", coin === "ltc" ? "LTC" : "BTC", (to) => coinProblem(to, coin ?? "btc", chains.btc.network), FEES.btc),
+    zec: slot("zec_shielded_zat", "ZEC", "zec", (to) => (to === own ? "that is this node's own address" : zecProblem(to, chains.zec.network)), FEES.zec),
+    btc: slot("btc_sat", coin === "ltc" ? "LTC" : "BTC", coin ?? "btc", (to) => coinProblem(to, coin ?? "btc", chains.btc.network), FEES.btc, coin === "ltc" ? "ltc" : undefined),
   };
 }
+const zecAddressOf = (p) => `${uaPrefix(chains.zec.network)}mockwallet${Buffer.from(p.name).toString("hex")}`;
 const sentTx = (chain) => {
   const tx = { txid: hex(32), kind: "withdraw", swapId: null, height: null };
   chains[chain].txs.push(tx);
@@ -616,10 +621,13 @@ function statusView(role, coin = null) {
 }
 
 // GET /api/addresses: where to fund this party (its BTC address is fixed for the mock's lifetime)
-function addressesView(role, coin = null) {
+// (as ferryd: the counter coin's funding address is stable; ?fresh=1 gives a new one each time)
+function addressesView(role, coin = null, fresh = false) {
   const p = parties[role];
-  const counter = coin === "ltc" ? { coin: "ltc", network: chains.btc.network, address: (p.ltcAddress ??= "rltc1q" + bech(38)) } : { coin: "btc", network: chains.btc.network, address: p.address };
-  return { role, name: p.name, btc: counter, zec: { address: `${uaPrefix(chains.zec.network)}mockwallet${Buffer.from(p.name).toString("hex")}` } };
+  const ltc = coin === "ltc";
+  const address = fresh ? (ltc ? "rltc1q" : "bcrt1q") + bech(38) : ltc ? (p.ltcAddress ??= "rltc1q" + bech(38)) : p.address;
+  const counter = { coin: ltc ? "ltc" : "btc", ticker: ltc ? "LTC" : "BTC", network: chains.btc.network, address };
+  return { role, name: p.name, btc: counter, zec: { address: zecAddressOf(p), network: chains.zec.network } };
 }
 
 const STARTED = now();
@@ -748,7 +756,7 @@ setInterval(() => {
     stepZ(s);
   }
   router?.tick();
-  for (const role of ["Z", "B"]) books[role].tick();
+  for (const role of ["Z", "B"]) books[role].tick(sentConfs);
   usdc?.tick();
   for (const role of ["Z", "B"]) pushEvents(role);
   pushUsdc();
@@ -771,6 +779,14 @@ function pushEvents(role) {
       if (body !== c.last[s.id]) {
         c.last[s.id] = body;
         c.res.write(`event: swap\ndata: ${body}\n\n`);
+      }
+    }
+    // as ferryd: each send out, whenever it changes
+    for (const w of books[role].list(sentConfs)) {
+      const body = JSON.stringify(w);
+      if (body !== c.last[`w:${w.id}`]) {
+        c.last[`w:${w.id}`] = body;
+        c.res.write(`event: withdrawal\ndata: ${body}\n\n`);
       }
     }
   }
@@ -807,7 +823,7 @@ function handler(role, coin = null) {
     if (req.method === "OPTIONS") return send(res, 204, {});
 
     if (req.method === "GET" && path === "/api/status") return send(res, 200, statusView(role, coin));
-    if (req.method === "GET" && path === "/api/addresses") return send(res, 200, addressesView(role, coin));
+    if (req.method === "GET" && path === "/api/addresses") return send(res, 200, addressesView(role, coin, url.searchParams.get("fresh") === "1"));
     // the party's own wallet: sends out, and what it sent (mock/wallet.mjs)
     if (req.method === "GET" && path === "/api/withdrawals") return send(res, 200, books[role].list(sentConfs));
     if (req.method === "POST" && path === "/api/withdraw") {
@@ -971,6 +987,13 @@ function pushUsdc() {
       c.at = now();
       c.res.write(`event: status\ndata: ${status}\n\n`);
     }
+    for (const w of usdc.sends()) {
+      const body = JSON.stringify(w);
+      if (body !== c.sent[w.id]) {
+        c.sent[w.id] = body;
+        c.res.write(`event: withdrawal\ndata: ${body}\n\n`);
+      }
+    }
   }
 }
 if (USDC_PORT) {
@@ -981,7 +1004,7 @@ if (USDC_PORT) {
       if (req.method === "GET" && path === "/api/events") {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
         res.write(": connected\n\n");
-        const c = { res, last: null, at: 0 };
+        const c = { res, last: null, at: 0, sent: {} };
         usdcClients.add(c);
         pushUsdc();
         const ping = setInterval(() => res.write(": ping\n\n"), 15000);

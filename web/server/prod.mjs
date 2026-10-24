@@ -114,6 +114,7 @@ import { extraDaemons, mainSide, pairsBody, samePair } from "./pairs.mjs";
 import { buildRoute, publicRoute, routerLink } from "./routes.mjs";
 import { ONE_CLICK_PUBKEY, ONE_CLICK_URL, nearDesk, nearRoutes, oneClick, ownDaemons, requestJson } from "./near.mjs";
 import { originAllowed, ownProblem, receiveFields, withdrawBody } from "./own.mjs";
+import { sseTransform } from "./sse.mjs";
 
 const env = process.env;
 const PORT = Number(env.PORT ?? 5300);
@@ -616,30 +617,16 @@ function rewriteJson(up, res, fn = clampOffer) {
   });
 }
 
-// `name` events' data through `fn`: the daemons' status (clampOffer), the router's routes
-function rewriteEvents(up, res, name = "status", fn = clampOffer) {
-  let buf = "";
-  let event = "";
+// `name` events' data through `fn`: the daemons' status (clampOffer), the router's routes; `drop`'s
+// messages left out: a daemon's withdrawals, for a page that doesn't own the node (sse.mjs)
+function rewriteEvents(up, res, name = "status", fn = clampOffer, drop = []) {
+  const pass = sseTransform({ rewrite: { [name]: fn }, drop });
   up.setEncoding("utf8");
   up.on("data", (chunk) => {
-    buf += chunk;
-    let i;
-    while ((i = buf.indexOf("\n")) >= 0) {
-      let line = buf.slice(0, i);
-      buf = buf.slice(i + 1);
-      if (line.startsWith("event:")) event = line.slice(6).trim();
-      else if (line === "") event = "";
-      else if (event === name && line.startsWith("data:")) {
-        try {
-          line = "data: " + JSON.stringify(fn(JSON.parse(line.slice(5))));
-        } catch {
-          /* pass through */
-        }
-      }
-      res.write(line + "\n");
-    }
+    const out = pass(chunk);
+    if (out) res.write(out);
   });
-  up.on("end", () => res.end(buf));
+  up.on("end", () => res.end());
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -709,7 +696,8 @@ async function proxy(key, path, search, req, res) {
     if (path === "/api/status" && up.statusCode === 200) delete out["content-length"];
     if ((up.statusCode ?? 502) >= 300) req.ferryRefused?.();
     res.writeHead(up.statusCode ?? 502, out);
-    if (sse && path === "/api/events") rewriteEvents(up, res);
+    // what the node sent out reaches its owner's page only
+    if (sse && path === "/api/events") rewriteEvents(up, res, "status", clampOffer, ownRefusal(req) ? ["withdrawal"] : []);
     else if (path === "/api/status" && up.statusCode === 200) rewriteJson(up, res);
     else up.pipe(res);
     // a daemon that dies mid-stream must end the browser's event stream, so EventSource reconnects

@@ -94,25 +94,21 @@ export function receiveFields(body, side) {
   return { json: `,${JSON.stringify(name)}:${JSON.stringify(to)}` };
 }
 
-// What a node can send out: shielded ZEC, its counter coin (BTC, LTC), an EVM daemon's token, or its
-// gas ETH. Amounts are base units: zatoshi and satoshi as JSON integers (as ferryd's own amounts),
-// token units and wei as decimal strings (as its token_units and eth_wei).
-export const WITHDRAW_ASSETS = ["zec", "btc", "token", "eth"];
+// What a node can send out (ferryd's POST /api/withdraw): shielded ZEC, its counter coin ("btc", or
+// "ltc" on a Litecoin daemon), an EVM daemon's token ("token", or its symbol) or its gas ("eth").
+export const WITHDRAW_ASSETS = ["zec", "btc", "ltc", "token", "usdc", "weth", "eth"];
 
-// Rebuild a browser's POST /api/withdraw: {body} for the daemon, or {error}. `preview`: the daemon
-// lists "withdraw_preview" in its features, so {"dry_run": true} asks for the fee without sending;
-// a daemon that doesn't would ignore the field and send for real, so it never reaches one.
+// Rebuild a browser's POST /api/withdraw: {body} for the daemon, or {error}. The amount is base units
+// (zatoshi, satoshi, token units, wei), sent on as a string of digits, which ferryd takes for any
+// asset (wei doesn't fit a JSON number). ferryd has no dry run: `preview` says the daemon lists
+// "withdraw_preview" (the mock does), so {"dry_run": true} asks it for the fee without sending; any
+// other daemon would ignore the field and send for real, so it never reaches one.
 export function withdrawBody(body, { preview = false } = {}) {
   const asset = body?.asset;
   if (!WITHDRAW_ASSETS.includes(asset)) return { error: 'asset must be "zec", "btc", "token" or "eth"' };
   let amount = body?.amount;
-  if (asset === "zec" || asset === "btc") {
-    if (typeof amount === "string" && /^[1-9]\d{0,15}$/.test(amount)) amount = Number(amount);
-    if (!Number.isSafeInteger(amount) || amount <= 0) return { error: "amount must be a positive whole number of the coin's smallest units" };
-  } else {
-    if (typeof amount === "number" && Number.isSafeInteger(amount) && amount > 0) amount = String(amount);
-    if (typeof amount !== "string" || !/^[1-9]\d{0,77}$/.test(amount)) return { error: "amount must be a positive whole number of the coin's smallest units" };
-  }
+  if (typeof amount === "number" && Number.isSafeInteger(amount) && amount > 0) amount = String(amount);
+  if (typeof amount !== "string" || !/^[1-9]\d{0,77}$/.test(amount)) return { error: "amount must be a positive whole number of the coin's smallest units" };
   const to = receiveAddress(body?.to);
   if (!to) return { error: "That address doesn't look right. Check it and try again." };
   const dry = body?.dry_run === true;
