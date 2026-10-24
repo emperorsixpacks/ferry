@@ -1,73 +1,14 @@
 // The proxies' time limits (upstream.mjs): the helper on its own, then prod.mjs itself, run as a child
-// process in front of a fake daemon. Ports: the OS picks them, unless TEST_PORT_BASE names the first of
-// a few in a row (prod.mjs, then the fake daemon), e.g. TEST_PORT_BASE=7530 pnpm test:server.
+// process in front of a fake daemon (testing.mjs; TEST_PORT_BASE+0 on for its ports, when set).
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fakeDaemon as fake, get, ports, prodServer as prod, until } from "./testing.mjs";
 import { READ_MS, START_MS, deadline, limitFor, timeoutAnswer } from "./upstream.mjs";
 
-const BASE = Number(process.env.TEST_PORT_BASE) || 0;
-let nextPort = BASE;
-const port = () => (BASE ? nextPort++ : 0);
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const port = ports(0);
 const LIMIT = 300;
-
-// A fake daemon: `routes[method + " " + path](req, res)`; a route that never answers holds the request.
-// It keeps every connection it was given, to see which are still open.
-function fakeDaemon(routes) {
-  const sockets = new Set();
-  const server = http.createServer((req, res) => {
-    const route = routes[`${req.method} ${new URL(req.url, "http://x").pathname}`];
-    if (route) route(req, res);
-    else {
-      res.writeHead(404, { "content-type": "application/json" });
-      res.end('{"error":"not found"}');
-    }
-  });
-  server.on("connection", (s) => {
-    sockets.add(s);
-    s.on("close", () => sockets.delete(s));
-  });
-  return new Promise((ok) =>
-    server.listen(port(), "127.0.0.1", () => ok({ url: `http://127.0.0.1:${server.address().port}`, open: () => sockets.size, close: () => (server.closeAllConnections(), server.close()) })),
-  );
-}
-
-// A request, with how long its answer took; `stream` keeps reading an event stream for `ms`.
-function get(url, { method = "GET", body, headers = {}, stream } = {}) {
-  const t0 = Date.now();
-  return new Promise((ok, fail) => {
-    const req = http.request(url, { method, headers: { ...headers, ...(body ? { "content-type": "application/json", "content-length": Buffer.byteLength(body) } : {}) } }, (res) => {
-      let text = "";
-      res.setEncoding("utf8");
-      res.on("data", (c) => (text += c));
-      const done = () => ok({ status: res.statusCode, type: res.headers["content-type"], text, json: (() => { try { return JSON.parse(text); } catch { return null; } })(), ms: Date.now() - t0 });
-      if (stream) {
-        setTimeout(() => {
-          done();
-          req.destroy();
-        }, stream);
-        res.on("error", () => {});
-      } else {
-        res.on("end", done);
-        res.on("error", fail);
-      }
-    });
-    req.on("error", fail);
-    req.end(body);
-  });
-}
-
-// waits up to `ms` for `fn()` to be true
-async function until(fn, ms = 2000) {
-  for (const t0 = Date.now(); Date.now() - t0 < ms; await sleep(20)) if (fn()) return true;
-  return fn();
-}
+const fakeDaemon = (routes) => fake(routes, port);
 
 // ------------------------------------------------------------------------------------------------
 // the helper
@@ -157,36 +98,8 @@ test("a POST gets the longer limit", async () => {
 // ------------------------------------------------------------------------------------------------
 // prod.mjs: its daemon and router proxies, with the guard in front
 
-async function prodServer(env) {
-  const dist = mkdtempSync(join(tmpdir(), "ferry-dist-"));
-  const child = spawn(process.execPath, [fileURLToPath(new URL("./prod.mjs", import.meta.url))], {
-    env: { PATH: process.env.PATH, HOST: "127.0.0.1", PORT: String(port()), DIST: dist, FERRY_NEAR_QUOTES: "0", FERRY_READ_TIMEOUT_MS: String(LIMIT), FERRY_START_TIMEOUT_MS: String(LIMIT * 4), ...env },
-    stdio: ["ignore", "pipe", "inherit"],
-  });
-  const url = await new Promise((ok, fail) => {
-    let out = "";
-    child.stdout.on("data", (c) => {
-      out += c;
-      const m = out.match(/ferry-ui on (http:\/\/[\d.]+:\d+)/);
-      if (m) ok(m[1]);
-    });
-    child.on("exit", (code) => fail(new Error(`prod.mjs exited (${code})`)));
-  });
-  return {
-    url,
-    // this child only, by its handle; a SIGKILL if it hasn't gone in a second
-    close: async () => {
-      if (child.exitCode === null && child.signalCode === null) {
-        const gone = new Promise((ok) => child.on("exit", ok));
-        child.kill("SIGTERM");
-        const kill = setTimeout(() => child.kill("SIGKILL"), 1000);
-        await gone;
-        clearTimeout(kill);
-      }
-      rmSync(dist, { recursive: true, force: true });
-    },
-  };
-}
+// prod.mjs with short limits: reads LIMIT, starts four times that
+const prodServer = (env) => prod({ FERRY_READ_TIMEOUT_MS: String(LIMIT), FERRY_START_TIMEOUT_MS: String(LIMIT * 4), ...env }, port);
 
 test("prod.mjs: a hung daemon's reads get 504 in time, its sockets close, and streams and starts still work", async () => {
   let swapsAsked = 0;
