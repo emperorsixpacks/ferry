@@ -1,0 +1,157 @@
+# Ferry for Coolify: no Caddy — Coolify's reverse proxy handles TLS.
+# Coolify builds this from the repo root and injects env vars via its UI or .env.
+# Expose only the web service; everything else stays on the internal network.
+name: ferry
+
+x-ferryd: &ferryd
+  build:
+    context: .
+    dockerfile: infra/deploy/Dockerfile.ferryd
+  image: ferry-ferryd:local
+  restart: unless-stopped
+  depends_on: [bitcoind]
+  networks: [internal]
+  stop_grace_period: 30s
+
+services:
+  bitcoind:
+    image: bitcoin/bitcoin:28.1
+    restart: unless-stopped
+    command:
+      - -signet
+      - -prune=${PRUNE_MB:-2000}
+      - -server
+      - -printtoconsole
+      - -rpcuser=${BTC_RPC_USER:-ferry}
+      - -rpcpassword=${BTC_RPC_PASS:?set BTC_RPC_PASS}
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=172.16.0.0/12
+      - -rpcallowip=10.0.0.0/8
+      - -rpcallowip=192.168.0.0/16
+      - -rpcport=38332
+      - -fallbackfee=0.00002
+      - -dbcache=${DBCACHE_MB:-1000}
+    environment:
+      BTC_RPC_USER: ${BTC_RPC_USER:-ferry}
+      BTC_RPC_PASS: ${BTC_RPC_PASS}
+    volumes:
+      - bitcoind:/home/bitcoin/.bitcoin
+    stop_grace_period: 10m
+    networks: [internal]
+
+  ferryd-b:
+    <<: *ferryd
+    command:
+      - --role=b
+      - --name=bram
+      - --btc-wallet=bram
+      - --api-listen=0.0.0.0:7102
+      - --listen=0.0.0.0:7112
+      - --public-url=${B_PUBLIC_PEER_URL:-http://ferryd-b:7112}
+      - --api-token=${FERRY_B_TOKEN:?set FERRY_B_TOKEN}
+      - --maker-offer=${RATE:-410000}:${MIN_ZAT:-10000000}:${MAX_ZAT:-100000000}
+      - --data-dir=/data
+      - --network=signet
+      - --btc-rpc=http://bitcoind:38332
+      - --btc-rpc-user=${BTC_RPC_USER:-ferry}
+      - --btc-rpc-pass=${BTC_RPC_PASS:?set BTC_RPC_PASS}
+      - --zec=devtool
+      - --zec-network=test
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --api-allow-remote
+      - --ui-origin=${PUBLIC_ORIGIN:-http://localhost}
+      - --t1=${T1:-6}
+      - --t2=${T2:-6}
+      - --delta=${DELTA:-2}
+      - --btc-lock-confs=${BTC_LOCK_CONFS:-1}
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --cancel-confs=${CANCEL_CONFS:-1}
+      - --fee-sat=${FEE_SAT:-1500}
+      - --poll-ms=${POLL_MS:-5000}
+    environment:
+      FERRY_TOKEN: ${FERRY_B_TOKEN}
+    volumes:
+      - ferryd-b:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -H \"authorization: Bearer $$FERRY_TOKEN\" http://127.0.0.1:7102/api/status >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+
+  ferryd-z:
+    <<: *ferryd
+    command:
+      - --role=z
+      - --name=zoe
+      - --btc-wallet=zoe
+      - --api-listen=0.0.0.0:7101
+      - --listen=0.0.0.0:7111
+      - --public-url=http://ferryd-z:7111
+      - --api-token=${FERRY_Z_TOKEN:?set FERRY_Z_TOKEN}
+      - --data-dir=/data
+      - --network=signet
+      - --btc-rpc=http://bitcoind:38332
+      - --btc-rpc-user=${BTC_RPC_USER:-ferry}
+      - --btc-rpc-pass=${BTC_RPC_PASS:?set BTC_RPC_PASS}
+      - --zec=devtool
+      - --zec-network=test
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --api-allow-remote
+      - --ui-origin=${PUBLIC_ORIGIN:-http://localhost}
+      - --t1=${T1:-6}
+      - --t2=${T2:-6}
+      - --delta=${DELTA:-2}
+      - --btc-lock-confs=${BTC_LOCK_CONFS:-1}
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --cancel-confs=${CANCEL_CONFS:-1}
+      - --fee-sat=${FEE_SAT:-1500}
+      - --poll-ms=${POLL_MS:-5000}
+    environment:
+      FERRY_TOKEN: ${FERRY_Z_TOKEN}
+    volumes:
+      - ferryd-z:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -H \"authorization: Bearer $$FERRY_TOKEN\" http://127.0.0.1:7101/api/status >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/deploy/Dockerfile.web
+    image: ferry-web:local
+    restart: unless-stopped
+    depends_on: [ferryd-z, ferryd-b]
+    environment:
+      PORT: "8080"
+      FERRY_Z_URL: http://ferryd-z:7101
+      FERRY_B_URL: http://ferryd-b:7102
+      FERRY_MAKER_URL: http://ferryd-b:7112
+      FERRY_Z_TOKEN: ${FERRY_Z_TOKEN}
+      FERRY_B_TOKEN: ${FERRY_B_TOKEN}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost}
+      TRUST_PROXY: "1"
+      DEMO_MAX_ZAT: ${DEMO_MAX_ZAT:-50000000}
+      DEMO_RATE_PER_HOUR: ${DEMO_RATE_PER_HOUR:-3}
+      DEMO_FAULTS: ${DEMO_FAULTS:-0}
+    # Coolify's reverse proxy attaches here
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+    networks: [internal]
+
+networks:
+  internal: {}
+
+volumes:
+  bitcoind: {}
+  ferryd-b: {}
+  ferryd-z: {}
