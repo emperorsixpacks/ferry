@@ -1,8 +1,8 @@
 {
   "rewrites": [
     {
-      "source": "/daemon/:role",
-      "destination": "/api/daemon-proxy?role=:role"
+      "source": "/daemon/:path*",
+      "destination": "http://vaqaxhvocuvf1rnukimkfvql.161.35.55.45.sslip.io/daemon/:path*"
     },
     {
       "source": "/api/:path*",

@@ -13,6 +13,16 @@ x-ferryd: &ferryd
   networks: [internal, coolify]
   stop_grace_period: 30s
 
+# The EVM pairs (USDC, WETH on Base Sepolia): same image, no bitcoind, an EVM key from a volume.
+x-ferryd-evm: &ferryd-evm
+  build:
+    context: .
+    dockerfile: infra/deploy/Dockerfile.ferryd
+  image: ferry-ferryd:local
+  restart: unless-stopped
+  networks: [internal, coolify]
+  stop_grace_period: 30s
+
 services:
   bitcoind:
     image: bitcoin/bitcoin:28.1
@@ -128,6 +138,210 @@ services:
       timeout: 10s
       start_period: 60s
 
+  # ---------------------------------------------------------------- ZEC/USDC on Base Sepolia
+
+  ferryd-b-usdc-base:
+    <<: *ferryd-evm
+    command:
+      - --counter=evm
+      - --role=b
+      - --name=bram
+      - --api-listen=0.0.0.0:7102
+      - --listen=0.0.0.0:7112
+      - --public-url=http://ferryd-b-usdc-base:7112
+      - --api-token=${FERRY_USDC_BASE_B_TOKEN}
+      - --maker-offer=${USDC_RATE:-40000000}:${USDC_MIN_ZAT:-1000000}:${USDC_MAX_ZAT:-25000000}
+      - --maker-price-feed=${USDC_PRICE_FEED:-off}
+      - --maker-price-pair=ZEC/USDC
+      - --maker-spread-bps=${USDC_SPREAD_BPS:-0}
+      - --data-dir=/data
+      - --evm-rpc=${BASE_SEPOLIA_RPC:-https://sepolia.base.org}
+      - --evm-contract=${BASE_SEPOLIA_FERRYLOCK:-0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef}
+      - --evm-token=${BASE_SEPOLIA_USDC:-0x036CbD53842c5426634e7929541eC2318f3dCF7e}
+      - --evm-token-symbol=USDC
+      - --evm-token-decimals=6
+      - --evm-key-file=/run/evm/usdc-base-b.key
+      - --evm-t1-secs=${EVM_T1_SECS:-2700}
+      - --evm-refund-secs=${EVM_REFUND_SECS:-1800}
+      - --evm-delta-secs=${EVM_DELTA_SECS:-300}
+      - --evm-lock-confs=${EVM_LOCK_CONFS:-10}
+      - --evm-log-chunk=${EVM_LOG_CHUNK:-200}
+      - --zec=devtool
+      - --zec-network=test
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --api-allow-remote
+      - --ui-origin=${PUBLIC_ORIGIN:-http://localhost}
+      - --poll-ms=${EVM_POLL_MS:-4000}
+    environment:
+      FERRY_TOKEN: ${FERRY_USDC_BASE_B_TOKEN}
+    volumes:
+      - ferryd-b-usdc-base:/data
+      - evm-keys:/run/evm:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'curl -sf -H "authorization: Bearer $$FERRY_TOKEN" http://127.0.0.1:7102/api/status >/dev/null',
+        ]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+
+  ferryd-z-usdc-base:
+    <<: *ferryd-evm
+    command:
+      - --counter=evm
+      - --role=z
+      - --name=zoe
+      - --api-listen=0.0.0.0:7101
+      - --listen=0.0.0.0:7111
+      - --public-url=http://ferryd-z-usdc-base:7111
+      - --api-token=${FERRY_USDC_BASE_TOKEN}
+      - --maker-offer=${USDC_RATE:-40000000}:${USDC_MIN_ZAT:-1000000}:${USDC_MAX_ZAT:-25000000}
+      - --maker-price-feed=${USDC_PRICE_FEED:-off}
+      - --maker-price-pair=ZEC/USDC
+      - --maker-spread-bps=${USDC_SPREAD_BPS:-0}
+      - --data-dir=/data
+      - --evm-rpc=${BASE_SEPOLIA_RPC:-https://sepolia.base.org}
+      - --evm-contract=${BASE_SEPOLIA_FERRYLOCK:-0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef}
+      - --evm-token=${BASE_SEPOLIA_USDC:-0x036CbD53842c5426634e7929541eC2318f3dCF7e}
+      - --evm-token-symbol=USDC
+      - --evm-token-decimals=6
+      - --evm-key-file=/run/evm/usdc-base-z.key
+      - --evm-t1-secs=${EVM_T1_SECS:-2700}
+      - --evm-refund-secs=${EVM_REFUND_SECS:-1800}
+      - --evm-delta-secs=${EVM_DELTA_SECS:-300}
+      - --evm-lock-confs=${EVM_LOCK_CONFS:-10}
+      - --evm-log-chunk=${EVM_LOG_CHUNK:-200}
+      - --zec=devtool
+      - --zec-network=test
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --api-allow-remote
+      - --ui-origin=${PUBLIC_ORIGIN:-http://localhost}
+      - --poll-ms=${EVM_POLL_MS:-4000}
+    environment:
+      FERRY_TOKEN: ${FERRY_USDC_BASE_TOKEN}
+    volumes:
+      - ferryd-z-usdc-base:/data
+      - evm-keys:/run/evm:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'curl -sf -H "authorization: Bearer $$FERRY_TOKEN" http://127.0.0.1:7101/api/status >/dev/null',
+        ]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+
+  # ---------------------------------------------------------------- ZEC/WETH on Base Sepolia
+
+  ferryd-b-weth-base:
+    <<: *ferryd-evm
+    command:
+      - --counter=evm
+      - --role=b
+      - --name=bram
+      - --api-listen=0.0.0.0:7102
+      - --listen=0.0.0.0:7112
+      - --public-url=http://ferryd-b-weth-base:7112
+      - --api-token=${FERRY_WETH_BASE_B_TOKEN}
+      - --maker-offer=${WETH_RATE:-12000000000000000}:${WETH_MIN_ZAT:-1000000}:${WETH_MAX_ZAT:-25000000}
+      - --maker-price-feed=${WETH_PRICE_FEED:-off}
+      - --maker-price-pair=ZEC/ETH
+      - --maker-spread-bps=${WETH_SPREAD_BPS:-0}
+      - --data-dir=/data
+      - --evm-rpc=${BASE_SEPOLIA_RPC:-https://sepolia.base.org}
+      - --evm-contract=${BASE_SEPOLIA_FERRYLOCK:-0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef}
+      - --evm-token=${BASE_SEPOLIA_WETH:-0x4200000000000000000000000000000000000006}
+      - --evm-token-symbol=WETH
+      - --evm-token-decimals=18
+      - --evm-key-file=/run/evm/weth-base-b.key
+      - --evm-t1-secs=${EVM_T1_SECS:-2700}
+      - --evm-refund-secs=${EVM_REFUND_SECS:-1800}
+      - --evm-delta-secs=${EVM_DELTA_SECS:-300}
+      - --evm-lock-confs=${EVM_LOCK_CONFS:-10}
+      - --evm-log-chunk=${EVM_LOG_CHUNK:-200}
+      - --zec=devtool
+      - --zec-network=test
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --api-allow-remote
+      - --ui-origin=${PUBLIC_ORIGIN:-http://localhost}
+      - --poll-ms=${EVM_POLL_MS:-4000}
+    environment:
+      FERRY_TOKEN: ${FERRY_WETH_BASE_B_TOKEN}
+    volumes:
+      - ferryd-b-weth-base:/data
+      - evm-keys:/run/evm:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'curl -sf -H "authorization: Bearer $$FERRY_TOKEN" http://127.0.0.1:7102/api/status >/dev/null',
+        ]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+
+  ferryd-z-weth-base:
+    <<: *ferryd-evm
+    command:
+      - --counter=evm
+      - --role=z
+      - --name=zoe
+      - --api-listen=0.0.0.0:7101
+      - --listen=0.0.0.0:7111
+      - --public-url=http://ferryd-z-weth-base:7111
+      - --api-token=${FERRY_WETH_BASE_TOKEN}
+      - --maker-offer=${WETH_RATE:-12000000000000000}:${WETH_MIN_ZAT:-1000000}:${WETH_MAX_ZAT:-25000000}
+      - --maker-price-feed=${WETH_PRICE_FEED:-off}
+      - --maker-price-pair=ZEC/ETH
+      - --maker-spread-bps=${WETH_SPREAD_BPS:-0}
+      - --data-dir=/data
+      - --evm-rpc=${BASE_SEPOLIA_RPC:-https://sepolia.base.org}
+      - --evm-contract=${BASE_SEPOLIA_FERRYLOCK:-0x74b775EA7Bc7a2b2688b7A72Da5dee674BBd65Ef}
+      - --evm-token=${BASE_SEPOLIA_WETH:-0x4200000000000000000000000000000000000006}
+      - --evm-token-symbol=WETH
+      - --evm-token-decimals=18
+      - --evm-key-file=/run/evm/weth-base-z.key
+      - --evm-t1-secs=${EVM_T1_SECS:-2700}
+      - --evm-refund-secs=${EVM_REFUND_SECS:-1800}
+      - --evm-delta-secs=${EVM_DELTA_SECS:-300}
+      - --evm-lock-confs=${EVM_LOCK_CONFS:-10}
+      - --evm-log-chunk=${EVM_LOG_CHUNK:-200}
+      - --zec=devtool
+      - --zec-network=test
+      - --zec-server=${ZEC_SERVER:-testnet.zec.rocks:443}
+      - --zec-devtool=/usr/local/bin/zcash-devtool
+      - --zec-signer=/usr/local/bin/ferry-zec-signer
+      - --zec-confs=${ZEC_CONFS:-3}
+      - --api-allow-remote
+      - --ui-origin=${PUBLIC_ORIGIN:-http://localhost}
+      - --poll-ms=${EVM_POLL_MS:-4000}
+    environment:
+      FERRY_TOKEN: ${FERRY_WETH_BASE_TOKEN}
+    volumes:
+      - ferryd-z-weth-base:/data
+      - evm-keys:/run/evm:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'curl -sf -H "authorization: Bearer $$FERRY_TOKEN" http://127.0.0.1:7101/api/status >/dev/null',
+        ]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+
   web:
     build:
       context: .
@@ -144,6 +358,16 @@ services:
       FERRY_Z_TOKEN: ${FERRY_Z_TOKEN}
       FERRY_B_TOKEN: ${FERRY_B_TOKEN}
       FERRY_MAKER_URL: http://ferryd-b:7112
+      # The optional pairs' daemons, reachable on the internal network. A pair is offered only when
+      # both its Z and B URLs are set; BUY_ZEC below is what turns on buying ZEC on a pair.
+      FERRY_USDC_BASE_URL: http://ferryd-z-usdc-base:7101
+      FERRY_USDC_BASE_TOKEN: ${FERRY_USDC_BASE_TOKEN:-}
+      FERRY_WETH_BASE_URL: http://ferryd-z-weth-base:7101
+      FERRY_WETH_BASE_TOKEN: ${FERRY_WETH_BASE_TOKEN:-}
+      FERRY_USDC_BASE_B_URL: http://ferryd-b-usdc-base:7102
+      FERRY_USDC_BASE_B_TOKEN: ${FERRY_USDC_BASE_B_TOKEN:-}
+      FERRY_WETH_BASE_B_URL: http://ferryd-b-weth-base:7102
+      FERRY_WETH_BASE_B_TOKEN: ${FERRY_WETH_BASE_B_TOKEN:-}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost}
       DEMO_MAX_ZAT: ${DEMO_MAX_ZAT:-50000000}
       DEMO_RATE_PER_HOUR: ${DEMO_RATE_PER_HOUR:-3}
@@ -163,5 +387,10 @@ networks:
 
 volumes:
   bitcoind: {}
+  evm-keys: {}
   ferryd-b: {}
   ferryd-z: {}
+  ferryd-b-usdc-base: {}
+  ferryd-z-usdc-base: {}
+  ferryd-b-weth-base: {}
+  ferryd-z-weth-base: {}
