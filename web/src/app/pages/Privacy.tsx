@@ -642,7 +642,7 @@ const LIMITS: [string, string][] = [
   ],
   ["On Base, a swap looks like a swap", "Every step there is a public call to Ferry's contract, with the amount. Your node uses one account for its swaps there, so they link to each other."],
   ["A called-off swap shows its shape", "On Bitcoin, only a swap that completes looks ordinary. A refund or a penalty is visibly a swap."],
-  ["Early software", "Ferry has run on test networks only: 17 live swaps on public test networks, and local tests. Nothing on mainnet, and no independent review."],
+  ["Early software", "Ferry has run on test networks only: 18 live swaps on public test networks, and local tests. Nothing on mainnet, and no independent review."],
 ];
 
 function Limits() {

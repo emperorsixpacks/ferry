@@ -287,10 +287,10 @@ This is a known critique of this design, so here it is exactly:
 - **Not quantum-recoverable.** The shared shielded address uses a key built in a way that Zcash's
   quantum-recovery plan doesn't cover [ZIP 2005]. The address is single-use and short-lived, and
   today's FROST multisig setups use the same method.
-- **Test networks so far.** Seventeen live swaps on public test networks (ZEC ⇄ USDC and ZEC ⇄ WETH
-  on Base Sepolia, 2026-10-20 to 2026-10-22; ZEC ⇄ BTC on Bitcoin signet and LTC → ZEC on Litecoin
-  testnet, 2026-10-23) and a full local test with real shielded notes. Nothing has run on mainnet, and
-  nobody outside the project has reviewed Ferry ([WHAT-IS-REAL.md](WHAT-IS-REAL.md)).
+- **Test networks so far.** Eighteen live swaps on public test networks (ZEC ⇄ USDC and ZEC ⇄ WETH
+  on Base Sepolia, 2026-10-20 to 2026-10-22 and 2026-10-26; ZEC ⇄ BTC on Bitcoin signet and LTC → ZEC
+  on Litecoin testnet, 2026-10-23) and a full local test with real shielded notes. Nothing has run
+  on mainnet, and nobody outside the project has reviewed Ferry ([WHAT-IS-REAL.md](WHAT-IS-REAL.md)).
 
 ## USDC on Base
 

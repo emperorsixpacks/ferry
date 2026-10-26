@@ -48,7 +48,7 @@ that reach other chains without unshielding on the way through.*
   `FerryLock`, a small contract.
 - **Both directions.** Sell ZEC for a coin, or buy shielded ZEC with one: the swap card flips
   between them.
-- **Live on public test networks.** [17 swaps](#what-has-run) with real shielded notes on Zcash
+- **Live on public test networks.** [18 swaps](#what-has-run) with real shielded notes on Zcash
   testnet, Bitcoin signet, Litecoin testnet and Base Sepolia, each with public transactions.
 - **Backstops at the deadlines.** A watchtower can act at the deadlines for an offline party, and a
   child-pays-for-parent fee bump (off by default) can push a stuck Bitcoin or Litecoin claim,
@@ -275,7 +275,7 @@ What Ferry still can't hide, and why, is in [THREAT-MODEL.md](docs/THREAT-MODEL.
 
 ## What has run
 
-Seventeen swaps on public test networks, all with real shielded notes. We ran both sides. The
+Eighteen swaps on public test networks, all with real shielded notes. We ran both sides. The
 other coin's transactions can be checked on public explorers; the Zcash side is shielded.
 
 | Swap | Networks | Start to finish | Public transactions |
@@ -286,6 +286,7 @@ other coin's transactions can be checked on public explorers; the Zcash side is 
 | ZEC → BTC (2026-10-23) | Zcash testnet, Bitcoin signet | 14.5 min | [lock](https://mempool.space/signet/tx/f3021217123129e1c55032e1cf5a74557f4aa5b40bd154c6235b5e01405c39f4), [claim](https://mempool.space/signet/tx/472b3d9389133612e644438d5ebfb6326ed747e843034c2dd2c70f4fcd1ef12b) |
 | BTC → ZEC (2026-10-23) | Zcash testnet, Bitcoin signet | under 11 min | [lock](https://mempool.space/signet/tx/5dcfc7974129091ccd70fac74836c32f6438798a3f17734e38e4756c97907bcf), [claim](https://mempool.space/signet/tx/a9a288f6113e6050295e15b2033d7fc3f14863f31e782756fbb10da864e969cf) |
 | LTC → ZEC (2026-10-23) | Zcash testnet, Litecoin testnet | under 25 min | [lock](https://litecoinspace.org/testnet/tx/e64f6b248c7cdfd8cf7c655be36cef2c324711d8ac21a0eddafd99d764b13cad), [claim](https://litecoinspace.org/testnet/tx/c7e52a8e36fc4b3549034c9256d35bf5210a74d19065d6b15b7fbda3b22403c8) |
+| ZEC → USDC on a fresh one-command node, then Send to my wallet (2026-10-26) | Zcash testnet, Base Sepolia | 2.5 min | [lock](https://sepolia.basescan.org/tx/0x9dc4ec158bf4e4054d040a3b951574b60608c2dc9ba537659d5dbeaae9d44be3), [claim](https://sepolia.basescan.org/tx/0xdae866e91d2e919c45eca953b24fee57e6d7feaeec0a15232010bab5a20969a8) |
 
 Refunds and penalties have run on regtest (Bitcoin and Litecoin) and on a fork of Base Sepolia, not
 yet on a public test network. Nothing has run on mainnet. The full record, and every mock used in

@@ -84,7 +84,7 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
         q: "Is it safe to use with real money?",
         a: (
           <>
-            Not yet. Ferry has run on test networks only (17 live swaps on public test networks, and local tests) and hasn't been independently reviewed. Its
+            Not yet. Ferry has run on test networks only (18 live swaps on public test networks, and local tests) and hasn't been independently reviewed. Its
             cross-chain proof is unaudited, so a node's mainnet mode caps each swap at 0.02 ZEC. <A to="/safety">Safety details</A> lists every known limit.
           </>
         ),
