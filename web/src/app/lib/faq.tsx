@@ -31,7 +31,13 @@ export const FAQ_GROUPS: { title: string; items: Faq[] }[] = [
       },
       {
         q: "What is my Ferry node?",
-        a: "The small program that holds your keys and does the swap for you. This app talks to it; your coins never pass through a Ferry server, because there isn't one. On the public demo we run a node with test coins for you, and the partner on the other side too, so you can try it without installing anything.",
+        a: (
+          <>
+            The small program that holds your keys and does the swap for you. This app talks to it; your coins never pass through a Ferry server, because there isn't one. On the
+            public demo we run a node with test coins for you, and the partner on the other side too, so you can try it without installing anything. To swap with your own keys,{" "}
+            <A to="/run-a-node">run your own node</A>: one command on your computer.
+          </>
+        ),
       },
       {
         q: "Why is there no “Connect wallet” button?",

@@ -1,8 +1,9 @@
 import { Suspense, lazy, useEffect, useMemo, useState, type ReactNode } from "react";
-import { ArrowUpRight, Check, CircleNotch, Info, PaperPlaneTilt, Plus, Wallet as WalletIcon, Warning, WarningCircle } from "@phosphor-icons/react";
+import { ArrowRight, Check, CircleNotch, Info, PaperPlaneTilt, Plus, Wallet as WalletIcon, Warning, WarningCircle } from "@phosphor-icons/react";
 import { getAddresses, previewSend, sendOut, type Addresses, type SendAsset, type Withdrawal } from "@/api";
+import { Link } from "@/router";
 import { CopyText } from "../components/CopyText";
-import { Layout, PageHeader, REPO_URL } from "../components/Layout";
+import { Layout, PageHeader } from "../components/Layout";
 import { ChainLogo, PairLogo, TokenLogo } from "../components/Logos";
 import { QrCode } from "../components/QrCode";
 import { ToneBadge } from "../components/ui/badge";
@@ -96,10 +97,10 @@ export function WalletPage() {
               {funds
                 ? "This is the public demo's node: you can add funds to it, but not send its coins out. On your own Ferry node you can do both. "
                 : "This is the public demo's node, so you can look but not move its coins. On your own Ferry node, this is where you add funds and send coins to your own wallet. "}
-              <a href={REPO_URL} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 font-medium text-slate-900 underline-offset-4 hover:underline">
+              <Link to="/run-a-node" className="inline-flex items-center gap-0.5 font-medium text-slate-900 underline-offset-4 hover:underline">
                 Run your own node
-                <ArrowUpRight size={12} weight="bold" aria-hidden />
-              </a>
+                <ArrowRight size={12} weight="bold" aria-hidden />
+              </Link>
             </p>
           </div>
         ) : null}

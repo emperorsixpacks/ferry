@@ -1,4 +1,4 @@
-import { ArrowRight, BookOpen, EyeSlash, ShieldCheck } from "@phosphor-icons/react";
+import { ArrowRight, BookOpen, EyeSlash, ShieldCheck, Terminal } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { Link } from "@/router";
 import { FaqList } from "../components/FaqList";
@@ -40,6 +40,13 @@ export function Help() {
           />
           <Deeper to="/how-it-works" icon={<BookOpen size={20} weight="regular" />} title="The full explanation" body="How a swap works, step by step, in plain words." />
           <Deeper to="/safety" icon={<ShieldCheck size={20} weight="regular" />} title="Every way it can go wrong" body="Who you trust, each failure case, and what each side ends up with." />
+          <Deeper
+            to="/run-a-node"
+            icon={<Terminal size={20} weight="regular" />}
+            title="Run your own node"
+            body="One command on your computer, then swap with your own keys and free test coins."
+            className="sm:col-span-2"
+          />
         </div>
       </div>
     </Layout>

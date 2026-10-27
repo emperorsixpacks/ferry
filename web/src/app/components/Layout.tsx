@@ -11,14 +11,15 @@ import { PairLogo, TokenLogo } from "./Logos";
 import { Fold } from "./ui/fold";
 import { Popover } from "./ui/popover";
 
-// The app shell: a sticky header across the full width (the mark on the left; Swap and Help
-// as a segmented pill in the true centre; the network and your account on the
+// The app shell: a sticky header across the full width (the mark on the left; Swap, Run a node
+// and Help as a segmented pill in the true centre; the network and your account on the
 // right, or "Start a swap" on the landing) and a footer with the deeper pages. Below md the tabs get
 // their own row, the same pill centred, so they stay one tap away on a phone.
 
 const nav = [
   { to: "/app", label: "Swap", match: (p: string) => p === "/app" || p === "/app/activity" || p.startsWith("/app/swap/") || p.startsWith("/app/route/") || p.startsWith("/app/near/") },
   // Ramp (Naira on- and off-ramp, /ramp) stays out of the header until it is built
+  { to: "/run-a-node", label: "Run a node", match: (p: string) => p === "/run-a-node" },
   { to: "/help", label: "Help", match: (p: string) => p === "/help" || p === "/how-it-works" || p === "/safety" || p === "/privacy" },
 ];
 
@@ -77,7 +78,7 @@ export function SiteHeader({ landing = false }: { landing?: boolean } = {}) {
   );
 }
 
-// Swap and Help on a light grey track; the page you're on is a white pill.
+// The tabs on a light grey track; the page you're on is a white pill.
 function Tabs({ tabs }: { tabs: { to: string; label: string; active: boolean }[] }) {
   return (
     <div className="flex items-center gap-0.5 rounded-full bg-slate-100 p-1">
@@ -248,6 +249,7 @@ function OfflineBanner({ error }: { error: string | null }) {
 // the footer's pages (the landing's closing footer shows the same ones)
 export const FOOTER_LINKS: [string, string][] = [
   ["Help", "/help"],
+  ["Run a node", "/run-a-node"],
   ["What the world sees", "/privacy"],
   ["Safety details", "/safety"],
   ["How it works in depth", "/how-it-works"],
