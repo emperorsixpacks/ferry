@@ -1,0 +1,54 @@
+name: Build and push images
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "crates/**"
+      - "third_party/**"
+      - "tools/**"
+      - "infra/deploy/**"
+      - "web/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "docker-compose.coolify.yml"
+      - ".github/workflows/build-images.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ferryd
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/deploy/Dockerfile.ferryd
+          push: true
+          tags: ghcr.io/emperorsixpacks/ferry-ferryd:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/deploy/Dockerfile.web
+          push: true
+          tags: ghcr.io/emperorsixpacks/ferry-web:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
