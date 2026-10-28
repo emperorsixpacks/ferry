@@ -2,15 +2,15 @@
   "rewrites": [
     {
       "source": "/daemon/:path*",
-      "destination": "http://vaqaxhvocuvf1rnukimkfvql.161.35.55.45.sslip.io/daemon/:path*"
+      "destination": "http://pauwileate7vd5gea8e4dirq.162.35.105.32.sslip.io/daemon/:path*"
     },
     {
       "source": "/api/:path*",
-      "destination": "http://vaqaxhvocuvf1rnukimkfvql.161.35.55.45.sslip.io/api/:path*"
+      "destination": "http://pauwileate7vd5gea8e4dirq.162.35.105.32.sslip.io/api/:path*"
     },
     {
       "source": "/router/:path*",
-      "destination": "http://vaqaxhvocuvf1rnukimkfvql.161.35.55.45.sslip.io/router/:path*"
+      "destination": "http://pauwileate7vd5gea8e4dirq.162.35.105.32.sslip.io/router/:path*"
     },
     {
       "source": "/:path((?!api|daemon|assets|vite|index|favicon).*)",
