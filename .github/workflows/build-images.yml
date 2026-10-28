@@ -40,8 +40,6 @@ jobs:
           file: infra/deploy/Dockerfile.ferryd
           push: true
           tags: ghcr.io/emperorsixpacks/ferry-ferryd:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Build and push web
         uses: docker/build-push-action@v6
@@ -50,5 +48,3 @@ jobs:
           file: infra/deploy/Dockerfile.web
           push: true
           tags: ghcr.io/emperorsixpacks/ferry-web:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
